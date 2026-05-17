@@ -1,0 +1,67 @@
+# @verevoir/llm
+
+Provider-agnostic LLM call surface with token + cost accounting.
+
+## Purpose
+
+Lets a downstream project make LLM calls with retry-friendly errors, token
+accounting, and per-direction cost tracking, without coupling to a specific
+provider SDK. Pick the provider you use via a subpath import; the unused SDK
+does not enter your bundle.
+
+## Subpaths
+
+- `@verevoir/llm` — core types and the `chat()` contract. No SDK dependency.
+- `@verevoir/llm/anthropic` — Anthropic SDK adapter. Requires `@anthropic-ai/sdk`.
+- `@verevoir/llm/google` — Google SDK adapter (planned). Requires `@google/genai`.
+
+## Install
+
+```bash
+npm install @verevoir/llm @anthropic-ai/sdk
+```
+
+The package's `peerDependencies` are marked optional — install only the SDK(s)
+you import.
+
+## Canonical usage
+
+```ts
+import { anthropic } from '@verevoir/llm/anthropic';
+
+const reply = await anthropic.chat({
+  systemPrompt: '...',
+  turns: [{ role: 'user', content: '...' }],
+  apiKey: process.env.ANTHROPIC_API_KEY!,
+  modelClass: 'reasoning', // or 'extraction'
+});
+
+// reply.content: string
+// reply.usage:   { provider, model, direction, inputTokens, outputTokens, ... }
+```
+
+## Cost accounting
+
+Every call returns a `TokenUsage` typed
+`{ provider, model, direction, inputTokens, outputTokens, ... }`. The core
+export ships `sumUsages` to roll up across calls, `formatTokensCompact` for
+compact displays, and per-model rate tables so usage converts to a cost
+estimate without external lookups.
+
+The `direction` field carries the model-class semantic (`reasoning` /
+`extraction`) so per-conversation / per-project rollups can break down "spent
+X on reasoning + Y on extraction" natively.
+
+## Status
+
+`v0` in progress. The surface and types are being extracted from a private
+consumer; the published version's call sites throw until the implementation
+lands. Track progress on the repo's CHANGELOG.
+
+## Repository
+
+`git@github.com:verevoir/llm.git`
+
+## License
+
+Apache-2.0.
