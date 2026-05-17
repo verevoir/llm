@@ -1,34 +1,44 @@
 /**
  * @verevoir/llm — provider-agnostic LLM call surface.
  *
- * The core export holds shared types and the `chat()` contract; SDK
- * adapters live in subpaths (./anthropic, ./google). Consumers import
- * the subpaths they use; the unused provider SDK never enters their
+ * The core export holds shared types, accounting helpers, and the
+ * `chat()` contract that every provider adapter implements. SDK
+ * adapters live in subpaths (./anthropic, ./google planned). Consumers
+ * import the subpath(s) they use; the unused SDK never enters their
  * bundle.
- *
- * The concrete implementation is being extracted from a private
- * consumer. Types here are the published surface; the adapter
- * implementations in subpaths land with the extraction slice.
  */
 
+// ────────────────────────────────────────────────────────────────────
+// Core types
+// ────────────────────────────────────────────────────────────────────
+
 /**
- * Model-class semantic — what kind of work the call is doing. Adapters
- * map each class to a concrete provider model id (e.g. `reasoning` →
- * `claude-opus-4-7` on Anthropic). Carried through to `TokenUsage` so
- * cost rollups can break down spend by direction.
+ * Model-class semantic — what kind of work the call is doing.
+ *
+ * - `reasoning`: open-ended judgement, cross-document synthesis,
+ *   nuanced chat. The conservative default for sites that have to
+ *   think across context.
+ * - `extraction`: structured turn-text-into-shape tasks (URLs from a
+ *   conversation, config from a paragraph). Quick, predictable,
+ *   constrained output. Smallest competent model.
+ *
+ * Adapters map each class to a concrete provider model id (e.g.
+ * `reasoning` → `claude-opus-4-7` on Anthropic). The class travels
+ * through to {@link TokenUsage} as `direction` so cost rollups can
+ * break down spend per direction natively.
  */
 export type ModelClass = 'reasoning' | 'extraction';
 
-/** A single message in a conversation passed to `chat()`. */
+/** A single message in a conversation. */
 export interface Turn {
   role: 'user' | 'assistant';
   content: string;
 }
 
 /**
- * Per-call token + provenance record. Returned alongside every reply so
- * the consumer can persist per-direction usage and compute costs without
- * a second round-trip.
+ * Per-call token + provenance record. Returned alongside every reply.
+ * The (provider, model, direction) triple is the model-direction grid
+ * used for cost rollups.
  */
 export interface TokenUsage {
   /** Provider id, e.g. `anthropic`, `google`. */
@@ -47,22 +57,202 @@ export interface TokenUsage {
   cacheReadInputTokens: number;
 }
 
+/** Live-progress narration emitted by the model during a long call. */
+export interface ProgressInfo {
+  /** Progress in 5–90 (the system handles 0 and 100). */
+  percent: number;
+  /** Short customer-facing status message. */
+  message: string;
+}
+
+/** Information passed to {@link ChatOptions.onRetry} before each retry. */
+export interface ChatRetryInfo {
+  /** 1-indexed retry attempt; the original call is attempt 0. */
+  attempt: number;
+  /** Total retries that will be made before giving up. */
+  maxAttempts: number;
+  /** Milliseconds we're about to wait before this retry. */
+  delayMs: number;
+  /** Short human-readable reason — suitable for chat narration. */
+  reason: string;
+}
+
 /** Options for a single LLM call. */
 export interface ChatOptions {
   systemPrompt: string;
   turns: Turn[];
-  apiKey: string;
+  /**
+   * Per-user (BYOK) API key. When null/undefined the adapter falls
+   * back to the platform default (e.g. an env var).
+   */
+  apiKey?: string | null;
+  /** Defaults to `'reasoning'` — the conservative choice. */
   modelClass?: ModelClass;
+  /**
+   * Optional hook invoked before each retry. Best-effort; the adapter
+   * never lets a callback failure block the retry.
+   */
+  onRetry?: (info: ChatRetryInfo) => Promise<void>;
+  /** Optional hook invoked after a successful call with token usage. */
+  onUsage?: (usage: TokenUsage) => Promise<void>;
+  /**
+   * Optional hook invoked LIVE during the call when the model emits
+   * `report_progress`. When set, the adapter auto-injects the
+   * `report_progress` tool into the request.
+   */
+  onProgress?: (info: ProgressInfo) => Promise<void>;
 }
 
-/** Result of a single LLM call. */
+/** Result of a single LLM call via {@link chat}. */
 export interface ChatReply {
+  /** The assembled text content of the reply. */
   content: string;
+  /** Token usage for the call. */
+  usage: TokenUsage;
+  /** The provider's stop reason — `'end_turn'` for normal completion. */
+  stopReason: string;
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Tool-calling
+// ────────────────────────────────────────────────────────────────────
+
+/** Definition of a tool the model can choose to invoke. */
+export interface ToolDef {
+  name: string;
+  description: string;
+  input_schema: {
+    type: 'object';
+    properties: Record<string, { type: string; description?: string }>;
+    required?: string[];
+  };
+}
+
+/** A single tool_use the model emitted in its reply. */
+export interface ToolUse {
+  id: string;
+  name: string;
+  input: Record<string, unknown>;
+}
+
+/** Options for {@link chatWithTools}. */
+export interface ChatWithToolsOptions extends ChatOptions {
+  tools: ToolDef[];
+}
+
+/** Result of a single LLM call via {@link chatWithTools}. */
+export interface ChatWithToolsResult {
+  toolUses: ToolUse[];
+  text: string;
+  stopReason: string;
   usage: TokenUsage;
 }
 
+// ────────────────────────────────────────────────────────────────────
+// Accounting helpers
+// ────────────────────────────────────────────────────────────────────
+
 /**
- * Per-model rollup keyed by concrete model id. Returned by
- * `sumUsages` and consumed by display helpers.
+ * Per-model rollup keyed by concrete model id. Produced by
+ * {@link sumUsages}; consumed by display helpers.
  */
 export type PerModelUsage = Record<string, { in: number; out: number }>;
+
+/**
+ * Parse a JSON-serialised {@link PerModelUsage} produced by a previous
+ * call, returning an empty rollup on malformed/empty input.
+ */
+export function parseUsage(json: string): PerModelUsage {
+  if (!json) return {};
+  try {
+    const parsed = JSON.parse(json);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed as PerModelUsage;
+    }
+  } catch {
+    // Malformed JSON — treat as empty.
+  }
+  return {};
+}
+
+/** Sum multiple {@link PerModelUsage} rollups into one. */
+export function sumUsages(usages: PerModelUsage[]): PerModelUsage {
+  const out: PerModelUsage = {};
+  for (const u of usages) {
+    for (const [model, vals] of Object.entries(u)) {
+      const existing = out[model] ?? { in: 0, out: 0 };
+      existing.in += vals.in;
+      existing.out += vals.out;
+      out[model] = existing;
+    }
+  }
+  return out;
+}
+
+/** Total tokens across all models in a rollup (input + output). */
+export function totalTokens(usage: PerModelUsage): number {
+  let total = 0;
+  for (const v of Object.values(usage)) total += v.in + v.out;
+  return total;
+}
+
+/**
+ * Compact token total — `123`, `12.3k`, `12k`, `1.2M`. Drops trailing
+ * `.0` so round numbers don't look gawky.
+ */
+export function formatTokensCompact(n: number): string {
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) {
+    return `${(n / 1000).toFixed(1).replace(/\.0$/, '')}k`;
+  }
+  return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`;
+}
+
+/**
+ * Tuple of `[input_per_million_USD, output_per_million_USD]`. Adapters
+ * export their own rate tables for the consumer to feed into cost
+ * helpers.
+ */
+export type RateTuple = readonly [number, number];
+
+/** Per-model rate table — `model id → [input_per_mtok, output_per_mtok]`. */
+export type RatesTable = Readonly<Record<string, RateTuple>>;
+
+/**
+ * Estimate the USD cost of a per-model rollup against an adapter's
+ * rate table. Worst-case treatment: cache reads count at the standard
+ * input rate (typically ~10× the real cache-read rate), so the result
+ * is an upper bound on the actual bill.
+ *
+ * Unknown models contribute 0 to the total — the caller can detect
+ * coverage gaps by checking that every model in the rollup is in the
+ * rates table.
+ */
+export function estimateCostUSD(usage: PerModelUsage, rates: RatesTable): number {
+  let total = 0;
+  for (const [model, v] of Object.entries(usage)) {
+    const rate = rates[model];
+    if (!rate) continue;
+    const [inputRate, outputRate] = rate;
+    total += (v.in * inputRate + v.out * outputRate) / 1_000_000;
+  }
+  return total;
+}
+
+/**
+ * Friendly label registry for known model ids. Adapters merge their
+ * known models into this map; consumers can register their own
+ * additions. Falls back to the bare id for unknown models so we don't
+ * silently swallow them.
+ */
+const MODEL_LABELS: Record<string, string> = {};
+
+/** Register friendly labels for the given model ids. Idempotent. */
+export function registerModelLabels(labels: Record<string, string>): void {
+  Object.assign(MODEL_LABELS, labels);
+}
+
+/** Display label for a model id, falling back to the id itself. */
+export function modelLabel(id: string): string {
+  return MODEL_LABELS[id] ?? id;
+}

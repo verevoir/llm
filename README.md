@@ -43,11 +43,11 @@ The core export (`@verevoir/llm`) carries provider-agnostic types — `TokenUsag
 Each adapter lives under its own subpath so the unused provider SDK never
 enters the consumer's bundle:
 
-| Subpath                    | SDK dep            | Status   |
-| -------------------------- | ------------------ | -------- |
-| `@verevoir/llm`            | none               | extracting |
-| `@verevoir/llm/anthropic`  | `@anthropic-ai/sdk` | extracting |
-| `@verevoir/llm/google`     | `@google/genai`    | planned  |
+| Subpath                   | SDK dep             | Status     |
+| ------------------------- | ------------------- | ---------- |
+| `@verevoir/llm`           | none                | extracting |
+| `@verevoir/llm/anthropic` | `@anthropic-ai/sdk` | extracting |
+| `@verevoir/llm/google`    | `@google/genai`     | planned    |
 
 Multi-provider deployments depend on the same `chat()` contract; consumers
 switch backends by importing a different subpath, not by changing call sites.

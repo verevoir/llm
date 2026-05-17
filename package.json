@@ -24,10 +24,12 @@
     "CHANGELOG.md"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "tsc -p tsconfig.build.json",
     "test": "vitest run",
+    "typecheck": "tsc --noEmit",
     "lint": "prettier --check .",
-    "format": "prettier --write ."
+    "format": "prettier --write .",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build"
   },
   "peerDependencies": {
     "@anthropic-ai/sdk": "*"
@@ -38,10 +40,11 @@
     }
   },
   "devDependencies": {
-    "@anthropic-ai/sdk": "^0.30.0",
+    "@anthropic-ai/sdk": "^0.95.1",
+    "@types/node": "^25.8.0",
     "prettier": "^3",
     "typescript": "^5",
-    "vitest": "^1"
+    "vitest": "^4"
   },
   "publishConfig": {
     "access": "public"
