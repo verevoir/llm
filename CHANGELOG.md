@@ -1,8 +1,11 @@
 # Changelog
 
-## [0.0.1] — unreleased
+## [0.1.0] — 2026-05-17
 
-First pre-publish: implementation ported from a private consumer.
+First deliberate release. **Pre-stable** — `0.x` line communicates that the API
+surface can shift before `1.0`. Bumps to `1.0` follow validation by the first
+real consumer (aigency-web migration). Implementation ported from a private
+consumer.
 
 ### Core (`@verevoir/llm`)
 
@@ -23,6 +26,7 @@ First pre-publish: implementation ported from a private consumer.
 - Vitest suite covering the pure-function helpers and the Anthropic adapter's exported tables.
 - Runnable example: `examples/anthropic-chat.ts`.
 
-## [0.0.0] — scaffold only
+## [0.0.0] — scaffold only, unpublished
 
 Initial repository scaffold per the [Verevoir publishing quality bar](https://github.com/verevoir/aigency).
+Never published to npm; the version is recorded here for posterity.

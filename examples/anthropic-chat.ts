@@ -10,8 +10,8 @@
  * (it's the optional peer dependency for this subpath).
  */
 
-import { anthropic } from '../src/anthropic/index.js';
-import { estimateCostUSD, formatTokensCompact, sumUsages } from '../src/index.js';
+import { anthropic } from '@verevoir/llm/anthropic';
+import { estimateCostUSD, formatTokensCompact, sumUsages } from '@verevoir/llm';
 
 async function main(): Promise<void> {
   const reply = await anthropic.chat({

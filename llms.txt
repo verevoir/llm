@@ -54,9 +54,9 @@ X on reasoning + Y on extraction" natively.
 
 ## Status
 
-`v0` in progress. The surface and types are being extracted from a private
-consumer; the published version's call sites throw until the implementation
-lands. Track progress on the repo's CHANGELOG.
+`0.1.0` shipped — first deliberate release. Pre-stable: the `0.x` line
+communicates that the API surface can shift before `1.0`. Track changes in
+the repo's CHANGELOG.
 
 ## Repository
 

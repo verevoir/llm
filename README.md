@@ -6,10 +6,9 @@ consumers only pay for the SDK they actually use.
 
 ## Status
 
-`v0` in progress — the surface is being extracted from a private consumer
-(aigency-web). The first published version targets Anthropic via
-`@verevoir/llm/anthropic`. Calls throw with "extraction in progress" until the
-implementation lands.
+**`0.1.0`** — first deliberate release. Pre-stable: the `0.x` line communicates
+that the API surface can shift before `1.0`. Bumps to `1.0` follow validation
+by the first real consumer.
 
 ## Install
 
@@ -43,11 +42,11 @@ The core export (`@verevoir/llm`) carries provider-agnostic types — `TokenUsag
 Each adapter lives under its own subpath so the unused provider SDK never
 enters the consumer's bundle:
 
-| Subpath                   | SDK dep             | Status     |
-| ------------------------- | ------------------- | ---------- |
-| `@verevoir/llm`           | none                | extracting |
-| `@verevoir/llm/anthropic` | `@anthropic-ai/sdk` | extracting |
-| `@verevoir/llm/google`    | `@google/genai`     | planned    |
+| Subpath                   | SDK dep             | Status  |
+| ------------------------- | ------------------- | ------- |
+| `@verevoir/llm`           | none                | shipped |
+| `@verevoir/llm/anthropic` | `@anthropic-ai/sdk` | shipped |
+| `@verevoir/llm/google`    | `@google/genai`     | planned |
 
 Multi-provider deployments depend on the same `chat()` contract; consumers
 switch backends by importing a different subpath, not by changing call sites.
