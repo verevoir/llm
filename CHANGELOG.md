@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.2.0] — 2026-05-18
+
+Multi-turn tool conversations + structured content blocks.
+
+### Core (`@verevoir/llm`)
+
+- `Turn.content` widens to `string | ContentBlock[]`. Plain strings still work; structured content unlocks tool loops and lays the schema for future multimodal blocks (image, document) without a second migration.
+- New `ContentBlock` discriminated union: `text`, `tool_use`, `tool_result`. Mirrors Anthropic's native SDK shape so the adapter doesn't translate.
+- New `ToolExecutor` type — the caller-supplied function that runs a single tool_use and returns the matching tool_result string.
+- New `ChatWithToolLoopOptions` / `ChatWithToolLoopResult` types describing the multi-turn shape.
+
+### Anthropic subpath (`@verevoir/llm/anthropic`)
+
+- New **`chatWithToolLoop()`** — runs the model → execute tools → feed `tool_result` blocks back loop internally until the model returns text-only (or `maxIterations` fires). Executor failures surface as `is_error: true` tool_results so the model can recover gracefully rather than crashing the conversation.
+- Per-iteration `onUsage` + `onIteration` hooks. Returned `usage` is summed across all iterations of the loop so per-conversation-turn accounting stays accurate.
+- `chat()` and `chatWithTools()` unchanged.
+
+### Compatibility
+
+- Backwards-compatible at the API surface: callers passing `Turn[]` with `content: string` get the same behaviour as 0.1.x.
+- Consumers using `chatWithTools()` with their own single-shot tool handling don't need to change; `chatWithToolLoop()` is purely additive.
+
 ## [0.1.0] — 2026-05-17
 
 First deliberate release. **Pre-stable** — `0.x` line communicates that the API

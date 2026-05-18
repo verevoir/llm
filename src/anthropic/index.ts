@@ -11,14 +11,18 @@ import {
   type ChatOptions,
   type ChatReply,
   type ChatRetryInfo,
+  type ChatWithToolLoopOptions,
+  type ChatWithToolLoopResult,
   type ChatWithToolsOptions,
   type ChatWithToolsResult,
+  type ContentBlock,
   type ModelClass,
   type ProgressInfo,
   type RatesTable,
   type ToolDef,
   type ToolUse,
   type TokenUsage,
+  type Turn,
   registerModelLabels,
 } from '../index.js';
 
@@ -123,7 +127,7 @@ function buildRequest({
 }: {
   modelClass: ModelClass;
   systemPrompt: string;
-  turns: { role: 'user' | 'assistant'; content: string }[];
+  turns: Turn[];
   tools?: ToolDef[];
 }): Record<string, unknown> {
   const base: Record<string, unknown> = {
@@ -411,6 +415,159 @@ export async function chatWithTools(options: ChatWithToolsOptions): Promise<Chat
 }
 
 /**
+ * Multi-turn tool-using chat. The caller supplies an executor; this
+ * function runs the model → execute tools → feed results back loop
+ * internally until the model produces a text-only response (or the
+ * iteration cap fires).
+ *
+ * Each loop iteration is a full Anthropic call. Tool execution
+ * happens between iterations; tool failures are surfaced to the model
+ * as `tool_result` blocks with `is_error: true` so it can recover
+ * (apologise, retry, switch approach) rather than the loop crashing.
+ *
+ * Usage and progress hooks fire per-iteration. Returned `usage` is
+ * the sum across all iterations of the loop, so cost accounting at
+ * the call site stays per-conversation-turn.
+ */
+export async function chatWithToolLoop(
+  options: ChatWithToolLoopOptions
+): Promise<ChatWithToolLoopResult> {
+  if (options.turns.length === 0) {
+    throw new Error('anthropic.chatWithToolLoop() requires at least one turn');
+  }
+  if (options.tools.length === 0) {
+    throw new Error('anthropic.chatWithToolLoop() requires at least one tool');
+  }
+  const modelClass: ModelClass = options.modelClass ?? 'reasoning';
+  const client = getClient(options.apiKey ?? null);
+  const augmentedTools = options.onProgress
+    ? [...options.tools, REPORT_PROGRESS_TOOL]
+    : options.tools;
+  const maxIterations = Math.max(1, options.maxIterations ?? 5);
+
+  // Working message history: we append to this as the loop progresses.
+  // The initial state mirrors what the consumer passed in.
+  let messages: Turn[] = [...options.turns];
+
+  const allToolUses: ToolUse[] = [];
+  const allToolResults: ChatWithToolLoopResult['toolResults'] = [];
+  const aggregateUsage: TokenUsage = {
+    provider: PROVIDER,
+    model: models[modelClass],
+    direction: modelClass,
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheCreationInputTokens: 0,
+    cacheReadInputTokens: 0,
+  };
+
+  let iteration = 0;
+  while (iteration < maxIterations) {
+    iteration += 1;
+
+    const request = buildRequest({
+      modelClass,
+      systemPrompt: options.systemPrompt,
+      turns: messages,
+      tools: augmentedTools,
+    });
+
+    const streamed = await callWithRetries(
+      () => callStreamed(client, request, options.onProgress),
+      options.onRetry
+    );
+
+    // Per-iteration usage hook + aggregate tally.
+    const iterUsage = shapeUsage(streamed.rawUsage, modelClass);
+    aggregateUsage.inputTokens += iterUsage.inputTokens;
+    aggregateUsage.outputTokens += iterUsage.outputTokens;
+    aggregateUsage.cacheCreationInputTokens += iterUsage.cacheCreationInputTokens;
+    aggregateUsage.cacheReadInputTokens += iterUsage.cacheReadInputTokens;
+    await fireUsageHook(options.onUsage, iterUsage, 'anthropic.chatWithToolLoop');
+
+    if (options.onIteration) {
+      try {
+        await options.onIteration({
+          iteration,
+          toolUses: streamed.toolUses,
+          stopReason: streamed.stopReason,
+        });
+      } catch (err) {
+        console.warn('chatWithToolLoop: onIteration callback threw', err);
+      }
+    }
+
+    // No more tools to call — we have the model's final answer.
+    if (streamed.toolUses.length === 0) {
+      return {
+        text: streamed.text,
+        toolUses: allToolUses,
+        toolResults: allToolResults,
+        iterations: iteration,
+        usage: aggregateUsage,
+      };
+    }
+
+    allToolUses.push(...streamed.toolUses);
+
+    // Build the assistant content this iteration produced, including
+    // both the text (if any) and the tool_use blocks. The next call
+    // must include this verbatim so the model recognises the
+    // tool_result blocks that follow.
+    const assistantBlocks: ContentBlock[] = [];
+    if (streamed.text) {
+      assistantBlocks.push({ type: 'text', text: streamed.text });
+    }
+    for (const u of streamed.toolUses) {
+      assistantBlocks.push({
+        type: 'tool_use',
+        id: u.id,
+        name: u.name,
+        input: u.input,
+      });
+    }
+
+    // Execute each tool_use; collect tool_result blocks.
+    const toolResultBlocks: ContentBlock[] = [];
+    for (const use of streamed.toolUses) {
+      let content: string;
+      let isError = false;
+      try {
+        content = await options.executor(use);
+      } catch (err) {
+        content = err instanceof Error ? err.message : String(err);
+        isError = true;
+      }
+      toolResultBlocks.push({
+        type: 'tool_result',
+        tool_use_id: use.id,
+        content,
+        is_error: isError || undefined,
+      });
+      allToolResults.push({ toolUseId: use.id, content, isError });
+    }
+
+    // Append both sides to the working message history and loop.
+    messages = [
+      ...messages,
+      { role: 'assistant', content: assistantBlocks },
+      { role: 'user', content: toolResultBlocks },
+    ];
+  }
+
+  // Iteration cap hit. Return what we have so the consumer can
+  // narrate progress; the text may be empty if the model never got
+  // to a final response.
+  return {
+    text: '',
+    toolUses: allToolUses,
+    toolResults: allToolResults,
+    iterations: iteration,
+    usage: aggregateUsage,
+  };
+}
+
+/**
  * Namespaced re-export for callers that prefer the namespace form
  * (`anthropic.chat(...)`) over named imports.
  */
@@ -420,4 +577,5 @@ export const anthropic = {
   rates,
   chat,
   chatWithTools,
+  chatWithToolLoop,
 };
