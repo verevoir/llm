@@ -29,10 +29,48 @@
  */
 export type ModelClass = 'reasoning' | 'extraction';
 
+/**
+ * Per-turn content. Plain `string` is the convenient v0 shape for
+ * pure-text conversations. `ContentBlock[]` carries structured
+ * content needed for multi-turn tool loops (tool_use + tool_result
+ * blocks) and lays the schema for future multimodal blocks (image,
+ * document) without a second migration.
+ *
+ * Adapters accept either form; pass a string if you have no
+ * structure to preserve.
+ */
+export type TurnContent = string | ContentBlock[];
+
+/**
+ * Discriminated union of message-content blocks. Mirrors Anthropic's
+ * native shape so the adapter doesn't have to translate. Adapters that
+ * don't support a given block kind (e.g. Google for `tool_result`)
+ * should surface a typed error rather than silently dropping content.
+ */
+export type ContentBlock =
+  | { type: 'text'; text: string }
+  | {
+      type: 'tool_use';
+      id: string;
+      name: string;
+      input: Record<string, unknown>;
+    }
+  | {
+      type: 'tool_result';
+      tool_use_id: string;
+      /**
+       * Result returned by the tool, serialised as a string the model
+       * can read. Use JSON for structured results.
+       */
+      content: string;
+      /** True when the tool errored; the model treats it as a failure. */
+      is_error?: boolean;
+    };
+
 /** A single message in a conversation. */
 export interface Turn {
   role: 'user' | 'assistant';
-  content: string;
+  content: TurnContent;
 }
 
 /**
@@ -145,6 +183,57 @@ export interface ChatWithToolsResult {
   toolUses: ToolUse[];
   text: string;
   stopReason: string;
+  usage: TokenUsage;
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Multi-turn tool loop
+// ────────────────────────────────────────────────────────────────────
+
+/**
+ * Caller-supplied function that executes a single tool_use the model
+ * emitted, returning a string the model will see as the matching
+ * `tool_result`. Throw to indicate a tool failure — the loop will
+ * surface it to the model with `is_error: true` so the model can
+ * react (apologise, try a different approach, etc.) rather than
+ * crashing the entire conversation.
+ */
+export type ToolExecutor = (toolUse: ToolUse) => Promise<string>;
+
+/** Options for {@link chatWithToolLoop}. */
+export interface ChatWithToolLoopOptions extends ChatWithToolsOptions {
+  /** Runs each tool_use the model emits. Required. */
+  executor: ToolExecutor;
+  /**
+   * Cap on tool-call iterations. The loop exits after this many
+   * tool-using assistant turns regardless of whether the model would
+   * have continued. Default 5 — generous for typical conversations
+   * (each tool round costs a full LLM call + execution).
+   */
+  maxIterations?: number;
+  /**
+   * Optional hook fired after each iteration with a compact summary —
+   * useful for narrating progress into a chat surface ("Looking up
+   * issues...", "Reading file...").
+   */
+  onIteration?: (info: {
+    iteration: number;
+    toolUses: ToolUse[];
+    stopReason: string;
+  }) => Promise<void>;
+}
+
+/** Result of a multi-turn tool conversation. */
+export interface ChatWithToolLoopResult {
+  /** The model's final text response (after all tool iterations). */
+  text: string;
+  /** All tool_uses across every iteration of the loop, in order. */
+  toolUses: ToolUse[];
+  /** Per-tool-use, the string the executor returned (or the error message). */
+  toolResults: { toolUseId: string; content: string; isError: boolean }[];
+  /** How many model calls happened (1 = pure text, no tools used). */
+  iterations: number;
+  /** Aggregated usage across all iterations of the loop. */
   usage: TokenUsage;
 }
 
