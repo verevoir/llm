@@ -13,7 +13,8 @@ does not enter your bundle.
 
 - `@verevoir/llm` — core types and the `chat()` contract. No SDK dependency.
 - `@verevoir/llm/anthropic` — Anthropic SDK adapter. Requires `@anthropic-ai/sdk`.
-- `@verevoir/llm/google` — Google SDK adapter (planned). Requires `@google/genai`.
+- `@verevoir/llm/google` — Google Gemini SDK adapter (`chat()` only as of 0.4.0). Requires `@google/genai`.
+- `@verevoir/llm/openai` — OpenAI SDK adapter (planned).
 
 ## Install
 
@@ -54,9 +55,9 @@ X on reasoning + Y on extraction" natively.
 
 ## Status
 
-`0.1.0` shipped — first deliberate release. Pre-stable: the `0.x` line
-communicates that the API surface can shift before `1.0`. Track changes in
-the repo's CHANGELOG.
+`0.4.0` shipped — Anthropic adapter is full surface, Google adapter ships
+`chat()` only. Pre-stable: the `0.x` line communicates that the API surface
+can shift before `1.0`. Track changes in the repo's CHANGELOG.
 
 ## Repository
 

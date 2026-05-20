@@ -1,6 +1,6 @@
 {
   "name": "@verevoir/llm",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Provider-agnostic LLM call surface with token + cost accounting. SDK adapters in subpaths.",
   "license": "Apache-2.0",
   "type": "module",
@@ -14,6 +14,10 @@
     "./anthropic": {
       "types": "./dist/anthropic/index.d.ts",
       "import": "./dist/anthropic/index.js"
+    },
+    "./google": {
+      "types": "./dist/google/index.d.ts",
+      "import": "./dist/google/index.js"
     }
   },
   "files": [
@@ -32,15 +36,20 @@
     "prepublishOnly": "npm run typecheck && npm test && npm run build"
   },
   "peerDependencies": {
-    "@anthropic-ai/sdk": "*"
+    "@anthropic-ai/sdk": "*",
+    "@google/genai": "*"
   },
   "peerDependenciesMeta": {
     "@anthropic-ai/sdk": {
+      "optional": true
+    },
+    "@google/genai": {
       "optional": true
     }
   },
   "devDependencies": {
     "@anthropic-ai/sdk": "^0.95.1",
+    "@google/genai": "^2.4.0",
     "@types/node": "^25.8.0",
     "prettier": "^3",
     "typescript": "^5",
