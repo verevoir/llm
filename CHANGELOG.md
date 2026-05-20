@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.5.0] — 2026-05-20
+
+Third frontier provider: OpenAI via the Responses API.
+
+### OpenAI subpath (`@verevoir/llm/openai`) — new
+
+- New optional peer dep: `openai`.
+- `chat()` — single-shot text generation via `client.responses.create()` (the post-Chat-Completions canonical surface). Same `{ systemPrompt, turns, apiKey, modelClass, onRetry, onUsage, abortSignal }` shape as the Anthropic + Google adapters. Returns `{ content, usage, stopReason }`.
+- Model table: `reasoning → gpt-5`, `extraction → gpt-5-mini`.
+- API key resolution: per-call `apiKey` → `OPENAI_API_KEY` env.
+- Friendly labels registered on import: `GPT-5` / `GPT-5 Mini`.
+- Retries with exponential backoff on 429 / 500 / 502 / 503 with provider-named reason strings.
+- `cached_tokens` from the Responses API's `input_tokens_details` flows into `TokenUsage.cacheReadInputTokens`.
+- Not in this release: `chatWithTools()`, `chatWithToolLoop()`, live `onProgress`. Aligns with `/google`'s staged rollout.
+
+### Compatibility
+
+- Fully backwards-compatible. All three SDK deps stay optional peers.
+
 ## [0.4.0] — 2026-05-20
 
 First non-Anthropic provider. Single-shot `chat()` on Google Gemini.
