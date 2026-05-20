@@ -139,6 +139,20 @@ export interface ChatOptions {
    * `report_progress` tool into the request.
    */
   onProgress?: (info: ProgressInfo) => Promise<void>;
+  /**
+   * Optional `AbortSignal` for cancelling the call. When the signal
+   * is aborted, the adapter throws the signal's `reason` (or a
+   * generic AbortError when none was provided). Checked between
+   * loop iterations in `chatWithToolLoop` — in-flight LLM calls
+   * complete and their tokens are still recorded, but no further
+   * iterations start once the signal is aborted.
+   *
+   * The canonical use case: an `onUsage` hook that aborts the
+   * controller when an aggregate budget is exceeded. The hook's own
+   * throws are still swallowed by the adapter for back-compat;
+   * abort is the supported escape hatch.
+   */
+  abortSignal?: AbortSignal;
 }
 
 /** Result of a single LLM call via {@link chat}. */
