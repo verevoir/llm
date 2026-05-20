@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.4.0] — 2026-05-20
+
+First non-Anthropic provider. Single-shot `chat()` on Google Gemini.
+
+### Anthropic subpath (`@verevoir/llm/anthropic`)
+
+- Unchanged from `0.3.0`.
+
+### Google subpath (`@verevoir/llm/google`) — new
+
+- New optional peer dep: `@google/genai`.
+- `chat()` — single-shot text generation against Gemini. Same `{ systemPrompt, turns, apiKey, modelClass, onRetry, onUsage, abortSignal }` surface as the Anthropic adapter. Returns `{ content, usage, stopReason }`. Retries with exponential backoff on Google transient errors (429/500/503/UNAVAILABLE/DEADLINE_EXCEEDED).
+- Model table: `reasoning → gemini-2.5-pro`, `extraction → gemini-2.5-flash`.
+- API key resolution: per-call `apiKey` → `GEMINI_API_KEY` env → `GOOGLE_API_KEY` env.
+- Registers friendly labels (`Gemini Pro` / `Gemini Flash`) on import for the core's `modelLabel` helper.
+- Not yet in this release: `chatWithTools()`, `chatWithToolLoop()`, live `onProgress` narration. Gemini's function-calling + streaming need a different mapping from the Anthropic shape; tracked for the next release.
+
+### Compatibility
+
+- Fully backwards-compatible. The `/anthropic` subpath is untouched; new consumers can opt into `/google` without rippling.
+
 ## [0.3.0] — 2026-05-20
 
 Cooperative cancellation via `AbortSignal`.
