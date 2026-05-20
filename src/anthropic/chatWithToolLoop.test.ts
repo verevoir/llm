@@ -294,4 +294,74 @@ describe('chatWithToolLoop', () => {
       })
     ).rejects.toThrow(/at least one turn/);
   });
+
+  it('throws the abort reason when the signal is already aborted before the call', async () => {
+    const controller = new AbortController();
+    const reason = new Error('budget exceeded before call');
+    controller.abort(reason);
+
+    await expect(
+      chatWithToolLoop({
+        systemPrompt: 's',
+        turns: [{ role: 'user', content: 'go' }],
+        apiKey: 'sk-test',
+        tools: [
+          {
+            name: 'noop',
+            description: 'noop',
+            input_schema: { type: 'object', properties: {} },
+          },
+        ],
+        executor: async () => 'ok',
+        abortSignal: controller.signal,
+      })
+    ).rejects.toBe(reason);
+
+    // No LLM call should have happened.
+    expect(mockStream).not.toHaveBeenCalled();
+  });
+
+  it('aborts mid-loop when onUsage calls abort — the in-flight iteration completes, the next never starts', async () => {
+    // Two streams set up — but the test expects only the first to be
+    // consumed, because onUsage aborts after the first iteration.
+    mockStream
+      .mockReturnValueOnce(
+        fakeStream([{ type: 'tool_use', id: 'u1', name: 'noop', input: {} }], 'tool_use', {
+          input_tokens: 1000,
+          output_tokens: 1,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 0,
+        })
+      )
+      .mockReturnValueOnce(fakeStream([{ type: 'text', text: 'never' }], 'end_turn'));
+
+    const controller = new AbortController();
+    const reason = new Error('mid-loop budget exceeded');
+    const onUsage = vi.fn(async () => {
+      controller.abort(reason);
+    });
+
+    await expect(
+      chatWithToolLoop({
+        systemPrompt: 's',
+        turns: [{ role: 'user', content: 'go' }],
+        apiKey: 'sk-test',
+        tools: [
+          {
+            name: 'noop',
+            description: 'noop',
+            input_schema: { type: 'object', properties: {} },
+          },
+        ],
+        executor: async () => 'ok',
+        onUsage,
+        abortSignal: controller.signal,
+      })
+    ).rejects.toBe(reason);
+
+    // First iteration's LLM call happened (we paid for it); the
+    // second never started.
+    expect(mockStream).toHaveBeenCalledTimes(1);
+    expect(onUsage).toHaveBeenCalledTimes(1);
+  });
 });

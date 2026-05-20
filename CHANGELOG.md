@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.3.0] — 2026-05-20
+
+Cooperative cancellation via `AbortSignal`.
+
+### Core (`@verevoir/llm`)
+
+- `ChatOptions` gains optional `abortSignal: AbortSignal`. When the signal aborts, the adapter throws the signal's `reason` (or a generic AbortError when none was set). `ChatWithToolsOptions` and `ChatWithToolLoopOptions` inherit it.
+
+### Anthropic subpath (`@verevoir/llm/anthropic`)
+
+- `chat()` and `chatWithTools()` check the signal once, before the LLM call.
+- `chatWithToolLoop()` checks at the top of each iteration. The in-flight iteration's LLM call still settles and its tokens are recorded (so accounting stays correct), but no further iterations start once the signal is aborted.
+- Driving use case: an `onUsage` hook that aborts the controller when an aggregate budget is exceeded. The hook's own throws are still swallowed by the adapter for back-compat; abort is the supported escape hatch.
+
+### Compatibility
+
+- Fully backwards-compatible: existing callers that don't pass `abortSignal` see identical behaviour to 0.2.x.
+
 ## [0.2.0] — 2026-05-18
 
 Multi-turn tool conversations + structured content blocks.

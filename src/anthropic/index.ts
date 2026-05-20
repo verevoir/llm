@@ -314,6 +314,16 @@ async function fireUsageHook(
   }
 }
 
+/** Throw the AbortSignal's reason (or a generic AbortError) when
+ * the signal is aborted. No-op when no signal is provided or the
+ * signal has not been aborted. */
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (!signal?.aborted) return;
+  if (signal.reason instanceof Error) throw signal.reason;
+  if (signal.reason !== undefined) throw new Error(String(signal.reason));
+  throw new DOMException('Aborted', 'AbortError');
+}
+
 // ────────────────────────────────────────────────────────────────────
 // Public API
 // ────────────────────────────────────────────────────────────────────
@@ -327,6 +337,7 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
   if (options.turns.length === 0) {
     throw new Error('anthropic.chat() requires at least one turn');
   }
+  throwIfAborted(options.abortSignal);
   const modelClass: ModelClass = options.modelClass ?? 'reasoning';
   const client = getClient(options.apiKey ?? null);
   const request = buildRequest({
@@ -376,6 +387,7 @@ export async function chatWithTools(options: ChatWithToolsOptions): Promise<Chat
   if (options.tools.length === 0) {
     throw new Error('anthropic.chatWithTools() requires at least one tool');
   }
+  throwIfAborted(options.abortSignal);
   const modelClass: ModelClass = options.modelClass ?? 'reasoning';
   const client = getClient(options.apiKey ?? null);
   const augmentedTools = options.onProgress
@@ -464,6 +476,13 @@ export async function chatWithToolLoop(
   let iteration = 0;
   while (iteration < maxIterations) {
     iteration += 1;
+
+    // Abort check at the top of each iteration so the previous
+    // iteration's onUsage / onIteration hook can abort cleanly via
+    // its captured AbortController. The in-flight LLM call has
+    // already settled and its tokens are recorded; what we prevent
+    // is starting the NEXT iteration.
+    throwIfAborted(options.abortSignal);
 
     const request = buildRequest({
       modelClass,
