@@ -47,7 +47,7 @@ enters the consumer's bundle:
 | `@verevoir/llm`           | none                | shipped                 |
 | `@verevoir/llm/anthropic` | `@anthropic-ai/sdk` | shipped                 |
 | `@verevoir/llm/google`    | `@google/genai`     | `chat()` only (`0.4.0`) |
-| `@verevoir/llm/openai`    | `openai`            | planned                 |
+| `@verevoir/llm/openai`    | `openai`            | `chat()` only (`0.5.0`) |
 
 Multi-provider deployments depend on the same `chat()` contract; consumers
 switch backends by importing a different subpath, not by changing call sites.
