@@ -119,17 +119,71 @@ const REPORT_PROGRESS_TOOL: ToolDef = {
   },
 };
 
+// One ephemeral breakpoint shape, reused for every cache_control we
+// place. 5-minute TTL (the default) — long enough to span a tool
+// loop's burst of correlated calls.
+const EPHEMERAL_CACHE = { type: 'ephemeral' as const };
+
+type WireMessage = { role: string; content: unknown };
+
+/**
+ * Attach a cache_control breakpoint to the last content block of the
+ * last message, converting string content to a single text block so
+ * the marker has somewhere to live.
+ *
+ * This is the conversation-prefix half of prompt caching, used by the
+ * tool loop: each iteration re-sends a growing message history, so a
+ * breakpoint at the end lets the *next* iteration read the prior
+ * prefix from cache (~0.1× input cost) instead of reprocessing it at
+ * full price. The system breakpoint already caches tools + system;
+ * this caches the conversation that follows.
+ *
+ * Not used for single-shot `chat` / `chatWithTools`: there the last
+ * block is the varying current question, so a breakpoint on it would
+ * only write a cache entry that never gets read.
+ */
+function withConversationCacheBreakpoint(messages: WireMessage[]): WireMessage[] {
+  if (messages.length === 0) return messages;
+  const out = messages.slice();
+  const last = out[out.length - 1];
+  if (typeof last.content === 'string') {
+    out[out.length - 1] = {
+      ...last,
+      content: [{ type: 'text', text: last.content, cache_control: EPHEMERAL_CACHE }],
+    };
+  } else if (Array.isArray(last.content) && last.content.length > 0) {
+    const blocks = last.content;
+    out[out.length - 1] = {
+      ...last,
+      content: blocks.map((block, i) =>
+        i === blocks.length - 1 ? { ...(block as object), cache_control: EPHEMERAL_CACHE } : block
+      ),
+    };
+  }
+  return out;
+}
+
 function buildRequest({
   modelClass,
   systemPrompt,
   turns,
   tools,
+  cacheConversation = false,
 }: {
   modelClass: ModelClass;
   systemPrompt: string;
   turns: Turn[];
   tools?: ToolDef[];
+  /** When true, place a cache_control breakpoint on the last message
+   * block so a re-sent growing prefix (the tool loop) hits cache.
+   * Default false — single-shot calls only benefit from the system /
+   * tools breakpoint below. */
+  cacheConversation?: boolean;
 }): Record<string, unknown> {
+  // Render order is tools → system → messages, so the breakpoint on
+  // the (single) system block caches the tools + system prefix
+  // together — no separate tool breakpoint needed.
+  const messages: WireMessage[] = turns.map((t) => ({ role: t.role, content: t.content }));
   const base: Record<string, unknown> = {
     model: models[modelClass],
     max_tokens: MAX_TOKENS,
@@ -137,10 +191,10 @@ function buildRequest({
       {
         type: 'text' as const,
         text: systemPrompt,
-        cache_control: { type: 'ephemeral' as const },
+        cache_control: EPHEMERAL_CACHE,
       },
     ],
-    messages: turns.map((t) => ({ role: t.role, content: t.content })),
+    messages: cacheConversation ? withConversationCacheBreakpoint(messages) : messages,
   };
   if (tools && tools.length > 0) {
     base.tools = tools;
@@ -489,6 +543,10 @@ export async function chatWithToolLoop(
       systemPrompt: options.systemPrompt,
       turns: messages,
       tools: augmentedTools,
+      // Each iteration re-sends the growing history; a breakpoint on
+      // the last message lets the next iteration read this prefix
+      // from cache instead of reprocessing it.
+      cacheConversation: true,
     });
 
     const streamed = await callWithRetries(

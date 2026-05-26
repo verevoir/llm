@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.7.0] — 2026-05-26
+
+Prompt-cache structuring in the Anthropic adapter — the conversation-prefix half.
+
+- **`chatWithToolLoop` now caches the growing conversation prefix.** Each loop iteration re-sends the full message history; the adapter now places a `cache_control: {type: "ephemeral"}` breakpoint on the last block of the last message, so the next iteration reads the prior prefix from cache (~0.1× input cost) instead of reprocessing it. The system breakpoint already caches the tools + system prefix (render order is tools → system → messages), so a tool loop now pays full input price only on the per-iteration delta.
+- Single-shot `chat` / `chatWithTools` are unchanged: their final block is the varying current question, so a message-level breakpoint there would only write a cache entry that never gets read. The system/tools breakpoint already covers their stable prefix.
+- Cache activity continues to surface on `TokenUsage.cacheCreationInputTokens` / `cacheReadInputTokens` (already wired). No public API change. (STDIO-11 — prompt-cache structuring. The card's "layer-side file/issue cache" half is superseded by `@verevoir/context`, which owns file/issue caching.)
+
 ## [0.6.0] — 2026-05-26
 
 Fourth provider: DeepSeek via its OpenAI-compatible API.
