@@ -15,6 +15,7 @@ does not enter your bundle.
 - `@verevoir/llm/anthropic` — Anthropic SDK adapter. Requires `@anthropic-ai/sdk`.
 - `@verevoir/llm/google` — Google Gemini SDK adapter (`chat()` only as of 0.4.0). Requires `@google/genai`.
 - `@verevoir/llm/openai` — OpenAI SDK adapter (`chat()` only as of 0.5.0, via the Responses API). Requires `openai`.
+- `@verevoir/llm/deepseek` — DeepSeek adapter (`chat()` only as of 0.6.0), OpenAI-compatible via the Chat Completions API at `https://api.deepseek.com`. Reuses the `openai` peer dep — no separate SDK.
 
 ## Install
 
