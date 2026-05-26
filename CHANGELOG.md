@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.6.0] — 2026-05-26
+
+Fourth provider: DeepSeek via its OpenAI-compatible API.
+
+- **New `@verevoir/llm/deepseek`** — `chat()` only, matching the staged rollout of `/openai` + `/google`. DeepSeek exposes an OpenAI-compatible API, so the adapter reuses the existing `openai` peer dependency pointed at `https://api.deepseek.com`. It mirrors the `/openai` adapter's structure but calls the **Chat Completions** API (`chat.completions.create`) rather than the Responses API — DeepSeek implements the former, not the latter.
+- Model classes map `reasoning` → `deepseek-reasoner` and `extraction` → `deepseek-chat`. Friendly labels ("DeepSeek Reasoner" / "DeepSeek Chat") registered on import. Worst-case rate table (standard cache-miss input rates) for upper-bound cost estimates.
+- Cache hits read from DeepSeek's `prompt_cache_hit_tokens` (falling back to `prompt_tokens_details.cached_tokens`) into `cacheReadInputTokens`. Same exponential-backoff retry shape + `onRetry` narration + `abortSignal` handling as the other adapters.
+- No new peer dependency — `/deepseek` shares `openai` with `/openai`. Auth via `DEEPSEEK_API_KEY` (or a per-call `apiKey`).
+
 ## [0.5.0] — 2026-05-20
 
 Third frontier provider: OpenAI via the Responses API.
