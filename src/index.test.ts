@@ -38,17 +38,18 @@ describe('sumUsages', () => {
     expect(sumUsages([])).toEqual({});
   });
 
-  it('merges multiple rollups, summing per-model in/out', () => {
+  it('merges multiple rollups, summing per-model in/out/cache', () => {
     const a: PerModelUsage = {
-      'claude-opus-4-7': { in: 100, out: 50 },
+      'claude-opus-4-7': { in: 100, out: 50, cacheRead: 1000, cacheWrite: 200 },
     };
     const b: PerModelUsage = {
       'claude-opus-4-7': { in: 200, out: 75 },
       'claude-haiku-4-5-20251001': { in: 10, out: 5 },
     };
+    // Missing cache fields coalesce to 0; output carries all four counters.
     expect(sumUsages([a, b])).toEqual({
-      'claude-opus-4-7': { in: 300, out: 125 },
-      'claude-haiku-4-5-20251001': { in: 10, out: 5 },
+      'claude-opus-4-7': { in: 300, out: 125, cacheRead: 1000, cacheWrite: 200 },
+      'claude-haiku-4-5-20251001': { in: 10, out: 5, cacheRead: 0, cacheWrite: 0 },
     });
   });
 });
@@ -60,6 +61,13 @@ describe('totalTokens', () => {
       'claude-haiku-4-5-20251001': { in: 30, out: 20 },
     };
     expect(totalTokens(usage)).toBe(200);
+  });
+
+  it('counts cache read + write at face value (budget guard)', () => {
+    const usage: PerModelUsage = {
+      'claude-opus-4-7': { in: 100, out: 50, cacheRead: 1000, cacheWrite: 200 },
+    };
+    expect(totalTokens(usage)).toBe(1350);
   });
 });
 
@@ -116,6 +124,36 @@ describe('estimateCostUSD', () => {
       'gemini-pro': { in: 1_000_000, out: 1_000_000 },
     };
     expect(estimateCostUSD(usage, rates)).toBe(0);
+  });
+
+  it('prices an entry without cache fields exactly as before', () => {
+    // Back-compat: old persisted rollups have no cacheRead/cacheWrite.
+    const usage: PerModelUsage = {
+      'claude-opus-4-7': { in: 1_000_000, out: 1_000_000 },
+    };
+    expect(estimateCostUSD(usage, rates)).toBeCloseTo(90, 5);
+  });
+
+  it('defaults cache reads to 0.1× and cache writes to 1.25× of input', () => {
+    // Opus input rate 15/Mtok → cacheRead 1.5, cacheWrite 18.75 per Mtok.
+    const usage: PerModelUsage = {
+      'claude-opus-4-7': {
+        in: 0,
+        out: 0,
+        cacheRead: 1_000_000,
+        cacheWrite: 1_000_000,
+      },
+    };
+    expect(estimateCostUSD(usage, rates)).toBeCloseTo(1.5 + 18.75, 5);
+  });
+
+  it('uses explicit cache rates from a four-element tuple when present', () => {
+    const explicit: RatesTable = { 'some-model': [10, 20, 2, 13] };
+    const usage: PerModelUsage = {
+      'some-model': { in: 1_000_000, out: 0, cacheRead: 1_000_000, cacheWrite: 1_000_000 },
+    };
+    // 10 (in) + 0 (out) + 2 (cacheRead) + 13 (cacheWrite) = 25
+    expect(estimateCostUSD(usage, explicit)).toBeCloseTo(25, 5);
   });
 });
 

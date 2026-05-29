@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.8.0] — 2026-05-29
+
+Cache-aware cost accounting — prompt-cache savings are now visible in `estimateCostUSD` instead of buried at the standard input rate (STDIO-166). Profiling-grade instrumentation for the LLM-optimisation pass; backwards-compatible.
+
+- **`PerModelUsage` entries gain optional `cacheRead` / `cacheWrite`.** Old persisted rollups carried only `{ in, out }`; the fields are optional and every helper coalesces a missing one to 0, so existing serialised usage still parses. Keeping cache tokens separate from `in` is the whole point — it's what lets cost pricing discount them.
+- **`estimateCostUSD` prices cache reads / writes at their own rates.** `RateTuple` widens to `[input, output, cacheRead?, cacheWrite?]`; when an adapter omits the cache rates it falls back to the Anthropic-standard multipliers (read **0.1×**, write **1.25×** of input). Previously all of `in` (including folded-in cache reads, at ~10× their real cost) priced at the standard input rate — a worst-case upper bound that hid every caching win. Existing two-element rate tables stay valid.
+- **`totalTokens` now sums input + output + cacheRead + cacheWrite at face value.** Unchanged for old `{ in, out }` data; for new data it keeps a token-count budget guard honest (a cache read is cheaper in dollars but is still a token the model processed). Cost discounts cache; the raw token count does not.
+- No adapter or `chat()` surface change. Consumers that fold cache tokens into `in` themselves (e.g. an `accumulateUsage`) should split them out to benefit; until they do, behaviour is unchanged.
+
 ## [0.7.0] — 2026-05-26
 
 Prompt-cache structuring in the Anthropic adapter — the conversation-prefix half.
