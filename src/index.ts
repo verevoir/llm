@@ -257,9 +257,19 @@ export interface ChatWithToolLoopResult {
 
 /**
  * Per-model rollup keyed by concrete model id. Produced by
- * {@link sumUsages}; consumed by display helpers.
+ * {@link sumUsages}; consumed by display + cost helpers.
+ *
+ * `cacheRead` / `cacheWrite` are optional so older persisted rollups
+ * (which carried only `in` / `out`) still parse — every helper coalesces
+ * a missing cache field to 0. Keeping cache tokens *separate* from `in`
+ * is what lets {@link estimateCostUSD} price them at their real rates
+ * (a cache read is ~0.1× the input rate) instead of burying them in the
+ * standard input figure.
  */
-export type PerModelUsage = Record<string, { in: number; out: number }>;
+export type PerModelUsage = Record<
+  string,
+  { in: number; out: number; cacheRead?: number; cacheWrite?: number }
+>;
 
 /**
  * Parse a JSON-serialised {@link PerModelUsage} produced by a previous
@@ -278,24 +288,36 @@ export function parseUsage(json: string): PerModelUsage {
   return {};
 }
 
-/** Sum multiple {@link PerModelUsage} rollups into one. */
+/**
+ * Sum multiple {@link PerModelUsage} rollups into one. Output entries
+ * always carry all four counters (a missing input field counts as 0).
+ */
 export function sumUsages(usages: PerModelUsage[]): PerModelUsage {
   const out: PerModelUsage = {};
   for (const u of usages) {
     for (const [model, vals] of Object.entries(u)) {
-      const existing = out[model] ?? { in: 0, out: 0 };
+      const existing = out[model] ?? { in: 0, out: 0, cacheRead: 0, cacheWrite: 0 };
       existing.in += vals.in;
       existing.out += vals.out;
+      existing.cacheRead = (existing.cacheRead ?? 0) + (vals.cacheRead ?? 0);
+      existing.cacheWrite = (existing.cacheWrite ?? 0) + (vals.cacheWrite ?? 0);
       out[model] = existing;
     }
   }
   return out;
 }
 
-/** Total tokens across all models in a rollup (input + output). */
+/**
+ * Total tokens across all models in a rollup — input + output + cache
+ * read + cache write, all at face value. This is the right figure for a
+ * runaway-loop budget guard: a cache *read* costs less in dollars but is
+ * still a token the model had to process.
+ */
 export function totalTokens(usage: PerModelUsage): number {
   let total = 0;
-  for (const v of Object.values(usage)) total += v.in + v.out;
+  for (const v of Object.values(usage)) {
+    total += v.in + v.out + (v.cacheRead ?? 0) + (v.cacheWrite ?? 0);
+  }
   return total;
 }
 
@@ -312,20 +334,31 @@ export function formatTokensCompact(n: number): string {
 }
 
 /**
- * Tuple of `[input_per_million_USD, output_per_million_USD]`. Adapters
- * export their own rate tables for the consumer to feed into cost
- * helpers.
+ * Per-model USD rates per million tokens:
+ * `[input, output, cacheRead?, cacheWrite?]`. The cache entries are
+ * optional; when an adapter omits them {@link estimateCostUSD} falls
+ * back to the Anthropic-standard multipliers (cache read 0.1×, cache
+ * write 1.25× of the input rate). Existing two-element tables stay
+ * valid.
  */
-export type RateTuple = readonly [number, number];
+export type RateTuple = readonly [number, number, number?, number?];
 
-/** Per-model rate table — `model id → [input_per_mtok, output_per_mtok]`. */
+/** Per-model rate table — `model id → RateTuple`. */
 export type RatesTable = Readonly<Record<string, RateTuple>>;
 
+/** Default cache-rate multipliers (Anthropic standard) applied when a
+ * rate tuple doesn't carry explicit cache rates. */
+const CACHE_READ_MULTIPLIER = 0.1;
+const CACHE_WRITE_MULTIPLIER = 1.25;
+
 /**
- * Estimate the USD cost of a per-model rollup against an adapter's
- * rate table. Worst-case treatment: cache reads count at the standard
- * input rate (typically ~10× the real cache-read rate), so the result
- * is an upper bound on the actual bill.
+ * Estimate the USD cost of a per-model rollup against an adapter's rate
+ * table. Input + output price at the table's standard rates; cache reads
+ * and cache writes price at their own rates — either the explicit 3rd /
+ * 4th rate-tuple entries, or the Anthropic-standard fallbacks (read
+ * 0.1×, write 1.25× of input). Pricing cache tokens separately is what
+ * makes prompt-cache savings *visible* in the estimate, rather than
+ * hidden behind a worst-case full-input-rate treatment.
  *
  * Unknown models contribute 0 to the total — the caller can detect
  * coverage gaps by checking that every model in the rollup is in the
@@ -336,8 +369,16 @@ export function estimateCostUSD(usage: PerModelUsage, rates: RatesTable): number
   for (const [model, v] of Object.entries(usage)) {
     const rate = rates[model];
     if (!rate) continue;
-    const [inputRate, outputRate] = rate;
-    total += (v.in * inputRate + v.out * outputRate) / 1_000_000;
+    const inputRate = rate[0];
+    const outputRate = rate[1];
+    const cacheReadRate = rate[2] ?? inputRate * CACHE_READ_MULTIPLIER;
+    const cacheWriteRate = rate[3] ?? inputRate * CACHE_WRITE_MULTIPLIER;
+    total +=
+      (v.in * inputRate +
+        v.out * outputRate +
+        (v.cacheRead ?? 0) * cacheReadRate +
+        (v.cacheWrite ?? 0) * cacheWriteRate) /
+      1_000_000;
   }
   return total;
 }
