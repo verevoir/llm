@@ -205,6 +205,11 @@ function buildRequest({
 interface StreamedResult {
   text: string;
   toolUses: ToolUse[];
+  /** report_progress tool calls in this turn (kept separate from
+   * `toolUses`, which is caller-executable tools only). Lets `chat`
+   * acknowledge a progress-only turn and continue to the real answer
+   * instead of failing with "no text content". */
+  progressToolUses: { id: string; input: Record<string, unknown> }[];
   rawUsage: {
     inputTokens: number;
     outputTokens: number;
@@ -250,10 +255,16 @@ async function callStreamed(
 
   const texts: string[] = [];
   const toolUses: ToolUse[] = [];
+  const progressToolUses: { id: string; input: Record<string, unknown> }[] = [];
   for (const block of final.content) {
     if (block.type === 'text') {
       texts.push(block.text);
-    } else if (block.type === 'tool_use' && block.name !== 'report_progress') {
+    } else if (block.type === 'tool_use' && block.name === 'report_progress') {
+      progressToolUses.push({
+        id: block.id,
+        input: (block.input ?? {}) as Record<string, unknown>,
+      });
+    } else if (block.type === 'tool_use') {
       toolUses.push({
         id: block.id,
         name: block.name,
@@ -269,6 +280,7 @@ async function callStreamed(
   return {
     text: texts.join('\n'),
     toolUses,
+    progressToolUses,
     rawUsage: {
       inputTokens: u.input_tokens ?? 0,
       outputTokens: u.output_tokens ?? 0,
@@ -394,38 +406,97 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
   throwIfAborted(options.abortSignal);
   const modelClass: ModelClass = options.modelClass ?? 'reasoning';
   const client = getClient(options.apiKey ?? null);
-  const request = buildRequest({
-    modelClass,
-    systemPrompt: options.systemPrompt,
-    turns: options.turns,
-    tools: options.onProgress ? [REPORT_PROGRESS_TOOL] : undefined,
-  });
 
-  const streamed = await callWithRetries(
-    () => callStreamed(client, request, options.onProgress),
-    options.onRetry
-  );
+  // A model given the report_progress tool (auto-injected when
+  // onProgress is set) may end a turn having called ONLY that tool,
+  // with no text yet — smaller models (Haiku) do this readily. That's
+  // not a terminal state: acknowledge the progress call (feed a
+  // tool_result back) and let the model continue to the actual answer,
+  // rather than failing with "no text content". Cap the continuations
+  // so a misbehaving model can't loop forever. Usage is summed across
+  // the continuation calls; onUsage fires per call.
+  const MAX_PROGRESS_CONTINUATIONS = 4;
+  let messages: Turn[] = [...options.turns];
+  const aggregate = {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheCreationInputTokens: 0,
+    cacheReadInputTokens: 0,
+  };
 
-  if (streamed.stopReason && streamed.stopReason !== 'end_turn') {
-    console.warn(
-      `anthropic.chat: response stop_reason=${streamed.stopReason} (model=${models[modelClass]}, output_tokens=${streamed.rawUsage.outputTokens})`
+  for (let attempt = 0; attempt <= MAX_PROGRESS_CONTINUATIONS; attempt++) {
+    const request = buildRequest({
+      modelClass,
+      systemPrompt: options.systemPrompt,
+      turns: messages,
+      tools: options.onProgress ? [REPORT_PROGRESS_TOOL] : undefined,
+      // A continuation re-sends the growing history; cache its prefix.
+      cacheConversation: attempt > 0,
+    });
+
+    const streamed = await callWithRetries(
+      () => callStreamed(client, request, options.onProgress),
+      options.onRetry
     );
-  }
 
-  const usage = shapeUsage(streamed.rawUsage, modelClass);
-  await fireUsageHook(options.onUsage, usage, 'anthropic.chat');
+    aggregate.inputTokens += streamed.rawUsage.inputTokens;
+    aggregate.outputTokens += streamed.rawUsage.outputTokens;
+    aggregate.cacheCreationInputTokens += streamed.rawUsage.cacheCreationInputTokens;
+    aggregate.cacheReadInputTokens += streamed.rawUsage.cacheReadInputTokens;
+    await fireUsageHook(
+      options.onUsage,
+      shapeUsage(streamed.rawUsage, modelClass),
+      'anthropic.chat'
+    );
 
-  if (!streamed.text) {
+    if (streamed.text) {
+      if (streamed.stopReason && streamed.stopReason !== 'end_turn') {
+        console.warn(
+          `anthropic.chat: response stop_reason=${streamed.stopReason} (model=${models[modelClass]}, output_tokens=${streamed.rawUsage.outputTokens})`
+        );
+      }
+      return {
+        content: streamed.text,
+        usage: shapeUsage(aggregate, modelClass),
+        stopReason: streamed.stopReason,
+      };
+    }
+
+    // No text. If the turn ended on a progress-only tool call and we
+    // still have budget, acknowledge it and continue to the answer.
+    if (
+      streamed.stopReason === 'tool_use' &&
+      streamed.progressToolUses.length > 0 &&
+      attempt < MAX_PROGRESS_CONTINUATIONS
+    ) {
+      const assistantBlocks: ContentBlock[] = streamed.progressToolUses.map((p) => ({
+        type: 'tool_use',
+        id: p.id,
+        name: 'report_progress',
+        input: p.input,
+      }));
+      const toolResultBlocks: ContentBlock[] = streamed.progressToolUses.map((p) => ({
+        type: 'tool_result',
+        tool_use_id: p.id,
+        content: 'ok',
+      }));
+      messages = [
+        ...messages,
+        { role: 'assistant', content: assistantBlocks },
+        { role: 'user', content: toolResultBlocks },
+      ];
+      continue;
+    }
+
+    // No text and nothing to continue on — a genuinely empty response.
     throw new Error(
       `anthropic.chat: response had no text content (stop_reason=${streamed.stopReason})`
     );
   }
 
-  return {
-    content: streamed.text,
-    usage,
-    stopReason: streamed.stopReason,
-  };
+  throw new Error(
+    `anthropic.chat: no text content after ${MAX_PROGRESS_CONTINUATIONS} progress continuations`
+  );
 }
 
 /**
