@@ -40,6 +40,7 @@ export const PROVIDER = 'anthropic';
  */
 export const models: Readonly<Record<ModelClass, string>> = {
   reasoning: 'claude-opus-4-7',
+  drafting: 'claude-sonnet-4-6',
   extraction: 'claude-haiku-4-5-20251001',
 };
 
@@ -57,6 +58,7 @@ export const models: Readonly<Record<ModelClass, string>> = {
  */
 export const rates: RatesTable = {
   'claude-opus-4-7': [15, 75],
+  'claude-sonnet-4-6': [3, 15],
   'claude-haiku-4-5-20251001': [1, 5],
 } as const;
 
@@ -65,6 +67,7 @@ export const rates: RatesTable = {
 // manually. Import side-effect; idempotent.
 registerModelLabels({
   'claude-opus-4-7': 'Opus',
+  'claude-sonnet-4-6': 'Sonnet',
   'claude-haiku-4-5-20251001': 'Haiku',
 });
 

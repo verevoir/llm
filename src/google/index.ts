@@ -39,6 +39,9 @@ export const PROVIDER = 'google';
  */
 export const models: Readonly<Record<ModelClass, string>> = {
   reasoning: 'gemini-2.5-pro',
+  // No distinct mid tier on Gemini today — drafting resolves up to the
+  // reasoning model (the tier fallback ladder, frozen statically).
+  drafting: 'gemini-2.5-pro',
   extraction: 'gemini-2.5-flash',
 };
 

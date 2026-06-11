@@ -44,6 +44,9 @@ export const BASE_URL = 'https://api.deepseek.com';
  */
 export const models: Readonly<Record<ModelClass, string>> = {
   reasoning: 'deepseek-reasoner',
+  // No distinct mid tier on DeepSeek today — drafting resolves up to the
+  // reasoning model (the tier fallback ladder, frozen statically).
+  drafting: 'deepseek-reasoner',
   extraction: 'deepseek-chat',
 };
 

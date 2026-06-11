@@ -39,6 +39,9 @@ export const PROVIDER = 'openai';
  */
 export const models: Readonly<Record<ModelClass, string>> = {
   reasoning: 'gpt-5',
+  // No distinct mid tier wired today — drafting resolves up to the
+  // reasoning model (the tier fallback ladder, frozen statically).
+  drafting: 'gpt-5',
   extraction: 'gpt-5-mini',
 };
 

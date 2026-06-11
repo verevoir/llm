@@ -7,8 +7,9 @@ describe('@verevoir/llm/anthropic — exported model table', () => {
     expect(PROVIDER).toBe('anthropic');
   });
 
-  it('maps the two model classes to concrete model ids', () => {
+  it('maps the three model classes to concrete model ids', () => {
     expect(models.reasoning).toBe('claude-opus-4-7');
+    expect(models.drafting).toBe('claude-sonnet-4-6');
     expect(models.extraction).toBe('claude-haiku-4-5-20251001');
   });
 
@@ -28,6 +29,7 @@ describe('@verevoir/llm/anthropic — exported model table', () => {
     // helper. The label registry is the consumer-visible affordance —
     // tile UI calls modelLabel(id) and expects "Opus" / "Haiku".
     expect(modelLabel('claude-opus-4-7')).toBe('Opus');
+    expect(modelLabel('claude-sonnet-4-6')).toBe('Sonnet');
     expect(modelLabel('claude-haiku-4-5-20251001')).toBe('Haiku');
   });
 });
