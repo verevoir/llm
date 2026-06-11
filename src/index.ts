@@ -18,6 +18,10 @@
  * - `reasoning`: open-ended judgement, cross-document synthesis,
  *   nuanced chat. The conservative default for sites that have to
  *   think across context.
+ * - `drafting`: produce substantial new content — code, prose, drafts.
+ *   The mid-tier workhorse, between reasoning and extraction. Maps to
+ *   Sonnet on Anthropic; on providers with no distinct mid it resolves
+ *   up to the reasoning model.
  * - `extraction`: structured turn-text-into-shape tasks (URLs from a
  *   conversation, config from a paragraph). Quick, predictable,
  *   constrained output. Smallest competent model.
@@ -27,7 +31,7 @@
  * through to {@link TokenUsage} as `direction` so cost rollups can
  * break down spend per direction natively.
  */
-export type ModelClass = 'reasoning' | 'extraction';
+export type ModelClass = 'reasoning' | 'drafting' | 'extraction';
 
 /**
  * Per-turn content. Plain `string` is the convenient v0 shape for
