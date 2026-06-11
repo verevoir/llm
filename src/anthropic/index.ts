@@ -39,7 +39,7 @@ export const PROVIDER = 'anthropic';
  * upgrades don't need to ripple through call sites.
  */
 export const models: Readonly<Record<ModelClass, string>> = {
-  reasoning: 'claude-opus-4-7',
+  reasoning: 'claude-opus-4-8',
   drafting: 'claude-sonnet-4-6',
   extraction: 'claude-haiku-4-5-20251001',
 };
@@ -57,7 +57,7 @@ export const models: Readonly<Record<ModelClass, string>> = {
  * Each rate-tuple is `[input_per_million_USD, output_per_million_USD]`.
  */
 export const rates: RatesTable = {
-  'claude-opus-4-7': [15, 75],
+  'claude-opus-4-8': [15, 75],
   'claude-sonnet-4-6': [3, 15],
   'claude-haiku-4-5-20251001': [1, 5],
 } as const;
@@ -66,7 +66,7 @@ export const rates: RatesTable = {
 // helper returns "Opus" / "Haiku" without the consumer wiring them
 // manually. Import side-effect; idempotent.
 registerModelLabels({
-  'claude-opus-4-7': 'Opus',
+  'claude-opus-4-8': 'Opus',
   'claude-sonnet-4-6': 'Sonnet',
   'claude-haiku-4-5-20251001': 'Haiku',
 });
