@@ -22,8 +22,12 @@ export const PROVIDER = 'samba';
 /** SambaNova's OpenAI-compatible base URL. */
 export const BASE_URL = 'https://api.sambanova.ai/v1';
 
-// Pricing is approximate SambaNova-published USD/Mtok (worst-case input rate),
-// 2026-06; refresh when SambaNova republishes.
+// Model ids verified against the live SambaNova `/models` catalogue (2026-06):
+// it hosts a small rotating set (Llama-3.3-70B, DeepSeek-V3.x, gpt-oss, gemma,
+// MiniMax). Defaults: reasoning → Llama-3.3-70B, extraction → DeepSeek-V3.2
+// (both tool-capable). Pricing is approximate worst-case USD/Mtok; refresh when
+// SambaNova republishes. Decisions key on provider/family, so the exact id is
+// reporting metadata and a new V3 point-release still normalises via the prefix.
 const CATALOG: ModelCatalogEntry[] = [
   {
     provider: PROVIDER,
@@ -36,12 +40,12 @@ const CATALOG: ModelCatalogEntry[] = [
   },
   {
     provider: PROVIDER,
-    family: 'llama-8b',
+    family: 'deepseek-v3',
     modelClass: 'extraction',
-    currentId: 'Meta-Llama-3.1-8B-Instruct',
-    rates: [0.1, 0.2],
-    label: 'Llama 3.1 8B',
-    prefixes: ['Meta-Llama-3.1-8B'],
+    currentId: 'DeepSeek-V3.2',
+    rates: [0.6, 1.5],
+    label: 'DeepSeek V3.2',
+    prefixes: ['DeepSeek-V3'],
   },
 ];
 
@@ -55,6 +59,8 @@ const adapter = createOpenAICompatAdapter({
 export const models = adapter.models;
 export const rates = adapter.rates;
 export const chat = adapter.chat;
+export const chatWithTools = adapter.chatWithTools;
+export const chatWithToolLoop = adapter.chatWithToolLoop;
 
 /** Namespaced form for callers that prefer `samba.chat(...)`. */
 export const samba = adapter;

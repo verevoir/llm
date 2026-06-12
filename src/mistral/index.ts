@@ -52,6 +52,8 @@ const adapter = createOpenAICompatAdapter({
 export const models = adapter.models;
 export const rates = adapter.rates;
 export const chat = adapter.chat;
+export const chatWithTools = adapter.chatWithTools;
+export const chatWithToolLoop = adapter.chatWithToolLoop;
 
 /** Namespaced form for callers that prefer `mistral.chat(...)`. */
 export const mistral = adapter;

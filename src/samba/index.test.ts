@@ -8,9 +8,9 @@ describe('@verevoir/llm/samba — exported model table', () => {
     expect(BASE_URL).toBe('https://api.sambanova.ai/v1');
   });
 
-  it('maps classes to model ids (extraction = 8B; drafting falls up to 70B)', () => {
+  it('maps classes to live-catalogue model ids (extraction = DeepSeek-V3.2; drafting falls up to Llama-70B)', () => {
     expect(models.reasoning).toBe('Meta-Llama-3.3-70B-Instruct');
-    expect(models.extraction).toBe('Meta-Llama-3.1-8B-Instruct');
+    expect(models.extraction).toBe('DeepSeek-V3.2');
     expect(models.drafting).toBe('Meta-Llama-3.3-70B-Instruct');
   });
 
@@ -26,6 +26,8 @@ describe('@verevoir/llm/samba — exported model table', () => {
       provider: 'samba',
       family: 'llama-70b',
     });
-    expect(modelLabel('Meta-Llama-3.1-8B-Instruct')).toBe('Llama 3.1 8B');
+    expect(modelLabel('DeepSeek-V3.2')).toBe('DeepSeek V3.2');
+    // a future V3 point-release still normalises to the family via the prefix
+    expect(normalizeModelId('DeepSeek-V3.9')).toEqual({ provider: 'samba', family: 'deepseek-v3' });
   });
 });
