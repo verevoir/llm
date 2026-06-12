@@ -371,7 +371,11 @@ const CACHE_WRITE_MULTIPLIER = 1.25;
 export function estimateCostUSD(usage: PerModelUsage, rates: RatesTable): number {
   let total = 0;
   for (const [model, v] of Object.entries(usage)) {
-    const rate = rates[model];
+    // Exact id first (cheapest), then the family catalog — so a new, unseen
+    // version of a known family still prices instead of silently zeroing.
+    // Genuinely unknown ids still contribute 0 (see `uncoveredModels` for the
+    // loud surface).
+    const rate = rates[model] ?? catalogEntryFor(model)?.rates;
     if (!rate) continue;
     const inputRate = rate[0];
     const outputRate = rate[1];
@@ -400,7 +404,113 @@ export function registerModelLabels(labels: Record<string, string>): void {
   Object.assign(MODEL_LABELS, labels);
 }
 
-/** Display label for a model id, falling back to the id itself. */
+/** Display label for a model id, falling back to the catalog's family label
+ * (so a new, unregistered version of a known family still labels sensibly)
+ * and finally to the bare id. */
 export function modelLabel(id: string): string {
-  return MODEL_LABELS[id] ?? id;
+  return MODEL_LABELS[id] ?? catalogEntryFor(id)?.label ?? id;
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Model identity — decisions key on provider/family, never on version
+// ────────────────────────────────────────────────────────────────────
+
+/**
+ * A version-free model identity — `{ provider, family }`, e.g.
+ * `{ anthropic, haiku }`. This is the **decision key**: routing, tier pools,
+ * and pricing branch on it, never on the exact versioned id. The concrete
+ * version (`claude-haiku-4-5-20251001`) is reporting metadata only.
+ */
+export interface ModelIdentity {
+  provider: string;
+  family: string;
+}
+
+/**
+ * A catalog entry — the single source of truth for one model family. An
+ * adapter registers its families once (via {@link registerModelCatalog}) and
+ * derives its `models` / `rates` / labels from the same entries, so a version
+ * bump is a one-line `currentId` change rather than edits rippling across
+ * three hand-maintained tables.
+ */
+export interface ModelCatalogEntry {
+  /** Provider id, e.g. `anthropic`. */
+  provider: string;
+  /** Decision-key family, e.g. `opus` | `sonnet` | `haiku`. */
+  family: string;
+  /** The concrete versioned id used for the actual API call + reporting. */
+  currentId: string;
+  /** Pricing at the family level (version-stable). */
+  rates: RateTuple;
+  /** Display label, e.g. `Haiku`. */
+  label: string;
+  /** Which model-class this family serves, if the adapter routes by class. */
+  modelClass?: ModelClass;
+  /** Older / alternate exact ids that also normalise to this family, so
+   * historical usage still prices and labels. */
+  aliases?: string[];
+  /** Id prefixes that resolve **forward** to this family — a new, unseen
+   * version of a known family (e.g. `claude-haiku-…`) still normalises
+   * rather than dropping to "unknown". */
+  prefixes?: string[];
+}
+
+const MODEL_CATALOG: ModelCatalogEntry[] = [];
+
+/**
+ * Register model families into the catalog. Idempotent per `provider/family`
+ * (re-registering replaces). Also registers each entry's `currentId` and
+ * `aliases` as labels, so the existing {@link modelLabel} path keeps working
+ * without a separate {@link registerModelLabels} call.
+ */
+export function registerModelCatalog(entries: ModelCatalogEntry[]): void {
+  for (const e of entries) {
+    const i = MODEL_CATALOG.findIndex((x) => x.provider === e.provider && x.family === e.family);
+    if (i >= 0) MODEL_CATALOG[i] = e;
+    else MODEL_CATALOG.push(e);
+    registerModelLabels({ [e.currentId]: e.label });
+    for (const alias of e.aliases ?? []) registerModelLabels({ [alias]: e.label });
+  }
+}
+
+/**
+ * Normalise a concrete model id to its `{ provider, family }`, or `null` when
+ * no registered family claims it (the **loud-on-miss** signal: callers should
+ * surface a null rather than silently mis-route). Match order: exact
+ * `currentId`, exact `alias`, then `prefix` — the prefix pass is what lets a
+ * brand-new version of a known family resolve forward instead of falling off.
+ */
+export function normalizeModelId(id: string): ModelIdentity | null {
+  for (const e of MODEL_CATALOG) {
+    if (e.currentId === id || e.aliases?.includes(id)) {
+      return { provider: e.provider, family: e.family };
+    }
+  }
+  for (const e of MODEL_CATALOG) {
+    if (e.prefixes?.some((p) => id.startsWith(p))) {
+      return { provider: e.provider, family: e.family };
+    }
+  }
+  return null;
+}
+
+/** The catalog entry a concrete id normalises to, or `null`. */
+export function catalogEntryFor(id: string): ModelCatalogEntry | null {
+  const ident = normalizeModelId(id);
+  if (!ident) return null;
+  return (
+    MODEL_CATALOG.find((e) => e.provider === ident.provider && e.family === ident.family) ?? null
+  );
+}
+
+/**
+ * The model ids in a usage rollup that price to nothing — neither in the
+ * supplied `rates` table nor resolvable via the catalog. This is the **loud**
+ * surface for "we billed something we can't price": a cost display should warn
+ * on a non-empty result rather than quietly showing an under-count. Distinct
+ * from {@link estimateCostUSD}, which stays silent (back-compat) and treats an
+ * uncovered model as $0.
+ */
+export function uncoveredModels(usage: PerModelUsage, rates: RatesTable = {}): string[] {
+  return Object.keys(usage).filter((model) => !rates[model] && !catalogEntryFor(model)?.rates);
 }

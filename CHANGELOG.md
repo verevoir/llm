@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.10.0] — 2026-06-12
+
+De-brittled model identity — **decisions key on `provider/family`, never on the exact version** (STDIO-332). A version bump used to silently zero a model's cost and forced downstream band-aids (duplicate `…-4-5` / `…-4-5-20251001` rate rows). The version string is now reporting metadata only.
+
+- **New: a model catalog as the single source of truth.** `ModelCatalogEntry { provider, family, currentId, rates, label, modelClass?, aliases?, prefixes? }` registered via `registerModelCatalog()`. An adapter declares each family once and derives its `models` / `rates` / labels from it — a version upgrade is a one-line `currentId` change, not three hand-edited tables.
+- **New: `normalizeModelId(id) → { provider, family } | null`.** Matches `currentId`, then `aliases`, then a `prefix` pass — so a brand-new, unseen version of a known family (`claude-haiku-…`) resolves **forward** instead of dropping to unknown. `catalogEntryFor(id)` returns the resolved entry.
+- **`estimateCostUSD` + `modelLabel` fall back to the family catalog**, so a drifted version prices and labels correctly with no new row. `estimateCostUSD` stays silent on a genuinely-unknown model (back-compat: still contributes $0); **`uncoveredModels(usage, rates?)`** is the new loud-on-miss surface a cost display can warn on.
+- **Anthropic adapter:** `models` / `rates` / labels now derive from one `CATALOG`. All existing exports (`models`, `rates`, `PROVIDER`, `anthropic`, `registerModelLabels`, …) are preserved; the change is additive.
+
 ## [0.8.0] — 2026-05-29
 
 Cache-aware cost accounting — prompt-cache savings are now visible in `estimateCostUSD` instead of buried at the standard input rate (STDIO-166). Profiling-grade instrumentation for the LLM-optimisation pass; backwards-compatible.
