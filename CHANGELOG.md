@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.12.0] — 2026-06-12
+
+**Tool calling on the OpenAI-compatible adapters** (STDIO-342) — so Mistral / SambaNova / DeepSeek-via-Samba can drive a tool loop, not just plain `chat()`. Tool-using enactment is the actual mechanism; without it a cross-provider matrix is "a bit pointless".
+
+- **`createOpenAICompatAdapter` gains `chatWithTools` (single-shot) + `chatWithToolLoop`** (model → execute tools → feed `tool_result` back → repeat, to a `maxIterations` cap). Uses OpenAI Chat Completions native `tools`/`tool_calls`; provider-agnostic `ToolDef`/`ToolUse` map straight across. Same surface as the Anthropic adapter's tool methods. Exposed from `@verevoir/llm/mistral` and `@verevoir/llm/samba`.
+- **Fix: SambaNova model ids corrected to the live catalogue.** 0.11.0 defaulted extraction to `Meta-Llama-3.1-8B-Instruct`, which SambaNova doesn't host. Verified via the `/models` endpoint: defaults are now `Meta-Llama-3.3-70B-Instruct` (reasoning) + `DeepSeek-V3.2` (extraction), both tool-capable. (Decisions key on provider/family, so a new `DeepSeek-V3.x` point-release still normalises via the prefix.)
+- Gemini (`/google`) tool calling — a separate API shape — is the follow-up; the matrix's enactment path needs both.
+
 ## [0.11.0] — 2026-06-12
 
 Two more providers — **SambaNova** and **Mistral** — for the cross-provider model matrix (STDIO-332). Both expose OpenAI-compatible Chat Completions APIs.

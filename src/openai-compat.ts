@@ -22,9 +22,15 @@ import {
   type ChatOptions,
   type ChatReply,
   type ChatRetryInfo,
+  type ChatWithToolLoopOptions,
+  type ChatWithToolLoopResult,
+  type ChatWithToolsOptions,
+  type ChatWithToolsResult,
   type ModelCatalogEntry,
   type ModelClass,
   type RatesTable,
+  type ToolDef,
+  type ToolUse,
   type TokenUsage,
   registerModelCatalog,
 } from './index.js';
@@ -50,6 +56,15 @@ export interface OpenAICompatAdapter {
   models: Readonly<Record<ModelClass, string>>;
   rates: RatesTable;
   chat: (options: ChatOptions) => Promise<ChatReply>;
+  chatWithTools: (options: ChatWithToolsOptions) => Promise<ChatWithToolsResult>;
+  chatWithToolLoop: (options: ChatWithToolLoopOptions) => Promise<ChatWithToolLoopResult>;
+}
+
+/** OpenAI Chat Completions tool-call shape we read off a response. */
+interface OpenAIToolCall {
+  id: string;
+  type: 'function';
+  function: { name: string; arguments: string };
 }
 
 // Same exponential-backoff shape as the other adapters; reason strings name the
@@ -252,5 +267,208 @@ export function createOpenAICompatAdapter(config: OpenAICompatConfig): OpenAICom
     return { content: raw.text, usage, stopReason: raw.finishReason };
   }
 
-  return { PROVIDER: provider, BASE_URL: baseURL, models, rates, chat };
+  // ── Tool calling (STDIO-342) ───────────────────────────────────────────────
+  // OpenAI Chat Completions exposes native function/tool calling. Map our
+  // provider-agnostic ToolDef → OpenAI `tools`, and read `tool_calls` back.
+  // This is what makes the providers usable for enactment (a tool-driven loop),
+  // not just plain chat.
+
+  function toOpenAITools(tools: ToolDef[]) {
+    return tools.map((t) => ({
+      type: 'function' as const,
+      function: { name: t.name, description: t.description, parameters: t.input_schema },
+    }));
+  }
+
+  function parseToolUse(tc: OpenAIToolCall): ToolUse {
+    let input: Record<string, unknown> = {};
+    try {
+      input = tc.function.arguments
+        ? (JSON.parse(tc.function.arguments) as Record<string, unknown>)
+        : {};
+    } catch {
+      input = { _raw: tc.function.arguments };
+    }
+    return { id: tc.id, name: tc.function.name, input };
+  }
+
+  function baseMessages(systemPrompt: string, turns: ChatOptions['turns']): unknown[] {
+    return [
+      { role: 'system', content: systemPrompt },
+      ...turns.map((t) => ({ role: t.role, content: t.content as string })),
+    ];
+  }
+
+  // One tool-enabled completion: assistant text + the tool calls it emitted + usage.
+  async function createWithTools(
+    client: OpenAI,
+    modelId: string,
+    messages: unknown[],
+    tools: ReturnType<typeof toOpenAITools>
+  ): Promise<{
+    text: string;
+    rawCalls: OpenAIToolCall[];
+    raw: RawResult['rawUsage'];
+    finishReason: string;
+  }> {
+    const response = await client.chat.completions.create({
+      model: modelId,
+      messages: messages as never,
+      tools: tools.length > 0 ? (tools as never) : undefined,
+    });
+    const choice = response.choices?.[0];
+    const msg = (choice?.message ?? {}) as {
+      content?: string | null;
+      tool_calls?: OpenAIToolCall[];
+    };
+    const u = (response.usage ?? {}) as CompatUsage;
+    return {
+      text: msg.content ?? '',
+      rawCalls: msg.tool_calls ?? [],
+      raw: {
+        inputTokens: u.prompt_tokens ?? 0,
+        outputTokens: u.completion_tokens ?? 0,
+        cachedInputTokens: u.prompt_cache_hit_tokens ?? u.prompt_tokens_details?.cached_tokens ?? 0,
+      },
+      finishReason: choice?.finish_reason ?? '',
+    };
+  }
+
+  /** Single-shot tool-calling: surface the model's tool_calls for the caller to
+   * execute (no automated loop). Mirrors the Anthropic adapter's chatWithTools. */
+  async function chatWithTools(options: ChatWithToolsOptions): Promise<ChatWithToolsResult> {
+    if (options.turns.length === 0)
+      throw new Error(`${provider}.chatWithTools() requires at least one turn`);
+    if (options.tools.length === 0)
+      throw new Error(`${provider}.chatWithTools() requires at least one tool`);
+    throwIfAborted(options.abortSignal);
+    const modelClass: ModelClass = options.modelClass ?? 'reasoning';
+    const client = getClient(options.apiKey ?? null);
+    const modelId = models[modelClass];
+    const tools = toOpenAITools(options.tools);
+
+    const r = await callWithRetries(
+      () =>
+        createWithTools(client, modelId, baseMessages(options.systemPrompt, options.turns), tools),
+      options.onRetry
+    );
+    const usage = shapeUsage(r.raw, modelClass);
+    if (options.onUsage) {
+      try {
+        await options.onUsage(usage);
+      } catch (err) {
+        console.warn(`${provider}.chatWithTools: onUsage threw`, err);
+      }
+    }
+    return {
+      toolUses: r.rawCalls.map(parseToolUse),
+      text: r.text,
+      stopReason: r.finishReason,
+      usage,
+    };
+  }
+
+  /** Multi-turn tool loop: model → execute tools → feed tool results back, until
+   * the model returns a tool-free message (or maxIterations). Mirrors the
+   * Anthropic adapter's chatWithToolLoop, in OpenAI message shape. */
+  async function chatWithToolLoop(
+    options: ChatWithToolLoopOptions
+  ): Promise<ChatWithToolLoopResult> {
+    if (options.turns.length === 0)
+      throw new Error(`${provider}.chatWithToolLoop() requires at least one turn`);
+    if (options.tools.length === 0)
+      throw new Error(`${provider}.chatWithToolLoop() requires at least one tool`);
+    const modelClass: ModelClass = options.modelClass ?? 'reasoning';
+    const client = getClient(options.apiKey ?? null);
+    const modelId = models[modelClass];
+    const tools = toOpenAITools(options.tools);
+    const maxIterations = Math.max(1, options.maxIterations ?? 5);
+
+    const messages: unknown[] = baseMessages(options.systemPrompt, options.turns);
+    const allToolUses: ToolUse[] = [];
+    const allToolResults: ChatWithToolLoopResult['toolResults'] = [];
+    const aggregate: TokenUsage = {
+      provider,
+      model: modelId,
+      direction: modelClass,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheCreationInputTokens: 0,
+      cacheReadInputTokens: 0,
+    };
+
+    let iteration = 0;
+    while (iteration < maxIterations) {
+      iteration += 1;
+      throwIfAborted(options.abortSignal);
+      const r = await callWithRetries(
+        () => createWithTools(client, modelId, messages, tools),
+        options.onRetry
+      );
+      aggregate.inputTokens += r.raw.inputTokens;
+      aggregate.outputTokens += r.raw.outputTokens;
+      aggregate.cacheReadInputTokens += r.raw.cachedInputTokens;
+      if (options.onUsage) {
+        try {
+          await options.onUsage(shapeUsage(r.raw, modelClass));
+        } catch (err) {
+          console.warn(`${provider}.chatWithToolLoop: onUsage threw`, err);
+        }
+      }
+      if (options.onIteration) {
+        try {
+          await options.onIteration({
+            iteration,
+            toolUses: r.rawCalls.map(parseToolUse),
+            stopReason: r.finishReason,
+          });
+        } catch (err) {
+          console.warn(`${provider}.chatWithToolLoop: onIteration threw`, err);
+        }
+      }
+      if (r.rawCalls.length === 0) {
+        return {
+          text: r.text,
+          toolUses: allToolUses,
+          toolResults: allToolResults,
+          iterations: iteration,
+          usage: aggregate,
+        };
+      }
+      // Append the assistant turn verbatim (text + tool_calls) so the model
+      // recognises the tool results that follow.
+      messages.push({ role: 'assistant', content: r.text || null, tool_calls: r.rawCalls });
+      for (const tc of r.rawCalls) {
+        const use = parseToolUse(tc);
+        allToolUses.push(use);
+        let content: string;
+        let isError = false;
+        try {
+          content = await options.executor(use);
+        } catch (err) {
+          content = err instanceof Error ? err.message : String(err);
+          isError = true;
+        }
+        messages.push({ role: 'tool', tool_call_id: tc.id, content });
+        allToolResults.push({ toolUseId: tc.id, content, isError });
+      }
+    }
+    return {
+      text: '',
+      toolUses: allToolUses,
+      toolResults: allToolResults,
+      iterations: iteration,
+      usage: aggregate,
+    };
+  }
+
+  return {
+    PROVIDER: provider,
+    BASE_URL: baseURL,
+    models,
+    rates,
+    chat,
+    chatWithTools,
+    chatWithToolLoop,
+  };
 }
