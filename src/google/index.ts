@@ -16,8 +16,14 @@ import {
   type ChatOptions,
   type ChatReply,
   type ChatRetryInfo,
+  type ChatWithToolLoopOptions,
+  type ChatWithToolLoopResult,
+  type ChatWithToolsOptions,
+  type ChatWithToolsResult,
   type ModelClass,
   type RatesTable,
+  type ToolDef,
+  type ToolUse,
   type TokenUsage,
   registerModelLabels,
 } from '../index.js';
@@ -291,5 +297,229 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
     content: raw.text,
     usage,
     stopReason: raw.finishReason,
+  };
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Tool calling (STDIO-342)
+// ────────────────────────────────────────────────────────────────────
+//
+// Gemini's function calling: declare functions in `config.tools`, read
+// `response.functionCalls` back, and feed results in as `functionResponse`
+// parts. Schema `type` is an uppercase `Type` enum (STRING / OBJECT / …), so we
+// uppercase our JSON-schema types.
+
+type GeminiContent = { role: string; parts: unknown[] };
+
+/** Convert a JSON-schema-ish object to Gemini's Schema shape (uppercase types). */
+function toGeminiSchema(s: unknown): unknown {
+  if (!s || typeof s !== 'object') return s;
+  const src = s as Record<string, unknown>;
+  const out: Record<string, unknown> = { ...src };
+  if (typeof out.type === 'string') out.type = (out.type as string).toUpperCase();
+  if (out.properties && typeof out.properties === 'object') {
+    out.properties = Object.fromEntries(
+      Object.entries(out.properties as Record<string, unknown>).map(([k, v]) => [
+        k,
+        toGeminiSchema(v),
+      ])
+    );
+  }
+  if (out.items) out.items = toGeminiSchema(out.items);
+  return out;
+}
+
+function toGeminiTools(tools: ToolDef[]) {
+  return [
+    {
+      functionDeclarations: tools.map((t) => ({
+        name: t.name,
+        description: t.description,
+        parameters: toGeminiSchema(t.input_schema),
+      })),
+    },
+  ];
+}
+
+function turnsToContents(turns: ChatOptions['turns']): GeminiContent[] {
+  return turns.map((t) => ({
+    role: t.role === 'assistant' ? 'model' : 'user',
+    parts: [{ text: t.content as string }],
+  }));
+}
+
+interface GeminiToolResult {
+  text: string;
+  functionCalls: { id?: string; name: string; args: Record<string, unknown> }[];
+  /** The model's content turn (with functionCall parts), to append in the loop. */
+  modelContent: GeminiContent | null;
+  rawUsage: RawResult['rawUsage'];
+  finishReason: string;
+}
+
+async function callGenerateWithTools(
+  client: GoogleGenAI,
+  modelId: string,
+  systemPrompt: string,
+  contents: GeminiContent[],
+  tools: ReturnType<typeof toGeminiTools>
+): Promise<GeminiToolResult> {
+  const response = await client.models.generateContent({
+    model: modelId,
+    contents: contents as never,
+    config: { systemInstruction: systemPrompt, tools: tools as never },
+  });
+  const u = response.usageMetadata ?? {};
+  const candidates = response.candidates ?? [];
+  const fcs = (response.functionCalls ?? []) as {
+    id?: string;
+    name?: string;
+    args?: Record<string, unknown>;
+  }[];
+  return {
+    text: response.text ?? '',
+    functionCalls: fcs
+      .filter((f): f is { id?: string; name: string; args?: Record<string, unknown> } => !!f.name)
+      .map((f) => ({ id: f.id, name: f.name, args: f.args ?? {} })),
+    modelContent: (candidates[0]?.content as GeminiContent | undefined) ?? null,
+    rawUsage: {
+      inputTokens: u.promptTokenCount ?? 0,
+      outputTokens: u.candidatesTokenCount ?? 0,
+      cachedInputTokens: u.cachedContentTokenCount ?? 0,
+    },
+    finishReason: String(candidates[0]?.finishReason ?? ''),
+  };
+}
+
+/** Single-shot tool-calling: surface the model's functionCalls for the caller
+ * to execute. Mirrors the Anthropic adapter's chatWithTools. */
+export async function chatWithTools(options: ChatWithToolsOptions): Promise<ChatWithToolsResult> {
+  if (options.turns.length === 0)
+    throw new Error('google.chatWithTools() requires at least one turn');
+  if (options.tools.length === 0)
+    throw new Error('google.chatWithTools() requires at least one tool');
+  throwIfAborted(options.abortSignal);
+  const modelClass: ModelClass = options.modelClass ?? 'reasoning';
+  const client = getClient(options.apiKey ?? null);
+  const modelId = models[modelClass];
+
+  const r = await callWithRetries(
+    () =>
+      callGenerateWithTools(
+        client,
+        modelId,
+        options.systemPrompt,
+        turnsToContents(options.turns),
+        toGeminiTools(options.tools)
+      ),
+    options.onRetry
+  );
+  const usage = shapeUsage(r.rawUsage, modelClass);
+  await fireUsageHook(options.onUsage, usage, 'google.chatWithTools');
+  return {
+    toolUses: r.functionCalls.map((f) => ({ id: f.id ?? f.name, name: f.name, input: f.args })),
+    text: r.text,
+    stopReason: r.finishReason,
+    usage,
+  };
+}
+
+/** Multi-turn tool loop: model → execute tools → feed functionResponse parts
+ * back, until the model returns a call-free reply (or maxIterations). Mirrors
+ * the Anthropic adapter's chatWithToolLoop, in Gemini's content shape. */
+export async function chatWithToolLoop(
+  options: ChatWithToolLoopOptions
+): Promise<ChatWithToolLoopResult> {
+  if (options.turns.length === 0)
+    throw new Error('google.chatWithToolLoop() requires at least one turn');
+  if (options.tools.length === 0)
+    throw new Error('google.chatWithToolLoop() requires at least one tool');
+  const modelClass: ModelClass = options.modelClass ?? 'reasoning';
+  const client = getClient(options.apiKey ?? null);
+  const modelId = models[modelClass];
+  const tools = toGeminiTools(options.tools);
+  const maxIterations = Math.max(1, options.maxIterations ?? 5);
+
+  const contents: GeminiContent[] = turnsToContents(options.turns);
+  const allToolUses: ToolUse[] = [];
+  const allToolResults: ChatWithToolLoopResult['toolResults'] = [];
+  const aggregate: TokenUsage = {
+    provider: PROVIDER,
+    model: modelId,
+    direction: modelClass,
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheCreationInputTokens: 0,
+    cacheReadInputTokens: 0,
+  };
+
+  let iteration = 0;
+  while (iteration < maxIterations) {
+    iteration += 1;
+    throwIfAborted(options.abortSignal);
+    const r = await callWithRetries(
+      () => callGenerateWithTools(client, modelId, options.systemPrompt, contents, tools),
+      options.onRetry
+    );
+    aggregate.inputTokens += r.rawUsage.inputTokens;
+    aggregate.outputTokens += r.rawUsage.outputTokens;
+    aggregate.cacheReadInputTokens += r.rawUsage.cachedInputTokens;
+    await fireUsageHook(
+      options.onUsage,
+      shapeUsage(r.rawUsage, modelClass),
+      'google.chatWithToolLoop'
+    );
+    if (options.onIteration) {
+      try {
+        await options.onIteration({
+          iteration,
+          toolUses: r.functionCalls.map((f) => ({
+            id: f.id ?? f.name,
+            name: f.name,
+            input: f.args,
+          })),
+          stopReason: r.finishReason,
+        });
+      } catch (err) {
+        console.warn('google.chatWithToolLoop: onIteration callback threw', err);
+      }
+    }
+    if (r.functionCalls.length === 0) {
+      return {
+        text: r.text,
+        toolUses: allToolUses,
+        toolResults: allToolResults,
+        iterations: iteration,
+        usage: aggregate,
+      };
+    }
+    // Append the model's turn (carrying the functionCall parts) verbatim, then a
+    // user turn of functionResponse parts.
+    if (r.modelContent) contents.push(r.modelContent);
+    const responseParts: unknown[] = [];
+    for (const fc of r.functionCalls) {
+      const use: ToolUse = { id: fc.id ?? fc.name, name: fc.name, input: fc.args };
+      allToolUses.push(use);
+      let content: string;
+      let isError = false;
+      try {
+        content = await options.executor(use);
+      } catch (err) {
+        content = err instanceof Error ? err.message : String(err);
+        isError = true;
+      }
+      responseParts.push({
+        functionResponse: { id: fc.id, name: fc.name, response: { output: content } },
+      });
+      allToolResults.push({ toolUseId: use.id, content, isError });
+    }
+    contents.push({ role: 'user', parts: responseParts });
+  }
+  return {
+    text: '',
+    toolUses: allToolUses,
+    toolResults: allToolResults,
+    iterations: iteration,
+    usage: aggregate,
   };
 }
