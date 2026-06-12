@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.11.0] — 2026-06-12
+
+Two more providers — **SambaNova** and **Mistral** — for the cross-provider model matrix (STDIO-332). Both expose OpenAI-compatible Chat Completions APIs.
+
+- **New `@verevoir/llm/samba`** (`SAMBA_NOVA_API_KEY`) and **`@verevoir/llm/mistral`** (`MISTRAL_API_KEY`) — `chat()` only, matching the staged rollout of `/openai` + `/deepseek`. Both reuse the existing `openai` peer dependency pointed at the provider's `baseURL`.
+- **New shared `createOpenAICompatAdapter` factory** (internal). DeepSeek/SambaNova/Mistral all differ only in base URL, key env var, and model catalogue, so the adapter is built from a small config rather than copied per provider. The new adapters are born **de-brittle**: they register a provider/family **model catalogue** (0.10.0), so `models` / `rates` / labels derive from one source and decisions key on `provider/family`, not the exact version (a new version of a listed family still normalises + prices via its prefix). A tier ladder fills any class a provider doesn't declare (drafting falls up to reasoning).
+- Default model tables and pricing are sensible starting points (worst-case input rates) — verify model ids + rates against each provider's current catalogue; since decisions key on family, the exact default id is reporting metadata.
+
 ## [0.10.0] — 2026-06-12
 
 De-brittled model identity — **decisions key on `provider/family`, never on the exact version** (STDIO-332). A version bump used to silently zero a model's cost and forced downstream band-aids (duplicate `…-4-5` / `…-4-5-20251001` rate rows). The version string is now reporting metadata only.
