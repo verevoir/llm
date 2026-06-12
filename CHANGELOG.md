@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.13.0] — 2026-06-12
+
+**Tool calling on the Google (Gemini) adapter** (STDIO-342) — the last provider gap, so the whole matrix is now tool-capable.
+
+- **`@verevoir/llm/google` gains `chatWithTools` (single-shot) + `chatWithToolLoop`** using Gemini's function-calling: `config.tools` function declarations, `response.functionCalls` read back, results fed in as `functionResponse` parts. Same surface as the Anthropic + OpenAI-compatible adapters. JSON-schema `type`s are uppercased into Gemini's `Type` enum form.
+- **Validated against the live Gemini API** (the tool loop runs, the model invokes the tool with parsed args, and returns a final reply) in addition to the mocked unit tests.
+
+With this, every provider in the cross-provider matrix — Anthropic, Google, Mistral, SambaNova (Llama + DeepSeek) — can drive the tool loop that enactment depends on.
+
 ## [0.12.0] — 2026-06-12
 
 **Tool calling on the OpenAI-compatible adapters** (STDIO-342) — so Mistral / SambaNova / DeepSeek-via-Samba can drive a tool loop, not just plain `chat()`. Tool-using enactment is the actual mechanism; without it a cross-provider matrix is "a bit pointless".
