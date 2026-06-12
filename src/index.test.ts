@@ -4,7 +4,11 @@ import {
   formatTokensCompact,
   modelLabel,
   parseUsage,
+  registerModelCatalog,
   registerModelLabels,
+  normalizeModelId,
+  catalogEntryFor,
+  uncoveredModels,
   sumUsages,
   totalTokens,
   type PerModelUsage,
@@ -165,5 +169,74 @@ describe('modelLabel / registerModelLabels', () => {
   it('returns the registered label when present', () => {
     registerModelLabels({ 'test-model': 'Test' });
     expect(modelLabel('test-model')).toBe('Test');
+  });
+});
+
+// A self-contained family for the identity tests, so they don't depend on any
+// adapter being imported. Provider id is namespaced to avoid colliding with a
+// real adapter's catalog if one is ever registered in this file.
+describe('model identity catalog — decisions key on provider/family', () => {
+  registerModelCatalog([
+    {
+      provider: 'test-co',
+      family: 'big',
+      modelClass: 'reasoning',
+      currentId: 'testco-big-1-0',
+      rates: [10, 40],
+      label: 'Big',
+      aliases: ['testco-big-0-9'],
+      prefixes: ['testco-big-'],
+    },
+  ]);
+
+  it('normalises the current id, an alias, and a brand-new version (prefix) to the same family', () => {
+    expect(normalizeModelId('testco-big-1-0')).toEqual({ provider: 'test-co', family: 'big' });
+    expect(normalizeModelId('testco-big-0-9')).toEqual({ provider: 'test-co', family: 'big' });
+    // a version the catalog has never seen still resolves forward via the prefix
+    expect(normalizeModelId('testco-big-2-5-20990101')).toEqual({
+      provider: 'test-co',
+      family: 'big',
+    });
+  });
+
+  it('returns null for an id no family claims', () => {
+    expect(normalizeModelId('someone-else-model')).toBeNull();
+    expect(catalogEntryFor('someone-else-model')).toBeNull();
+  });
+
+  it('prices an unseen version of a known family via the catalog (version drift no longer zeroes cost)', () => {
+    const usage: PerModelUsage = { 'testco-big-2-5-20990101': { in: 1_000_000, out: 1_000_000 } };
+    // rates table passed in does NOT list the drifted id; the family catalog covers it.
+    expect(estimateCostUSD(usage, {})).toBeCloseTo(10 + 40, 5);
+  });
+
+  it('labels an unseen version of a known family by its family label', () => {
+    expect(modelLabel('testco-big-2-5-20990101')).toBe('Big');
+  });
+
+  it('reports genuinely uncoverable models loudly, but not catalog-covered ones', () => {
+    const usage: PerModelUsage = {
+      'testco-big-2-5-20990101': { in: 1, out: 1 },
+      'mystery-model': { in: 1, out: 1 },
+    };
+    expect(uncoveredModels(usage)).toEqual(['mystery-model']);
+    // an explicit rates table can also cover a model the catalog doesn't know
+    expect(uncoveredModels(usage, { 'mystery-model': [1, 1] })).toEqual([]);
+  });
+
+  it('re-registering a provider/family replaces rather than duplicates', () => {
+    registerModelCatalog([
+      {
+        provider: 'test-co',
+        family: 'big',
+        modelClass: 'reasoning',
+        currentId: 'testco-big-3-0',
+        rates: [20, 80],
+        label: 'Big',
+        prefixes: ['testco-big-'],
+      },
+    ]);
+    expect(catalogEntryFor('testco-big-3-0')?.currentId).toBe('testco-big-3-0');
+    expect(catalogEntryFor('testco-big-1-0')).not.toBeNull(); // still normalises via prefix
   });
 });

@@ -16,6 +16,7 @@ import {
   type ChatWithToolsOptions,
   type ChatWithToolsResult,
   type ContentBlock,
+  type ModelCatalogEntry,
   type ModelClass,
   type ProgressInfo,
   type RatesTable,
@@ -23,7 +24,7 @@ import {
   type ToolUse,
   type TokenUsage,
   type Turn,
-  registerModelLabels,
+  registerModelCatalog,
 } from '../index.js';
 
 // ────────────────────────────────────────────────────────────────────
@@ -34,42 +35,70 @@ import {
 export const PROVIDER = 'anthropic';
 
 /**
- * Concrete model id per {@link ModelClass}. Callers pick the class
- * that fits the task; this map is the only place model ids appear, so
- * upgrades don't need to ripple through call sites.
+ * The Anthropic model catalog — the **single source of truth**. Each family
+ * declares the class it serves, the concrete versioned id used for the call,
+ * its pricing (at the family level), a label, and the alias / prefix rules
+ * that let any version of the family normalise back to it. `models`, `rates`
+ * and the labels below all derive from this, so a version bump is a one-line
+ * `currentId` change — and **decisions key on `provider/family`, never on the
+ * version string** (the version is reporting metadata only).
+ *
+ * Pricing is Anthropic-published rates as of 2026-05-16; each tuple is
+ * `[input_per_million_USD, output_per_million_USD]`. Refresh `rates` here when
+ * Anthropic publishes new pricing.
  */
-export const models: Readonly<Record<ModelClass, string>> = {
-  reasoning: 'claude-opus-4-8',
-  drafting: 'claude-sonnet-4-6',
-  extraction: 'claude-haiku-4-5-20251001',
-};
+const CATALOG: readonly ModelCatalogEntry[] = [
+  {
+    provider: PROVIDER,
+    family: 'opus',
+    modelClass: 'reasoning',
+    currentId: 'claude-opus-4-8',
+    rates: [15, 75],
+    label: 'Opus',
+    aliases: ['claude-opus-4-7'],
+    prefixes: ['claude-opus-'],
+  },
+  {
+    provider: PROVIDER,
+    family: 'sonnet',
+    modelClass: 'drafting',
+    currentId: 'claude-sonnet-4-6',
+    rates: [3, 15],
+    label: 'Sonnet',
+    prefixes: ['claude-sonnet-'],
+  },
+  {
+    provider: PROVIDER,
+    family: 'haiku',
+    modelClass: 'extraction',
+    currentId: 'claude-haiku-4-5-20251001',
+    rates: [1, 5],
+    label: 'Haiku',
+    aliases: ['claude-haiku-4-5'],
+    prefixes: ['claude-haiku-'],
+  },
+];
+
+// Register the catalog into the core so normalisation, family-level pricing,
+// and labels work for any consumer (and any future version of these families).
+// Import side-effect; idempotent. Also registers currentId + aliases as labels.
+registerModelCatalog([...CATALOG]);
 
 /**
- * Per-model pricing (USD per million tokens) — Anthropic-published
- * rates as of 2026-05-16.
- *
- * **Worst-case approach:** cache reads are billed by Anthropic at
- * roughly 10× cheaper than standard input, but the rate-tuple here is
- * the standard input rate. {@link estimateCostUSD} in the core
- * therefore returns an upper bound on the real bill. Refresh this
- * table when Anthropic publishes new pricing.
- *
- * Each rate-tuple is `[input_per_million_USD, output_per_million_USD]`.
+ * Concrete model id per {@link ModelClass}, derived from {@link CATALOG} — the
+ * only place a call site needs. Upgrades happen in the catalog, not here.
  */
-export const rates: RatesTable = {
-  'claude-opus-4-8': [15, 75],
-  'claude-sonnet-4-6': [3, 15],
-  'claude-haiku-4-5-20251001': [1, 5],
-} as const;
+export const models: Readonly<Record<ModelClass, string>> = Object.fromEntries(
+  CATALOG.filter((e) => e.modelClass).map((e) => [e.modelClass, e.currentId])
+) as Record<ModelClass, string>;
 
-// Register friendly labels for our models so the core's `modelLabel`
-// helper returns "Opus" / "Haiku" without the consumer wiring them
-// manually. Import side-effect; idempotent.
-registerModelLabels({
-  'claude-opus-4-8': 'Opus',
-  'claude-sonnet-4-6': 'Sonnet',
-  'claude-haiku-4-5-20251001': 'Haiku',
-});
+/**
+ * Per-model pricing keyed by the concrete current id, derived from
+ * {@link CATALOG}. Kept for back-compat with consumers that look pricing up by
+ * exact id; the core's {@link estimateCostUSD} also falls back to the family
+ * catalog, so a *new* version of a family prices even before this map lists it.
+ */
+export const rates: RatesTable = Object.fromEntries(CATALOG.map((e) => [e.currentId, e.rates]));
 
 // ────────────────────────────────────────────────────────────────────
 // Internal
