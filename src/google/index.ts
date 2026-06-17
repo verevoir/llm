@@ -26,6 +26,8 @@ import {
   type ToolUse,
   type TokenUsage,
   registerModelLabels,
+  registerProviderConnection,
+  resolveBaseUrl,
 } from '../index.js';
 
 // ────────────────────────────────────────────────────────────────────
@@ -80,6 +82,12 @@ registerModelLabels({
 // Internal
 // ────────────────────────────────────────────────────────────────────
 
+registerProviderConnection({
+  provider: PROVIDER,
+  apiKeyEnv: 'GEMINI_API_KEY',
+  baseUrlEnv: 'GEMINI_BASE_URL',
+});
+
 let defaultClient: GoogleGenAI | null = null;
 
 function getDefaultClient(): GoogleGenAI {
@@ -90,12 +98,16 @@ function getDefaultClient(): GoogleGenAI {
       'Neither GEMINI_API_KEY nor GOOGLE_API_KEY is set and no per-call apiKey was passed.'
     );
   }
-  defaultClient = new GoogleGenAI({ apiKey });
+  const baseUrl = resolveBaseUrl('GEMINI_BASE_URL') ?? resolveBaseUrl('GOOGLE_BASE_URL');
+  defaultClient = new GoogleGenAI({ apiKey, ...(baseUrl ? { httpOptions: { baseUrl } } : {}) });
   return defaultClient;
 }
 
 function getClient(apiKey: string | null): GoogleGenAI {
-  if (apiKey) return new GoogleGenAI({ apiKey });
+  if (apiKey) {
+    const baseUrl = resolveBaseUrl('GEMINI_BASE_URL') ?? resolveBaseUrl('GOOGLE_BASE_URL');
+    return new GoogleGenAI({ apiKey, ...(baseUrl ? { httpOptions: { baseUrl } } : {}) });
+  }
   return getDefaultClient();
 }
 

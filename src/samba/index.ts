@@ -52,6 +52,7 @@ const CATALOG: ModelCatalogEntry[] = [
 const adapter = createOpenAICompatAdapter({
   provider: PROVIDER,
   baseURL: BASE_URL,
+  baseUrlEnv: 'SAMBA_NOVA_BASE_URL',
   apiKeyEnv: 'SAMBA_NOVA_API_KEY',
   catalog: CATALOG,
 });

@@ -20,6 +20,9 @@ import {
   type RatesTable,
   type TokenUsage,
   registerModelLabels,
+  registerProviderConnection,
+  resolveBaseUrl,
+  localEndpointKey,
 } from '../index.js';
 
 // ────────────────────────────────────────────────────────────────────
@@ -74,20 +77,29 @@ registerModelLabels({
 // Internal
 // ────────────────────────────────────────────────────────────────────
 
+registerProviderConnection({
+  provider: PROVIDER,
+  apiKeyEnv: 'OPENAI_API_KEY',
+  baseUrlEnv: 'OPENAI_BASE_URL',
+  // The generic OpenAI-compatible client: a base-URL override can point it at a
+  // keyless local server (LM Studio / Ollama / vLLM), so it's usable key-free.
+  keylessCapable: true,
+});
+
 let defaultClient: OpenAI | null = null;
 
 function getDefaultClient(): OpenAI {
   if (defaultClient) return defaultClient;
-  const apiKey = process.env.OPENAI_API_KEY;
+  const apiKey = process.env.OPENAI_API_KEY || localEndpointKey('OPENAI_BASE_URL');
   if (!apiKey) {
     throw new Error('OPENAI_API_KEY is not set and no per-call apiKey was passed.');
   }
-  defaultClient = new OpenAI({ apiKey });
+  defaultClient = new OpenAI({ apiKey, baseURL: resolveBaseUrl('OPENAI_BASE_URL') });
   return defaultClient;
 }
 
 function getClient(apiKey: string | null): OpenAI {
-  if (apiKey) return new OpenAI({ apiKey });
+  if (apiKey) return new OpenAI({ apiKey, baseURL: resolveBaseUrl('OPENAI_BASE_URL') });
   return getDefaultClient();
 }
 

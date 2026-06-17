@@ -25,6 +25,8 @@ import {
   type TokenUsage,
   type Turn,
   registerModelCatalog,
+  registerProviderConnection,
+  resolveBaseUrl,
 } from '../index.js';
 
 // ────────────────────────────────────────────────────────────────────
@@ -104,6 +106,12 @@ export const rates: RatesTable = Object.fromEntries(CATALOG.map((e) => [e.curren
 // Internal
 // ────────────────────────────────────────────────────────────────────
 
+registerProviderConnection({
+  provider: PROVIDER,
+  apiKeyEnv: 'ANTHROPIC_API_KEY',
+  baseUrlEnv: 'ANTHROPIC_BASE_URL',
+});
+
 let defaultClient: Anthropic | null = null;
 
 function getDefaultClient(): Anthropic {
@@ -112,12 +120,12 @@ function getDefaultClient(): Anthropic {
   if (!apiKey) {
     throw new Error('ANTHROPIC_API_KEY is not set and no per-call apiKey was passed.');
   }
-  defaultClient = new Anthropic({ apiKey });
+  defaultClient = new Anthropic({ apiKey, baseURL: resolveBaseUrl('ANTHROPIC_BASE_URL') });
   return defaultClient;
 }
 
 function getClient(apiKey: string | null): Anthropic {
-  if (apiKey) return new Anthropic({ apiKey });
+  if (apiKey) return new Anthropic({ apiKey, baseURL: resolveBaseUrl('ANTHROPIC_BASE_URL') });
   return getDefaultClient();
 }
 
