@@ -9,6 +9,8 @@ import {
   registerModelCatalog,
   providersForFamily,
   resolveModel,
+  resolveModelByTerm,
+  modelConnection,
   type ModelCatalogEntry,
 } from './index.js';
 
@@ -178,5 +180,75 @@ describe('model→provider routing (STDIO-374)', () => {
 
   it('can include unconfigured providers when asked', () => {
     expect(resolveModel({ family: FAM, configuredOnly: false })?.provider).toBe('routetest-cheap');
+  });
+});
+
+describe('resolveModelByTerm + modelConnection (STDIO-378)', () => {
+  const entry: ModelCatalogEntry = {
+    provider: 'rt2-samba',
+    family: 'rt2-deepseek-v3',
+    modelClass: 'reasoning',
+    currentId: 'DeepSeek-V3.2',
+    rates: [0.6, 1.5],
+    label: 'DeepSeek V3.2',
+    prefixes: ['DeepSeek-V3'],
+  };
+  beforeEach(() => {
+    registerModelCatalog([entry]);
+    registerProviderConnection({
+      provider: 'rt2-samba',
+      apiKeyEnv: 'RT2_KEY',
+      baseUrlEnv: 'RT2_URL',
+      defaultBaseUrl: 'https://api.example.ai/v1',
+    });
+    delete process.env.RT2_KEY;
+    delete process.env.RT2_URL;
+  });
+  afterEach(() => {
+    delete process.env.RT2_KEY;
+    delete process.env.RT2_URL;
+  });
+
+  it('resolves a loose family term to the entry when the provider is configured', () => {
+    process.env.RT2_KEY = 'k';
+    expect(resolveModelByTerm('deepseek')?.currentId).toBe('DeepSeek-V3.2');
+  });
+
+  it('returns null when the provider is unconfigured', () => {
+    expect(resolveModelByTerm('deepseek')).toBeNull();
+  });
+
+  it('builds a usable connection (id + endpoint + key) from a loose term', () => {
+    process.env.RT2_KEY = 'sk-x';
+    expect(modelConnection('deepseek')).toMatchObject({
+      provider: 'rt2-samba',
+      modelId: 'DeepSeek-V3.2',
+      baseUrl: 'https://api.example.ai/v1',
+      apiKey: 'sk-x',
+    });
+  });
+
+  it('honours a base-url override for the connection endpoint', () => {
+    process.env.RT2_KEY = 'sk-x';
+    process.env.RT2_URL = 'https://gateway/v1';
+    expect(modelConnection('deepseek')?.baseUrl).toBe('https://gateway/v1');
+  });
+
+  it('returns no connection for an SDK-only provider (no OpenAI-compatible endpoint)', () => {
+    registerModelCatalog([
+      {
+        provider: 'rt2-sdkonly',
+        family: 'rt2-claude',
+        modelClass: 'reasoning',
+        currentId: 'claude-x',
+        rates: [1, 2],
+        label: 'Claude',
+        prefixes: ['claude'],
+      },
+    ]);
+    registerProviderConnection({ provider: 'rt2-sdkonly', apiKeyEnv: 'RT2_SDK_KEY' }); // no defaultBaseUrl
+    process.env.RT2_SDK_KEY = 'k';
+    expect(modelConnection('rt2-claude')).toBeNull();
+    delete process.env.RT2_SDK_KEY;
   });
 });

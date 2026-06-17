@@ -85,6 +85,12 @@ resolves a desired model to a concrete provider:
 - `resolveModel({ family?, modelClass?, configuredOnly?, prefer? })` — pick one:
   cheapest configured by default, or by explicit `prefer` order; `null` on no
   match.
+- `resolveModelByTerm(term, opts?)` — resolve a loose term (`"deepseek"`) or an
+  exact family/id to a catalog entry (exact wins over substring).
+- `modelConnection(term, opts?)` — a ready OpenAI-compatible connection
+  `{ provider, modelId, baseUrl, apiKey }` for a resolved term, so a config can
+  name a model by family and bind it to a real endpoint + current version.
+  `null` for an SDK-only provider (Anthropic / Gemini).
 
 Routing sees only providers whose subpath has been imported (same as the model
 catalog).

@@ -84,6 +84,7 @@ registerProviderConnection({
   provider: PROVIDER,
   apiKeyEnv: 'DEEPSEEK_API_KEY',
   baseUrlEnv: 'DEEPSEEK_BASE_URL',
+  defaultBaseUrl: BASE_URL,
 });
 
 let defaultClient: OpenAI | null = null;

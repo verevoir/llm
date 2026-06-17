@@ -81,6 +81,7 @@ registerProviderConnection({
   provider: PROVIDER,
   apiKeyEnv: 'OPENAI_API_KEY',
   baseUrlEnv: 'OPENAI_BASE_URL',
+  defaultBaseUrl: 'https://api.openai.com/v1',
   // The generic OpenAI-compatible client: a base-URL override can point it at a
   // keyless local server (LM Studio / Ollama / vLLM), so it's usable key-free.
   keylessCapable: true,
