@@ -158,7 +158,13 @@ export function createOpenAICompatAdapter(config: OpenAICompatConfig): OpenAICom
   const models = deriveModels(catalog);
   const rates: RatesTable = Object.fromEntries(catalog.map((e) => [e.currentId, e.rates]));
   registerModelCatalog(catalog);
-  registerProviderConnection({ provider, apiKeyEnv, baseUrlEnv, keylessCapable });
+  registerProviderConnection({
+    provider,
+    apiKeyEnv,
+    baseUrlEnv,
+    keylessCapable,
+    defaultBaseUrl: baseURL,
+  });
 
   let defaultClient: OpenAI | null = null;
   function getClient(apiKey: string | null): OpenAI {

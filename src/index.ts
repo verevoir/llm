@@ -556,6 +556,14 @@ export interface ProviderConnection {
   /** Env var that overrides the base URL (e.g. `SAMBA_NOVA_BASE_URL`), if any. */
   baseUrlEnv?: string;
   /**
+   * The provider's default OpenAI-compatible base URL, for a raw caller (a
+   * delegate worker) that drives the endpoint directly rather than via the SDK.
+   * Set for the OpenAI-compatible providers (OpenAI, DeepSeek, SambaNova,
+   * Mistral); omitted for SDK-only providers (Anthropic, Gemini) — which a raw
+   * OpenAI-compatible caller cannot drive, so they resolve to no connection.
+   */
+  defaultBaseUrl?: string;
+  /**
    * Whether a base-URL override **without a key** makes this provider usable —
    * true only for the generic OpenAI-compatible client pointed at a keyless
    * LOCAL server (LM Studio / Ollama / vLLM). Hosted providers (Anthropic,
@@ -638,4 +646,83 @@ export function resolveModel(opts: ResolveModelOptions = {}): ModelCatalogEntry 
   };
   const price = (e: ModelCatalogEntry): number => (e.rates ? e.rates[0] : Number.MAX_SAFE_INTEGER);
   return candidates.slice().sort((a, b) => prefRank(a) - prefRank(b) || price(a) - price(b))[0];
+}
+
+/**
+ * Resolve a loose human term ("deepseek") OR an exact family/id to a catalog
+ * entry, across providers — so config can name a model by family, not a pinned
+ * version. Matches the term (case-insensitive) against family, currentId, label,
+ * and prefixes; exact family/id wins over a substring, then `prefer` order, then
+ * cheapest, then newest id. Configured providers only unless told otherwise.
+ * Null on no match (loud-on-miss, like {@link normalizeModelId}).
+ */
+export function resolveModelByTerm(
+  term: string,
+  opts: Omit<ResolveModelOptions, 'family'> = {}
+): ModelCatalogEntry | null {
+  const lc = term.trim().toLowerCase();
+  if (!lc) return null;
+  const matches = (e: ModelCatalogEntry): boolean =>
+    e.family.toLowerCase().includes(lc) ||
+    e.currentId.toLowerCase().includes(lc) ||
+    (e.label?.toLowerCase().includes(lc) ?? false) ||
+    (e.prefixes?.some((p) => p.toLowerCase().startsWith(lc) || lc.startsWith(p.toLowerCase())) ??
+      false);
+  const { modelClass, configuredOnly = true, prefer } = opts;
+  let candidates = MODEL_CATALOG.filter(
+    (e) => matches(e) && (modelClass === undefined || e.modelClass === modelClass)
+  );
+  if (configuredOnly) candidates = candidates.filter((e) => isProviderConfigured(e.provider));
+  if (candidates.length === 0) return null;
+  const exactRank = (e: ModelCatalogEntry): number =>
+    e.family.toLowerCase() === lc || e.currentId.toLowerCase() === lc ? 0 : 1;
+  const prefRank = (e: ModelCatalogEntry): number => {
+    const i = prefer ? prefer.indexOf(e.provider) : -1;
+    return i >= 0 ? i : Number.MAX_SAFE_INTEGER;
+  };
+  const price = (e: ModelCatalogEntry): number => (e.rates ? e.rates[0] : Number.MAX_SAFE_INTEGER);
+  return candidates
+    .slice()
+    .sort(
+      (a, b) =>
+        exactRank(a) - exactRank(b) ||
+        prefRank(a) - prefRank(b) ||
+        price(a) - price(b) ||
+        b.currentId.localeCompare(a.currentId, undefined, { numeric: true })
+    )[0];
+}
+
+/** A usable OpenAI-compatible connection for a resolved model — everything a
+ * raw caller (a delegate worker, a per-tier model slot) needs to make the call,
+ * without importing the provider's SDK. */
+export interface ModelConnection {
+  provider: string;
+  /** The concrete current model id (e.g. `DeepSeek-V3.2`). */
+  modelId: string;
+  /** The OpenAI-compatible base URL (env override, else the provider default). */
+  baseUrl: string;
+  /** The API key from env, a local placeholder, or null. */
+  apiKey: string | null;
+}
+
+/**
+ * Resolve a term ("deepseek", or an exact id) to a usable OpenAI-compatible
+ * connection: provider + concrete model id + endpoint + key, read from the
+ * registered connection + env. This is what lets a config name a model by
+ * family and have it bind to a real endpoint at resolve time. Null when nothing
+ * matches, the provider isn't configured, or it has no OpenAI-compatible
+ * endpoint (Anthropic / Gemini are SDK-only and can't be driven raw).
+ */
+export function modelConnection(
+  term: string,
+  opts: Omit<ResolveModelOptions, 'family'> = {}
+): ModelConnection | null {
+  const entry = resolveModelByTerm(term, opts);
+  if (!entry) return null;
+  const conn = PROVIDER_CONNECTIONS[entry.provider];
+  if (!conn) return null;
+  const baseUrl = resolveBaseUrl(conn.baseUrlEnv, conn.defaultBaseUrl);
+  if (!baseUrl) return null; // SDK-only provider — no raw endpoint
+  const apiKey = process.env[conn.apiKeyEnv]?.trim() || localEndpointKey(conn.baseUrlEnv) || null;
+  return { provider: entry.provider, modelId: entry.currentId, baseUrl, apiKey };
 }

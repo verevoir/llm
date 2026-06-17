@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.15.0] — 2026-06-17
+
+**Resolve a model by family to a usable connection** (STDIO-378). `resolveModelByTerm(term, opts)` resolves a loose human term (`"deepseek"`) or an exact family/id to a catalog entry across providers — exact match wins over a substring, then `prefer` / cheapest / newest, configured-only by default. `modelConnection(term, opts)` goes further: it returns a ready OpenAI-compatible connection — `{ provider, modelId, baseUrl, apiKey }` — by reading the resolved provider's registered endpoint (`defaultBaseUrl`, overridable via `<PROVIDER>_BASE_URL`) and key from env. So a config can name a model **by family** and bind it to a real endpoint + current version at resolve time. `ProviderConnection` gains `defaultBaseUrl` (set for the OpenAI-compatible providers; omitted for SDK-only Anthropic/Gemini, which return no connection — a raw OpenAI-compatible caller can't drive them). The registry foundation for naming models by family in consumers (the mcp delegate worker, per-tier model slots).
+
 ## [0.14.0] — 2026-06-17
 
 **Per-provider base-URL overrides + model→provider routing** (STDIO-375, STDIO-374).
