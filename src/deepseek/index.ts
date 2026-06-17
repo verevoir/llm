@@ -24,7 +24,6 @@ import {
   registerModelLabels,
   registerProviderConnection,
   resolveBaseUrl,
-  localEndpointKey,
 } from '../index.js';
 
 // ────────────────────────────────────────────────────────────────────
@@ -91,7 +90,7 @@ let defaultClient: OpenAI | null = null;
 
 function getDefaultClient(): OpenAI {
   if (defaultClient) return defaultClient;
-  const apiKey = process.env.DEEPSEEK_API_KEY || localEndpointKey('DEEPSEEK_BASE_URL');
+  const apiKey = process.env.DEEPSEEK_API_KEY;
   if (!apiKey) {
     throw new Error('DEEPSEEK_API_KEY is not set and no per-call apiKey was passed.');
   }

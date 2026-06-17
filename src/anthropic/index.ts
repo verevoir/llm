@@ -27,7 +27,6 @@ import {
   registerModelCatalog,
   registerProviderConnection,
   resolveBaseUrl,
-  localEndpointKey,
 } from '../index.js';
 
 // ────────────────────────────────────────────────────────────────────
@@ -117,7 +116,7 @@ let defaultClient: Anthropic | null = null;
 
 function getDefaultClient(): Anthropic {
   if (defaultClient) return defaultClient;
-  const apiKey = process.env.ANTHROPIC_API_KEY || localEndpointKey('ANTHROPIC_BASE_URL');
+  const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
     throw new Error('ANTHROPIC_API_KEY is not set and no per-call apiKey was passed.');
   }

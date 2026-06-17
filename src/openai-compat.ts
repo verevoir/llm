@@ -47,6 +47,10 @@ export interface OpenAICompatConfig {
   /** Env var that overrides `baseURL` at runtime (a gateway/proxy/regional/
    * self-hosted endpoint), e.g. `SAMBA_NOVA_BASE_URL`. Optional. */
   baseUrlEnv?: string;
+  /** Whether a base-URL override without a key makes this usable — true only
+   * for a generic OpenAI-compatible client pointed at a keyless local server.
+   * Hosted providers (SambaNova, Mistral, …) leave it false: they need a key. */
+  keylessCapable?: boolean;
   /** Env var holding the default API key when no per-call key is passed. */
   apiKeyEnv: string;
   /** The model catalogue — provider/family entries; `models`/`rates`/labels
@@ -147,21 +151,22 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
  * available) as an import side-effect, the same way the bespoke adapters
  * register their labels. */
 export function createOpenAICompatAdapter(config: OpenAICompatConfig): OpenAICompatAdapter {
-  const { provider, baseURL, baseUrlEnv, apiKeyEnv, catalog } = config;
+  const { provider, baseURL, baseUrlEnv, keylessCapable, apiKeyEnv, catalog } = config;
 
   // Derive (and validate) before the register side-effect, so a malformed
   // catalogue throws rather than half-registering.
   const models = deriveModels(catalog);
   const rates: RatesTable = Object.fromEntries(catalog.map((e) => [e.currentId, e.rates]));
   registerModelCatalog(catalog);
-  registerProviderConnection({ provider, apiKeyEnv, baseUrlEnv });
+  registerProviderConnection({ provider, apiKeyEnv, baseUrlEnv, keylessCapable });
 
   let defaultClient: OpenAI | null = null;
   function getClient(apiKey: string | null): OpenAI {
     const url = resolveBaseUrl(baseUrlEnv, baseURL);
     if (apiKey) return new OpenAI({ apiKey, baseURL: url });
     if (defaultClient) return defaultClient;
-    const env = process.env[apiKeyEnv] || localEndpointKey(baseUrlEnv);
+    const env =
+      process.env[apiKeyEnv] || (keylessCapable ? localEndpointKey(baseUrlEnv) : undefined);
     if (!env) {
       throw new Error(`${apiKeyEnv} is not set and no per-call apiKey was passed.`);
     }

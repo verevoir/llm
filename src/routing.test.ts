@@ -56,17 +56,24 @@ describe('localEndpointKey — keyless local endpoints (STDIO-375)', () => {
 });
 
 describe('provider connection registry (STDIO-374)', () => {
-  const P = 'routetest-prov';
+  const P = 'routetest-prov'; // hosted — always needs a key
   const KEYENV = 'ROUTETEST_API_KEY';
   const URLENV = 'ROUTETEST_BASE_URL';
+  const LOCAL = 'routetest-local'; // keyless-capable (generic OpenAI-compatible / local)
+  const LOCAL_KEY = 'ROUTETEST_LOCAL_API_KEY';
+  const LOCAL_URL = 'ROUTETEST_LOCAL_BASE_URL';
   beforeEach(() => {
     registerProviderConnection({ provider: P, apiKeyEnv: KEYENV, baseUrlEnv: URLENV });
-    delete process.env[KEYENV];
-    delete process.env[URLENV];
+    registerProviderConnection({
+      provider: LOCAL,
+      apiKeyEnv: LOCAL_KEY,
+      baseUrlEnv: LOCAL_URL,
+      keylessCapable: true,
+    });
+    for (const e of [KEYENV, URLENV, LOCAL_KEY, LOCAL_URL]) delete process.env[e];
   });
   afterEach(() => {
-    delete process.env[KEYENV];
-    delete process.env[URLENV];
+    for (const e of [KEYENV, URLENV, LOCAL_KEY, LOCAL_URL]) delete process.env[e];
   });
 
   it('records how to connect to a provider', () => {
@@ -82,9 +89,14 @@ describe('provider connection registry (STDIO-374)', () => {
     expect(isProviderConfigured(P)).toBe(true);
   });
 
-  it('is configured by a base-url override alone (keyless local endpoint)', () => {
-    process.env[URLENV] = 'http://localhost:1234/v1';
-    expect(isProviderConfigured(P)).toBe(true);
+  it('a HOSTED provider is NOT configured by a base-url override alone — it still needs its key', () => {
+    process.env[URLENV] = 'https://regional.example/v1';
+    expect(isProviderConfigured(P)).toBe(false);
+  });
+
+  it('a KEYLESS-capable provider IS configured by a base-url override alone (local endpoint)', () => {
+    process.env[LOCAL_URL] = 'http://localhost:1234/v1';
+    expect(isProviderConfigured(LOCAL)).toBe(true);
   });
 
   it('reports an unknown provider as unconfigured', () => {

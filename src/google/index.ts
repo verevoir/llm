@@ -28,7 +28,6 @@ import {
   registerModelLabels,
   registerProviderConnection,
   resolveBaseUrl,
-  localEndpointKey,
 } from '../index.js';
 
 // ────────────────────────────────────────────────────────────────────
@@ -93,11 +92,7 @@ let defaultClient: GoogleGenAI | null = null;
 
 function getDefaultClient(): GoogleGenAI {
   if (defaultClient) return defaultClient;
-  const apiKey =
-    process.env.GEMINI_API_KEY ||
-    process.env.GOOGLE_API_KEY ||
-    localEndpointKey('GEMINI_BASE_URL') ||
-    localEndpointKey('GOOGLE_BASE_URL');
+  const apiKey = process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY;
   if (!apiKey) {
     throw new Error(
       'Neither GEMINI_API_KEY nor GOOGLE_API_KEY is set and no per-call apiKey was passed.'

@@ -555,6 +555,15 @@ export interface ProviderConnection {
   apiKeyEnv: string;
   /** Env var that overrides the base URL (e.g. `SAMBA_NOVA_BASE_URL`), if any. */
   baseUrlEnv?: string;
+  /**
+   * Whether a base-URL override **without a key** makes this provider usable —
+   * true only for the generic OpenAI-compatible client pointed at a keyless
+   * LOCAL server (LM Studio / Ollama / vLLM). Hosted providers (Anthropic,
+   * Gemini, SambaNova, Mistral, DeepSeek) always need a key, so a base-URL
+   * override alone (a regional/proxy endpoint) does NOT make them usable.
+   * Default false.
+   */
+  keylessCapable?: boolean;
 }
 
 const PROVIDER_CONNECTIONS: Record<string, ProviderConnection> = {};
@@ -578,7 +587,9 @@ export function isProviderConfigured(provider: string): boolean {
   const c = PROVIDER_CONNECTIONS[provider];
   if (!c) return false;
   if (process.env[c.apiKeyEnv]?.trim()) return true;
-  return !!(c.baseUrlEnv && process.env[c.baseUrlEnv]?.trim());
+  // Only a keyless-capable provider (the generic OpenAI-compatible client) is
+  // usable on a base-URL override alone — a hosted provider still needs its key.
+  return !!(c.keylessCapable && c.baseUrlEnv && process.env[c.baseUrlEnv]?.trim());
 }
 
 /** The providers that are configured right now (have a usable connection). */

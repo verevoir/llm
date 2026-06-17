@@ -70,9 +70,11 @@ self-hosted endpoint — without a code change:
 
 The override is keyed by **provider/endpoint, not model**: running DeepSeek-V3
 _via SambaNova_ uses `SAMBA_NOVA_*`, not `DEEPSEEK_*`. Setting only
-`<PROVIDER>_BASE_URL` (no key) is treated as a **keyless local endpoint** (LM
-Studio / Ollama / vLLM) — the client builds with a placeholder key and routing
-counts the provider as usable.
+`OPENAI_BASE_URL` (no key) is treated as a **keyless local endpoint** (LM Studio
+/ Ollama / vLLM) — the generic OpenAI client builds with a placeholder key and
+routing counts it usable. Hosted providers (Anthropic, Gemini, SambaNova,
+Mistral, DeepSeek) always need their key; a base-URL override alone does not make
+them configured.
 
 Because the same model family is served by several providers, **routing**
 resolves a desired model to a concrete provider:
