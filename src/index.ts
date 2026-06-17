@@ -514,3 +514,105 @@ export function catalogEntryFor(id: string): ModelCatalogEntry | null {
 export function uncoveredModels(usage: PerModelUsage, rates: RatesTable = {}): string[] {
   return Object.keys(usage).filter((model) => !rates[model] && !catalogEntryFor(model)?.rates);
 }
+
+// ── Provider base-URL override (STDIO-375) ──────────────────────────────────
+
+/**
+ * Resolve a client base URL: the `<PROVIDER>_BASE_URL` env override when set
+ * (and non-empty), else the provider's `fallback` (or `undefined` to use the
+ * SDK default). Lets any provider be pointed at a gateway, proxy, regional, or
+ * self-hosted endpoint without a code change — keyed by provider/endpoint, the
+ * same convention as `<PROVIDER>_API_KEY`.
+ */
+export function resolveBaseUrl(envVar?: string, fallback?: string): string | undefined {
+  const override = envVar ? process.env[envVar]?.trim() : undefined;
+  return override || fallback;
+}
+
+// ── Provider connection registry + model→provider routing (STDIO-374) ───────
+// The catalog above advertises which families each provider serves; this
+// registry records how to *connect* to a provider (its key + base-URL envs), so
+// routing can ask "is this provider actually configured?". Each adapter
+// registers its connection at module load, beside registerModelCatalog — so, as
+// with the catalog, routing only sees providers whose subpath has been imported.
+
+/** How to connect to a provider: the envs that hold its credential + endpoint. */
+export interface ProviderConnection {
+  provider: string;
+  /** Env var holding the API key (e.g. `SAMBA_NOVA_API_KEY`). */
+  apiKeyEnv: string;
+  /** Env var that overrides the base URL (e.g. `SAMBA_NOVA_BASE_URL`), if any. */
+  baseUrlEnv?: string;
+}
+
+const PROVIDER_CONNECTIONS: Record<string, ProviderConnection> = {};
+
+/** Register how to connect to a provider. Idempotent per provider. */
+export function registerProviderConnection(c: ProviderConnection): void {
+  PROVIDER_CONNECTIONS[c.provider] = c;
+}
+
+/** The registered connection for a provider, or `undefined`. */
+export function providerConnection(provider: string): ProviderConnection | undefined {
+  return PROVIDER_CONNECTIONS[provider];
+}
+
+/**
+ * Whether a provider is usable right now: its API key is set, or a base-URL
+ * override points it at a keyless local endpoint. Routing must never pick an
+ * endpoint with no credential.
+ */
+export function isProviderConfigured(provider: string): boolean {
+  const c = PROVIDER_CONNECTIONS[provider];
+  if (!c) return false;
+  if (process.env[c.apiKeyEnv]?.trim()) return true;
+  return !!(c.baseUrlEnv && process.env[c.baseUrlEnv]?.trim());
+}
+
+/** The providers that are configured right now (have a usable connection). */
+export function configuredProviders(): string[] {
+  return Object.keys(PROVIDER_CONNECTIONS).filter(isProviderConfigured);
+}
+
+/** Every catalog entry serving a family, across providers — the inverse of the
+ * per-provider catalog. Empty when no registered provider serves it. */
+export function providersForFamily(family: string): ModelCatalogEntry[] {
+  return MODEL_CATALOG.filter((e) => e.family === family);
+}
+
+/** How to pick when several providers serve the same model. */
+export interface ResolveModelOptions {
+  /** Restrict to one family (e.g. `deepseek-v3`). */
+  family?: string;
+  /** Restrict to one class (reasoning / drafting / extraction). */
+  modelClass?: ModelClass;
+  /** Only consider providers configured right now. Default true. */
+  configuredOnly?: boolean;
+  /** Provider priority — earlier wins; overrides cheapest. */
+  prefer?: string[];
+}
+
+/**
+ * Resolve a desired model — by family and/or class — to a concrete catalog
+ * entry, across all providers. This is what lets "I want DeepSeek-V3" pick
+ * deepseek.com *or* SambaNova by policy, rather than the caller knowing which
+ * providers serve it. Policy: a `prefer` provider order if given, else cheapest
+ * by input rate; configured providers only unless told otherwise. Returns
+ * `null` when nothing matches (loud-on-miss, like {@link normalizeModelId}).
+ */
+export function resolveModel(opts: ResolveModelOptions = {}): ModelCatalogEntry | null {
+  const { family, modelClass, configuredOnly = true, prefer } = opts;
+  let candidates = MODEL_CATALOG.filter(
+    (e) =>
+      (family === undefined || e.family === family) &&
+      (modelClass === undefined || e.modelClass === modelClass)
+  );
+  if (configuredOnly) candidates = candidates.filter((e) => isProviderConfigured(e.provider));
+  if (candidates.length === 0) return null;
+  const prefRank = (e: ModelCatalogEntry): number => {
+    const i = prefer ? prefer.indexOf(e.provider) : -1;
+    return i >= 0 ? i : Number.MAX_SAFE_INTEGER;
+  };
+  const price = (e: ModelCatalogEntry): number => (e.rates ? e.rates[0] : Number.MAX_SAFE_INTEGER);
+  return candidates.slice().sort((a, b) => prefRank(a) - prefRank(b) || price(a) - price(b))[0];
+}

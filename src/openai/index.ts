@@ -20,6 +20,8 @@ import {
   type RatesTable,
   type TokenUsage,
   registerModelLabels,
+  registerProviderConnection,
+  resolveBaseUrl,
 } from '../index.js';
 
 // ────────────────────────────────────────────────────────────────────
@@ -74,6 +76,12 @@ registerModelLabels({
 // Internal
 // ────────────────────────────────────────────────────────────────────
 
+registerProviderConnection({
+  provider: PROVIDER,
+  apiKeyEnv: 'OPENAI_API_KEY',
+  baseUrlEnv: 'OPENAI_BASE_URL',
+});
+
 let defaultClient: OpenAI | null = null;
 
 function getDefaultClient(): OpenAI {
@@ -82,12 +90,12 @@ function getDefaultClient(): OpenAI {
   if (!apiKey) {
     throw new Error('OPENAI_API_KEY is not set and no per-call apiKey was passed.');
   }
-  defaultClient = new OpenAI({ apiKey });
+  defaultClient = new OpenAI({ apiKey, baseURL: resolveBaseUrl('OPENAI_BASE_URL') });
   return defaultClient;
 }
 
 function getClient(apiKey: string | null): OpenAI {
-  if (apiKey) return new OpenAI({ apiKey });
+  if (apiKey) return new OpenAI({ apiKey, baseURL: resolveBaseUrl('OPENAI_BASE_URL') });
   return getDefaultClient();
 }
 

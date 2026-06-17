@@ -45,6 +45,7 @@ const CATALOG: ModelCatalogEntry[] = [
 const adapter = createOpenAICompatAdapter({
   provider: PROVIDER,
   baseURL: BASE_URL,
+  baseUrlEnv: 'MISTRAL_BASE_URL',
   apiKeyEnv: 'MISTRAL_API_KEY',
   catalog: CATALOG,
 });

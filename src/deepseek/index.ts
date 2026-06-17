@@ -22,6 +22,8 @@ import {
   type RatesTable,
   type TokenUsage,
   registerModelLabels,
+  registerProviderConnection,
+  resolveBaseUrl,
 } from '../index.js';
 
 // ────────────────────────────────────────────────────────────────────
@@ -78,6 +80,12 @@ registerModelLabels({
 // Internal
 // ────────────────────────────────────────────────────────────────────
 
+registerProviderConnection({
+  provider: PROVIDER,
+  apiKeyEnv: 'DEEPSEEK_API_KEY',
+  baseUrlEnv: 'DEEPSEEK_BASE_URL',
+});
+
 let defaultClient: OpenAI | null = null;
 
 function getDefaultClient(): OpenAI {
@@ -86,12 +94,12 @@ function getDefaultClient(): OpenAI {
   if (!apiKey) {
     throw new Error('DEEPSEEK_API_KEY is not set and no per-call apiKey was passed.');
   }
-  defaultClient = new OpenAI({ apiKey, baseURL: BASE_URL });
+  defaultClient = new OpenAI({ apiKey, baseURL: resolveBaseUrl('DEEPSEEK_BASE_URL', BASE_URL) });
   return defaultClient;
 }
 
 function getClient(apiKey: string | null): OpenAI {
-  if (apiKey) return new OpenAI({ apiKey, baseURL: BASE_URL });
+  if (apiKey) return new OpenAI({ apiKey, baseURL: resolveBaseUrl('DEEPSEEK_BASE_URL', BASE_URL) });
   return getDefaultClient();
 }
 

@@ -33,6 +33,8 @@ import {
   type ToolUse,
   type TokenUsage,
   registerModelCatalog,
+  registerProviderConnection,
+  resolveBaseUrl,
 } from './index.js';
 
 /** Config for one OpenAI-compatible provider. */
@@ -41,6 +43,9 @@ export interface OpenAICompatConfig {
   provider: string;
   /** The provider's OpenAI-compatible base URL. */
   baseURL: string;
+  /** Env var that overrides `baseURL` at runtime (a gateway/proxy/regional/
+   * self-hosted endpoint), e.g. `SAMBA_NOVA_BASE_URL`. Optional. */
+  baseUrlEnv?: string;
   /** Env var holding the default API key when no per-call key is passed. */
   apiKeyEnv: string;
   /** The model catalogue — provider/family entries; `models`/`rates`/labels
@@ -141,23 +146,25 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
  * available) as an import side-effect, the same way the bespoke adapters
  * register their labels. */
 export function createOpenAICompatAdapter(config: OpenAICompatConfig): OpenAICompatAdapter {
-  const { provider, baseURL, apiKeyEnv, catalog } = config;
+  const { provider, baseURL, baseUrlEnv, apiKeyEnv, catalog } = config;
 
   // Derive (and validate) before the register side-effect, so a malformed
   // catalogue throws rather than half-registering.
   const models = deriveModels(catalog);
   const rates: RatesTable = Object.fromEntries(catalog.map((e) => [e.currentId, e.rates]));
   registerModelCatalog(catalog);
+  registerProviderConnection({ provider, apiKeyEnv, baseUrlEnv });
 
   let defaultClient: OpenAI | null = null;
   function getClient(apiKey: string | null): OpenAI {
-    if (apiKey) return new OpenAI({ apiKey, baseURL });
+    const url = resolveBaseUrl(baseUrlEnv, baseURL);
+    if (apiKey) return new OpenAI({ apiKey, baseURL: url });
     if (defaultClient) return defaultClient;
     const env = process.env[apiKeyEnv];
     if (!env) {
       throw new Error(`${apiKeyEnv} is not set and no per-call apiKey was passed.`);
     }
-    defaultClient = new OpenAI({ apiKey: env, baseURL });
+    defaultClient = new OpenAI({ apiKey: env, baseURL: url });
     return defaultClient;
   }
 
