@@ -22,6 +22,7 @@ import {
   registerModelLabels,
   registerProviderConnection,
   resolveBaseUrl,
+  localEndpointKey,
 } from '../index.js';
 
 // ────────────────────────────────────────────────────────────────────
@@ -86,7 +87,7 @@ let defaultClient: OpenAI | null = null;
 
 function getDefaultClient(): OpenAI {
   if (defaultClient) return defaultClient;
-  const apiKey = process.env.OPENAI_API_KEY;
+  const apiKey = process.env.OPENAI_API_KEY || localEndpointKey('OPENAI_BASE_URL');
   if (!apiKey) {
     throw new Error('OPENAI_API_KEY is not set and no per-call apiKey was passed.');
   }

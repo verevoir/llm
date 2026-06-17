@@ -529,6 +529,18 @@ export function resolveBaseUrl(envVar?: string, fallback?: string): string | und
   return override || fallback;
 }
 
+/**
+ * A placeholder API key for a keyless LOCAL endpoint. When a provider's base-URL
+ * override is set but its API key is blank, the endpoint is presumed local — LM
+ * Studio / Ollama / vLLM expose OpenAI-compatible servers that need no key, yet
+ * the SDK still wants a non-empty string. Returns `undefined` when no base-URL
+ * override is set, so a missing key against the *canonical* endpoint still errors
+ * loudly rather than silently building an unauthenticated client.
+ */
+export function localEndpointKey(baseUrlEnv?: string): string | undefined {
+  return baseUrlEnv && process.env[baseUrlEnv]?.trim() ? 'not-needed' : undefined;
+}
+
 // ── Provider connection registry + model→provider routing (STDIO-374) ───────
 // The catalog above advertises which families each provider serves; this
 // registry records how to *connect* to a provider (its key + base-URL envs), so

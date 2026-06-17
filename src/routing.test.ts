@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import {
   resolveBaseUrl,
+  localEndpointKey,
   registerProviderConnection,
   providerConnection,
   isProviderConfigured,
@@ -34,6 +35,23 @@ describe('resolveBaseUrl (STDIO-375)', () => {
   it('returns undefined with no override and no fallback (use the SDK default)', () => {
     expect(resolveBaseUrl(KEY)).toBeUndefined();
     expect(resolveBaseUrl(undefined, undefined)).toBeUndefined();
+  });
+});
+
+describe('localEndpointKey — keyless local endpoints (STDIO-375)', () => {
+  const URLENV = 'ROUTETEST_LOCAL_URL';
+  afterEach(() => {
+    delete process.env[URLENV];
+  });
+
+  it('returns a placeholder when the base-url override is set (a local endpoint needs no key)', () => {
+    process.env[URLENV] = 'http://localhost:1234/v1';
+    expect(localEndpointKey(URLENV)).toBe('not-needed');
+  });
+
+  it('returns undefined with no override, so the canonical endpoint still demands a real key', () => {
+    expect(localEndpointKey(URLENV)).toBeUndefined();
+    expect(localEndpointKey(undefined)).toBeUndefined();
   });
 });
 

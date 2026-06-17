@@ -35,6 +35,7 @@ import {
   registerModelCatalog,
   registerProviderConnection,
   resolveBaseUrl,
+  localEndpointKey,
 } from './index.js';
 
 /** Config for one OpenAI-compatible provider. */
@@ -160,7 +161,7 @@ export function createOpenAICompatAdapter(config: OpenAICompatConfig): OpenAICom
     const url = resolveBaseUrl(baseUrlEnv, baseURL);
     if (apiKey) return new OpenAI({ apiKey, baseURL: url });
     if (defaultClient) return defaultClient;
-    const env = process.env[apiKeyEnv];
+    const env = process.env[apiKeyEnv] || localEndpointKey(baseUrlEnv);
     if (!env) {
       throw new Error(`${apiKeyEnv} is not set and no per-call apiKey was passed.`);
     }

@@ -69,7 +69,10 @@ self-hosted endpoint — without a code change:
 | SambaNova       | `SAMBA_NOVA_API_KEY`                | `SAMBA_NOVA_BASE_URL`                 |
 
 The override is keyed by **provider/endpoint, not model**: running DeepSeek-V3
-_via SambaNova_ uses `SAMBA_NOVA_*`, not `DEEPSEEK_*`.
+_via SambaNova_ uses `SAMBA_NOVA_*`, not `DEEPSEEK_*`. Setting only
+`<PROVIDER>_BASE_URL` (no key) is treated as a **keyless local endpoint** (LM
+Studio / Ollama / vLLM) — the client builds with a placeholder key and routing
+counts the provider as usable.
 
 Because the same model family is served by several providers, **routing**
 resolves a desired model to a concrete provider:
