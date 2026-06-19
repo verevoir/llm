@@ -5,17 +5,32 @@ Provider-agnostic LLM call surface with token + cost accounting.
 ## Purpose
 
 Lets a downstream project make LLM calls with retry-friendly errors, token
-accounting, and per-direction cost tracking, without coupling to a specific
-provider SDK. Pick the provider you use via a subpath import; the unused SDK
-does not enter your bundle.
+accounting, per-direction cost tracking, and tool-calling, without coupling to a
+specific provider SDK. Pick the provider you use via a subpath import; the unused
+SDK does not enter your bundle.
 
 ## Subpaths
 
-- `@verevoir/llm` — core types and the `chat()` contract. No SDK dependency.
-- `@verevoir/llm/anthropic` — Anthropic SDK adapter. Requires `@anthropic-ai/sdk`.
-- `@verevoir/llm/google` — Google Gemini SDK adapter (`chat()` only as of 0.4.0). Requires `@google/genai`.
-- `@verevoir/llm/openai` — OpenAI SDK adapter (`chat()` only as of 0.5.0, via the Responses API). Requires `openai`.
-- `@verevoir/llm/deepseek` — DeepSeek adapter (`chat()` only as of 0.6.0), OpenAI-compatible via the Chat Completions API at `https://api.deepseek.com`. Reuses the `openai` peer dep — no separate SDK.
+- `@verevoir/llm` — core types, the `chat()` / tool-calling contracts, cost
+  accounting, and the model catalog + provider-routing helpers. No SDK dependency.
+- `@verevoir/llm/anthropic` — Anthropic SDK adapter (`chat`, `chatWithTools`,
+  `chatWithToolLoop`, live `onProgress`). Requires `@anthropic-ai/sdk`.
+- `@verevoir/llm/google` — Google Gemini SDK adapter (`chat`, `chatWithTools`,
+  `chatWithToolLoop` as of 0.13.0). Requires `@google/genai`.
+- `@verevoir/llm/openai` — OpenAI adapter via the Responses API
+  (`chat`; `chatWithTools` + `chatWithToolLoop` via the OpenAI-compatible factory).
+  Requires `openai`. The only keyless-capable adapter: a base-URL override with a
+  blank key points it at a local server (LM Studio / Ollama / vLLM).
+- `@verevoir/llm/deepseek` — DeepSeek adapter, OpenAI-compatible via the Chat
+  Completions API at `https://api.deepseek.com`. Reuses the `openai` peer — no
+  separate SDK. `chat` + tool-calling.
+- `@verevoir/llm/samba` — SambaNova adapter (`SAMBA_NOVA_API_KEY`),
+  OpenAI-compatible. `chat` + tool-calling.
+- `@verevoir/llm/mistral` — Mistral adapter (`MISTRAL_API_KEY`),
+  OpenAI-compatible. `chat` + tool-calling.
+
+Every provider in the matrix (Anthropic, Google, OpenAI, DeepSeek, SambaNova,
+Mistral) can now drive the tool loop.
 
 ## Install
 
@@ -24,7 +39,8 @@ npm install @verevoir/llm @anthropic-ai/sdk
 ```
 
 The package's `peerDependencies` are marked optional — install only the SDK(s)
-you import.
+you import (`@anthropic-ai/sdk`, `@google/genai`, `openai`; the OpenAI-compatible
+providers share `openai`).
 
 ## Canonical usage
 
@@ -35,31 +51,66 @@ const reply = await anthropic.chat({
   systemPrompt: '...',
   turns: [{ role: 'user', content: '...' }],
   apiKey: process.env.ANTHROPIC_API_KEY!,
-  modelClass: 'reasoning', // or 'extraction'
+  modelClass: 'reasoning', // 'reasoning' | 'drafting' | 'extraction'
 });
 
 // reply.content: string
 // reply.usage:   { provider, model, direction, inputTokens, outputTokens, ... }
 ```
 
+## Tool calling
+
+Each adapter exposes, alongside `chat()`:
+- `chatWithTools(options)` — single-shot; surfaces the model's `ToolUse[]` for
+  the caller to execute.
+- `chatWithToolLoop(options)` — runs model → execute tools → feed results back →
+  repeat, to a `maxIterations` cap. Takes a `ToolExecutor` (`(toolUse) => Promise<string>`)
+  plus per-iteration `onUsage` / `onIteration` hooks; usage is summed across the loop.
+
+Provider-agnostic types `ToolDef`, `ToolUse`, `ToolExecutor`, `ContentBlock`
+(`text` | `tool_use` | `tool_result`), and the `ChatWithTools*` /
+`ChatWithToolLoop*` option/result shapes live on the core export.
+
 ## Cost accounting
 
 Every call returns a `TokenUsage` typed
-`{ provider, model, direction, inputTokens, outputTokens, ... }`. The core
-export ships `sumUsages` to roll up across calls, `formatTokensCompact` for
-compact displays, and per-model rate tables so usage converts to a cost
-estimate without external lookups.
+`{ provider, model, direction, inputTokens, outputTokens, ... }` (with optional
+`cacheRead` / `cacheWrite` so prompt-cache savings price at their own rates). The
+core export ships `sumUsages` / `parseUsage` to roll up across calls,
+`totalTokens`, `formatTokensCompact` for compact displays, `estimateCostUSD`, and
+`uncoveredModels` (loud-on-miss: which models a rates table doesn't cover) — so
+usage converts to a cost estimate without external lookups.
 
 The `direction` field carries the model-class semantic (`reasoning` /
-`extraction`) so per-conversation / per-project rollups can break down "spent
-X on reasoning + Y on extraction" natively.
+`drafting` / `extraction`) so per-conversation / per-project rollups can break
+down "spent X on reasoning + Y on extraction" natively.
+
+## Model catalog + provider routing
+
+Model identity is de-brittled — decisions key on `provider/family`, not the exact
+version string, so a version bump doesn't zero a model's cost.
+
+- `registerModelCatalog(entries)` / `ModelCatalogEntry` — an adapter declares each
+  family once; `models` / `rates` / labels derive from it. `normalizeModelId(id)`
+  resolves a drifted version forward to `{ provider, family }`; `catalogEntryFor`,
+  `modelLabel`, `registerModelLabels` round it out.
+- Provider connection registry — adapters register their connection on import, so
+  routing can answer `isProviderConfigured` / `configuredProviders`,
+  `providersForFamily(family)` (the inverse index), and `resolveModel({ family?, modelClass?, configuredOnly?, prefer? })`
+  (cheapest configured by default). `resolveModelByTerm(term, opts)` resolves a
+  loose human term ("deepseek") to a catalog entry; `modelConnection(term, opts)`
+  returns a ready OpenAI-compatible `{ provider, modelId, baseUrl, apiKey }`.
+- `<PROVIDER>_BASE_URL` overrides — every adapter honours an env override for its
+  endpoint (`OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`, `GEMINI_BASE_URL` /
+  `GOOGLE_BASE_URL`, `MISTRAL_BASE_URL`, `DEEPSEEK_BASE_URL`, `SAMBA_NOVA_BASE_URL`),
+  so a provider can be pointed at a gateway / proxy / regional / self-hosted
+  endpoint without a code change. Routing sees only providers whose subpath has
+  been imported.
 
 ## Status
 
-`0.5.0` shipped — Anthropic adapter is full surface; Google and OpenAI
-adapters ship `chat()` only. Pre-stable: the `0.x` line communicates that
-the API surface can shift before `1.0`. Track changes in the repo's
-CHANGELOG.
+Pre-stable: the `0.x` line communicates that the API surface can shift before
+`1.0`. Track changes in the repo's CHANGELOG.
 
 ## Repository
 
