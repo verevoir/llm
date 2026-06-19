@@ -104,8 +104,14 @@ version string, so a version bump doesn't zero a model's cost.
   endpoint (`OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`, `GEMINI_BASE_URL` /
   `GOOGLE_BASE_URL`, `MISTRAL_BASE_URL`, `DEEPSEEK_BASE_URL`, `SAMBA_NOVA_BASE_URL`),
   so a provider can be pointed at a gateway / proxy / regional / self-hosted
-  endpoint without a code change. Routing sees only providers whose subpath has
-  been imported.
+  endpoint without a code change. The override is keyed by **provider/endpoint,
+  not model**: running DeepSeek-V3 *via SambaNova* uses `SAMBA_NOVA_*`, not
+  `DEEPSEEK_*`. Setting only `OPENAI_BASE_URL` with no key is treated as a
+  **keyless local endpoint** (LM Studio / Ollama / vLLM) — the generic OpenAI
+  client builds with a placeholder key and routing counts it usable. Every other
+  hosted provider (Anthropic, Gemini, SambaNova, Mistral, DeepSeek) always needs
+  its key; a base-URL override alone does not make it configured. Routing sees
+  only providers whose subpath has been imported.
 
 ## Status
 
