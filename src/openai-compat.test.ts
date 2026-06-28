@@ -1,4 +1,14 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+
+// Mock the openai SDK so usage tests run with canned responses (no network).
+const { chatCreateMock } = vi.hoisted(() => ({ chatCreateMock: vi.fn() }));
+vi.mock('openai', () => ({
+  default: class {
+    chat = { completions: { create: chatCreateMock } };
+    constructor(_opts: unknown) {}
+  },
+}));
+
 import { createOpenAICompatAdapter } from './openai-compat.js';
 import { normalizeModelId, modelLabel, estimateCostUSD, type ModelCatalogEntry } from './index.js';
 
@@ -70,5 +80,91 @@ describe('createOpenAICompatAdapter', () => {
         catalog: [{ provider: 'p', family: 'f', currentId: 'p-x', rates: [1, 1], label: 'X' }],
       })
     ).toThrow(/modelClass/);
+  });
+});
+
+// ── Cached-token usage (STDIO-487 regression) ────────────────────────────────
+// prompt_tokens is the TOTAL including the cached subset.  inputTokens must be
+// the non-cached portion only; cacheReadInputTokens carries the cached count.
+// Double-counting both was the bug — these tests would have caught it.
+
+describe('cached-token usage — no double-count (STDIO-487)', () => {
+  const usageCatalog: ModelCatalogEntry[] = [
+    {
+      provider: 'cachetest',
+      family: 'm',
+      modelClass: 'reasoning',
+      currentId: 'cachetest-m',
+      rates: [1, 1],
+      label: 'M',
+    },
+  ];
+  const adapter = createOpenAICompatAdapter({
+    provider: 'cachetest',
+    baseURL: 'https://x/v1',
+    apiKeyEnv: 'CACHETEST_KEY',
+    catalog: usageCatalog,
+  });
+
+  it('chat: prompt_tokens_details.cached_tokens is excluded from inputTokens', async () => {
+    chatCreateMock.mockResolvedValueOnce({
+      choices: [{ message: { content: 'hi' }, finish_reason: 'stop' }],
+      usage: {
+        prompt_tokens: 1000,
+        completion_tokens: 50,
+        prompt_tokens_details: { cached_tokens: 800 },
+      },
+    });
+    let captured: import('./index.js').TokenUsage | undefined;
+    await adapter.chat({
+      systemPrompt: 's',
+      turns: [{ role: 'user', content: 'go' }],
+      apiKey: 'k',
+      onUsage: async (u) => {
+        captured = u;
+      },
+    });
+    expect(captured?.inputTokens).toBe(200); // 1000 - 800
+    expect(captured?.cacheReadInputTokens).toBe(800); // unchanged
+  });
+
+  it('chat: DeepSeek prompt_cache_hit_tokens is excluded from inputTokens', async () => {
+    chatCreateMock.mockResolvedValueOnce({
+      choices: [{ message: { content: 'hi' }, finish_reason: 'stop' }],
+      usage: {
+        prompt_tokens: 1000,
+        completion_tokens: 50,
+        prompt_cache_hit_tokens: 800,
+      },
+    });
+    let captured: import('./index.js').TokenUsage | undefined;
+    await adapter.chat({
+      systemPrompt: 's',
+      turns: [{ role: 'user', content: 'go' }],
+      apiKey: 'k',
+      onUsage: async (u) => {
+        captured = u;
+      },
+    });
+    expect(captured?.inputTokens).toBe(200);
+    expect(captured?.cacheReadInputTokens).toBe(800);
+  });
+
+  it('chat: no cache fields — inputTokens equals prompt_tokens', async () => {
+    chatCreateMock.mockResolvedValueOnce({
+      choices: [{ message: { content: 'hi' }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 500, completion_tokens: 20 },
+    });
+    let captured: import('./index.js').TokenUsage | undefined;
+    await adapter.chat({
+      systemPrompt: 's',
+      turns: [{ role: 'user', content: 'go' }],
+      apiKey: 'k',
+      onUsage: async (u) => {
+        captured = u;
+      },
+    });
+    expect(captured?.inputTokens).toBe(500);
+    expect(captured?.cacheReadInputTokens).toBe(0);
   });
 });
