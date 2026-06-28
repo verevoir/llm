@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.17.0] — 2026-06-28
+
+**Fix cached-token double-count in `shapeUsage`** (STDIO-487). The OpenAI-compatible chat and tool-calling paths set `inputTokens` to the provider's full `prompt_tokens` — which **includes** cached tokens — while also reporting the cached subset as `cacheReadInputTokens`, so downstream pricing billed cached tokens twice (the ~80% metering overshoot). `inputTokens` is now `max(0, prompt_tokens − cached)`, mirroring the convention already in mcp's local `usageFromResponse`. Unblocks accurate `verbose` audit-log costs in `@verevoir/mcp`.
+
 ## [0.16.0] — 2026-06-28
 
 **Cap HTTP client retries at 3** (STDIO-412). Every adapter's `RETRY_BACKOFFS_MS` ladder is trimmed to `[5s, 30s, 120s]` (~2 min total) from the previous five-step ladder that ran out to ~15 min. Bounded retries keep transient-failure recovery from ballooning latency under an outer retrier — consistent with the resilience practice of retrying at a single layer.
