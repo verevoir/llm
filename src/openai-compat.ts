@@ -198,7 +198,7 @@ export function createOpenAICompatAdapter(config: OpenAICompatConfig): OpenAICom
     return {
       text: choice?.message?.content ?? '',
       rawUsage: {
-        inputTokens: u.prompt_tokens ?? 0,
+        inputTokens: Math.max(0, (u.prompt_tokens ?? 0) - cachedInputTokens),
         outputTokens: u.completion_tokens ?? 0,
         cachedInputTokens,
       },
@@ -345,7 +345,11 @@ export function createOpenAICompatAdapter(config: OpenAICompatConfig): OpenAICom
       text: msg.content ?? '',
       rawCalls: msg.tool_calls ?? [],
       raw: {
-        inputTokens: u.prompt_tokens ?? 0,
+        inputTokens: Math.max(
+          0,
+          (u.prompt_tokens ?? 0) -
+            (u.prompt_cache_hit_tokens ?? u.prompt_tokens_details?.cached_tokens ?? 0)
+        ),
         outputTokens: u.completion_tokens ?? 0,
         cachedInputTokens: u.prompt_cache_hit_tokens ?? u.prompt_tokens_details?.cached_tokens ?? 0,
       },
