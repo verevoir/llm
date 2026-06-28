@@ -333,15 +333,13 @@ async function callStreamed(
 
 // Anthropic outages of ~1 hour are real. Single-shot retry isn't
 // enough — keep trying with exponential backoff so the caller can
-// narrate the wait. Total budget ~22 min, comfortably under typical
+// narrate the wait. Total budget ~2 min, comfortably under typical
 // serverless request timeouts. Outages longer than this exhaust the
 // budget and the underlying error surfaces.
 const RETRY_BACKOFFS_MS = [
   5_000, //   5 sec
   30_000, //  30 sec
   120_000, // 2 min
-  300_000, // 5 min
-  900_000, // 15 min
 ];
 
 async function callWithRetries<T>(

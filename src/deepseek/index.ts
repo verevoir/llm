@@ -165,13 +165,12 @@ async function callChatCompletionsCreate(
 
 // DeepSeek outages and rate limits are handled with the same exponential-
 // backoff shape as the other adapters. Reason strings name the provider
-// so retry-narration messages stay informative across providers.
+// so retry-narration messages stay informative across providers. Capped at 3
+// retries (~2 min total).
 const RETRY_BACKOFFS_MS = [
   5_000, //   5 sec
   30_000, //  30 sec
   120_000, // 2 min
-  300_000, // 5 min
-  900_000, // 15 min
 ];
 
 async function callWithRetries<T>(

@@ -79,7 +79,7 @@ interface OpenAIToolCall {
 
 // Same exponential-backoff shape as the other adapters; reason strings name the
 // provider so retry narration stays informative across providers.
-const RETRY_BACKOFFS_MS = [5_000, 30_000, 120_000, 300_000, 900_000];
+const RETRY_BACKOFFS_MS = [5_000, 30_000, 120_000]; // Cap at 3 retries (~2 min total)
 
 /** Derive the class→model map from the catalogue, filling the tier ladder so
  * every class resolves: a missing `drafting` falls **up** to reasoning; a
