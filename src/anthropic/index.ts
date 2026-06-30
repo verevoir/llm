@@ -7,6 +7,7 @@
  */
 
 import Anthropic from '@anthropic-ai/sdk';
+import { emitModelSpan } from '../audit-hook';
 import {
   type ChatOptions,
   type ChatReply,
@@ -410,6 +411,10 @@ async function fireUsageHook(
   usage: TokenUsage,
   scope: string
 ): Promise<void> {
+  // Emit the model-span first, independent of the caller's onUsage: the audit
+  // sink (STDIO-500) must see EVERY model call, including inline coordinator
+  // turns whose caller passes no onUsage. No-op unless a sink is registered.
+  emitModelSpan({ ...usage, scope });
   if (!hook) return;
   try {
     await hook(usage);
