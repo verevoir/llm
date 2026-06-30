@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.18.0] — 2026-06-30
+
+**Add an optional model-span hook** (STDIO-500). `setModelSpanSink` / `emitModelSpan` let a consumer record **every** model call as a span — not only the delegated ones — closing the audit gap where an inline coordinator burned the reasoning tier invisibly (the 494 failure mode). Fail-soft and **off by default** (a no-op unless a sink is registered, never throws); wired at the anthropic adapter's `fireUsageHook` choke point so `chat` / `chatWithTools` / `chatWithToolLoop` all emit, independent of the caller's `onUsage`. `@verevoir/llm` stays audit-agnostic — it hands a plain `ModelSpan` (a `TokenUsage` + `scope`) to whoever registers; the `@verevoir/mcp` audit and aigency-web executor become the sink. Other provider adapters to follow.
+
 ## [0.17.0] — 2026-06-28
 
 **Fix cached-token double-count in `shapeUsage`** (STDIO-487). The OpenAI-compatible chat and tool-calling paths set `inputTokens` to the provider's full `prompt_tokens` — which **includes** cached tokens — while also reporting the cached subset as `cacheReadInputTokens`, so downstream pricing billed cached tokens twice (the ~80% metering overshoot). `inputTokens` is now `max(0, prompt_tokens − cached)`, mirroring the convention already in mcp's local `usageFromResponse`. Unblocks accurate `verbose` audit-log costs in `@verevoir/mcp`.
