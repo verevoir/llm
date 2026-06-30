@@ -1,9 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import {
-  setModelSpanSink,
-  emitModelSpan,
-  type ModelSpan,
-} from './audit-hook';
+import { setModelSpanSink, emitModelSpan, type ModelSpan } from './audit-hook';
 
 const span = (over: Partial<ModelSpan> = {}): ModelSpan => ({
   provider: 'anthropic',
