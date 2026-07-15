@@ -1,4 +1,4 @@
-import type { TokenUsage } from './index';
+import type { TokenUsage } from './index.js';
 
 // Model-span hook (STDIO-500). An optional, fail-soft sink that fires once per
 // model call with the call's usage + tier, so a consumer (the MCP audit, or

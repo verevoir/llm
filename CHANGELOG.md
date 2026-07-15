@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.20.1] — 2026-07-15
+
+**Fix ESM resolution of the audit-hook export** (STDIO-573). 0.18.0–0.20.0 shipped `dist/index.js` re-exporting from `'./audit-hook'` without the `.js` extension, which native ESM refuses to resolve — so any consumer importing `@verevoir/llm` under plain Node crashed with `ERR_MODULE_NOT_FOUND` (the package's own vitest suite resolved it via Vite and never saw the break). Extension added (and on `audit-hook.ts`'s type-only import of `./index`, for `.d.ts` consistency); `prepublishOnly` now runs `scripts/check-dist-esm.mjs` after `build`, importing every built `exports` entrypoint under Node's own resolver, so an unresolvable entrypoint fails the publish instead of escaping to npm.
+
 ## [0.20.0] — 2026-07-15
 
 **Advisor-pair primitive** (STDIO-574). New core `withAdvisor(tools, executor, advisor)` — the "pair" runtime: a cheap executor model runs a tool loop carrying a `consult_advisor` tool; when it calls it, a stronger advisor model answers. The advisor **guides, it never certifies** — its reply returns as an ordinary tool result. Core stays SDK-free: the advisor is dependency-injected as a `chat` function (`AdvisorConfig`), so a caller binds any adapter's `chat`. Returns a new tools array (input never mutated; a consult-name collision throws at wrap time) plus a wrapped executor that routes consults to the advisor at `modelClass: 'reasoning'` and passes every other tool call through untouched. A failing advisor yields a legible "advisor unavailable" tool result instead of a throw, so a dead advisor never kills the work; a missing or empty question returns a legible ask-again result without calling the advisor. Optional fail-soft `onConsult` hook (`ConsultInfo`: question/context/answer/usage) for consult-rate metrics; span emission stays with each side's own adapter, so `setModelSpanSink` sees both halves of the pair.

@@ -23,6 +23,10 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
+      # npm publish --userconfig skips lifecycle hooks (prepublishOnly), so the
+      # dist-ESM gate must run explicitly here too: the built entrypoints must
+      # import under Node's own resolver before this copy is published.
+      - run: node scripts/check-dist-esm.mjs
       - name: Publish to GitHub Packages
         run: |
           printf '//npm.pkg.github.com/:_authToken=%s\n' "$NODE_AUTH_TOKEN" > "$RUNNER_TEMP/.npmrc"

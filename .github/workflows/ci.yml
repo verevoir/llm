@@ -30,7 +30,12 @@ jobs:
       - run: npm test
       - run: npm run build
 
-      # Gate 2 — version-bump-required check (PR builds only).
+      # Gate 2 — the built entrypoints must import under Node's own ESM
+      # resolver (vitest resolves via Vite and forgives what native ESM
+      # refuses — how 0.18.0–0.20.0 shipped an unresolvable dist/index.js).
+      - run: node scripts/check-dist-esm.mjs
+
+      # Gate 3 — version-bump-required check (PR builds only).
       # A change to any file under src/ must be accompanied by a version bump
       # in package.json.  CI/docs-only PRs (no src/ diff) are exempt, so a PR
       # that only touches .github/ or docs will pass without bumping the version.
