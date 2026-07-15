@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // Mock the OpenAI SDK before importing the adapter. DeepSeek speaks the
 // Chat Completions API, so the fake exposes `chat.completions.create`.
@@ -16,7 +16,7 @@ vi.mock('openai', () => ({
 
 // Import AFTER vi.mock so the mocked constructor is the one captured.
 import { chat } from './index.js';
-import type { TokenUsage } from '../index.js';
+import { setModelSpanSink, type ModelSpan, type TokenUsage } from '../index.js';
 
 interface FakeUsage {
   prompt_tokens: number;
@@ -39,6 +39,30 @@ describe('deepseek.chat', () => {
   beforeEach(() => {
     mockCreate.mockReset();
     mockClientCtor.mockReset();
+  });
+
+  afterEach(() => setModelSpanSink(null));
+
+  it('emits a model span to the registered sink with scope deepseek.chat', async () => {
+    mockCreate.mockResolvedValue(
+      fakeResponse('reply', 'stop', { prompt_tokens: 12, completion_tokens: 8 })
+    );
+    const spans: ModelSpan[] = [];
+    setModelSpanSink((s) => spans.push(s));
+
+    await chat({
+      systemPrompt: 'sys',
+      turns: [{ role: 'user', content: 'q' }],
+      apiKey: 'sk-test',
+    });
+
+    expect(spans).toHaveLength(1);
+    expect(spans[0]).toMatchObject({
+      scope: 'deepseek.chat',
+      provider: 'deepseek',
+      inputTokens: 12,
+      outputTokens: 8,
+    });
   });
 
   it('returns the model text + usage from a single-shot call', async () => {

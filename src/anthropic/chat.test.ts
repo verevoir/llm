@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // Mock the Anthropic SDK before importing the adapter (same pattern as
 // chatWithToolLoop.test.ts). Each test scripts a sequence of streamed
@@ -15,7 +15,8 @@ vi.mock('@anthropic-ai/sdk', () => ({
   },
 }));
 
-import { chat } from './index.js';
+import { chat, chatWithTools } from './index.js';
+import { setModelSpanSink, type ModelSpan } from '../index.js';
 
 interface FakeUsage {
   input_tokens: number;
@@ -142,5 +143,67 @@ describe('chat — progress-only tool turn', () => {
     });
     expect(reply.content).toBe('hi');
     expect(mockStream).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('chat — model-span emission', () => {
+  beforeEach(() => mockStream.mockReset());
+  afterEach(() => setModelSpanSink(null));
+
+  it('emits a model span to the registered sink with scope anthropic.chat', async () => {
+    mockStream.mockReturnValue(
+      fakeStream([{ type: 'text', text: 'hi' }], 'end_turn', {
+        input_tokens: 12,
+        output_tokens: 8,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+      })
+    );
+    const spans: ModelSpan[] = [];
+    setModelSpanSink((s) => spans.push(s));
+
+    await chat({
+      systemPrompt: 's',
+      turns: [{ role: 'user', content: 'x' }],
+      apiKey: 'sk-test',
+    });
+
+    expect(spans).toHaveLength(1);
+    expect(spans[0]).toMatchObject({
+      scope: 'anthropic.chat',
+      provider: 'anthropic',
+      inputTokens: 12,
+      outputTokens: 8,
+    });
+  });
+
+  it('chatWithTools emits a model span with scope anthropic.chatWithTools', async () => {
+    mockStream.mockReturnValue(
+      fakeStream([{ type: 'tool_use', id: 'u1', name: 'noop', input: {} }], 'tool_use', {
+        input_tokens: 10,
+        output_tokens: 5,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+      })
+    );
+    const spans: ModelSpan[] = [];
+    setModelSpanSink((s) => spans.push(s));
+
+    await chatWithTools({
+      systemPrompt: 's',
+      turns: [{ role: 'user', content: 'x' }],
+      apiKey: 'sk-test',
+      tools: [
+        { name: 'noop', description: 'noop', input_schema: { type: 'object', properties: {} } },
+      ],
+    });
+
+    expect(spans).toHaveLength(1);
+    expect(spans[0]).toMatchObject({
+      scope: 'anthropic.chatWithTools',
+      provider: 'anthropic',
+      inputTokens: 10,
+      outputTokens: 5,
+    });
   });
 });

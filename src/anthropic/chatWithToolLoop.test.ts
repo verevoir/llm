@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // Mock the Anthropic SDK module before importing the adapter. Each
 // test sets up the fake `messages.stream` to return a controlled
@@ -18,6 +18,7 @@ vi.mock('@anthropic-ai/sdk', () => ({
 
 // Import AFTER vi.mock so the mocked constructor is the one captured.
 import { chatWithToolLoop } from './index.js';
+import { setModelSpanSink, type ModelSpan } from '../index.js';
 
 interface FakeUsage {
   input_tokens: number;
@@ -59,6 +60,8 @@ describe('chatWithToolLoop', () => {
     mockStream.mockReset();
     mockClientCtor.mockReset();
   });
+
+  afterEach(() => setModelSpanSink(null));
 
   it('returns immediately when the first response is text-only', async () => {
     mockStream.mockReturnValue(
@@ -263,6 +266,50 @@ describe('chatWithToolLoop', () => {
       iteration: 2,
       stopReason: 'end_turn',
     });
+  });
+
+  it('emits one model span per iteration with scope anthropic.chatWithToolLoop', async () => {
+    mockStream
+      .mockReturnValueOnce(
+        fakeStream([{ type: 'tool_use', id: 'u1', name: 'noop', input: {} }], 'tool_use', {
+          input_tokens: 10,
+          output_tokens: 5,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 0,
+        })
+      )
+      .mockReturnValueOnce(
+        fakeStream([{ type: 'text', text: 'done' }], 'end_turn', {
+          input_tokens: 20,
+          output_tokens: 10,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 0,
+        })
+      );
+    const spans: ModelSpan[] = [];
+    setModelSpanSink((s) => spans.push(s));
+
+    await chatWithToolLoop({
+      systemPrompt: 's',
+      turns: [{ role: 'user', content: 'go' }],
+      apiKey: 'sk-test',
+      tools: [
+        {
+          name: 'noop',
+          description: 'noop',
+          input_schema: { type: 'object', properties: {} },
+        },
+      ],
+      executor: async () => 'ok',
+    });
+
+    expect(spans).toHaveLength(2); // one per underlying model call
+    expect(spans.map((s) => s.scope)).toEqual([
+      'anthropic.chatWithToolLoop',
+      'anthropic.chatWithToolLoop',
+    ]);
+    expect(spans.every((s) => s.provider === 'anthropic')).toBe(true);
+    expect(spans.map((s) => s.inputTokens)).toEqual([10, 20]); // per-iteration, not aggregate
   });
 
   it('throws when no tools are provided (tool loop with no tools is a misuse)', async () => {

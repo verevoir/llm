@@ -7,7 +7,7 @@
  */
 
 import Anthropic from '@anthropic-ai/sdk';
-import { emitModelSpan } from '../audit-hook';
+import { fireUsageHook } from '../audit-hook.js';
 import {
   type ChatOptions,
   type ChatReply,
@@ -404,23 +404,6 @@ function shapeUsage(raw: StreamedResult['rawUsage'], direction: ModelClass): Tok
     direction,
     ...raw,
   };
-}
-
-async function fireUsageHook(
-  hook: ChatOptions['onUsage'],
-  usage: TokenUsage,
-  scope: string
-): Promise<void> {
-  // Emit the model-span first, independent of the caller's onUsage: the audit
-  // sink (STDIO-500) must see EVERY model call, including inline coordinator
-  // turns whose caller passes no onUsage. No-op unless a sink is registered.
-  emitModelSpan({ ...usage, scope });
-  if (!hook) return;
-  try {
-    await hook(usage);
-  } catch (err) {
-    console.warn(`${scope}: onUsage callback threw`, err);
-  }
 }
 
 /** Throw the AbortSignal's reason (or a generic AbortError) when

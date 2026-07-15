@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // Mock @google/genai so the tool loop runs with canned responses (no network).
 const { generateMock } = vi.hoisted(() => ({ generateMock: vi.fn() }));
@@ -10,6 +10,7 @@ vi.mock('@google/genai', () => ({
 }));
 
 import { chatWithTools, chatWithToolLoop } from './index.js';
+import { setModelSpanSink, type ModelSpan } from '../index.js';
 
 const TOOL = {
   name: 'record_step',
@@ -44,6 +45,7 @@ function textReply(text: string) {
 }
 
 beforeEach(() => generateMock.mockReset());
+afterEach(() => setModelSpanSink(null));
 
 describe('@verevoir/llm/google — tool calling', () => {
   it('chatWithTools surfaces the model functionCalls as tool uses', async () => {
@@ -100,6 +102,51 @@ describe('@verevoir/llm/google — tool calling', () => {
       c.parts.some((p) => (p as { functionResponse?: unknown }).functionResponse)
     );
     expect(hasFnResponse).toBe(true);
+  });
+
+  it('chatWithTools emits a model span with scope google.chatWithTools', async () => {
+    generateMock.mockResolvedValueOnce(fnCallReply({ step: 'x' }));
+    const spans: ModelSpan[] = [];
+    setModelSpanSink((s) => spans.push(s));
+
+    await chatWithTools({
+      systemPrompt: 's',
+      turns: [{ role: 'user', content: 'go' }],
+      tools: [TOOL],
+      apiKey: 'k',
+    });
+
+    expect(spans).toHaveLength(1);
+    expect(spans[0]).toMatchObject({
+      scope: 'google.chatWithTools',
+      provider: 'google',
+      inputTokens: 10,
+      outputTokens: 5,
+    });
+  });
+
+  it('chatWithToolLoop emits one model span per iteration with scope google.chatWithToolLoop', async () => {
+    generateMock
+      .mockResolvedValueOnce(fnCallReply({ step: 'x' }))
+      .mockResolvedValueOnce(textReply('done'));
+    const spans: ModelSpan[] = [];
+    setModelSpanSink((s) => spans.push(s));
+
+    await chatWithToolLoop({
+      systemPrompt: 's',
+      turns: [{ role: 'user', content: 'go' }],
+      tools: [TOOL],
+      executor: async () => 'ok',
+      apiKey: 'k',
+    });
+
+    expect(spans).toHaveLength(2); // one per underlying model call
+    expect(spans.map((s) => s.scope)).toEqual([
+      'google.chatWithToolLoop',
+      'google.chatWithToolLoop',
+    ]);
+    expect(spans.every((s) => s.provider === 'google')).toBe(true);
+    expect(spans.map((s) => s.inputTokens)).toEqual([10, 12]); // per-iteration, not aggregate
   });
 
   it('stops at maxIterations when the model keeps calling tools', async () => {

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // Mock the Google GenAI SDK before importing the adapter. Each test
 // sets up the fake `models.generateContent` to return a controlled
@@ -17,7 +17,7 @@ vi.mock('@google/genai', () => ({
 
 // Import AFTER vi.mock so the mocked constructor is the one captured.
 import { chat } from './index.js';
-import type { TokenUsage } from '../index.js';
+import { setModelSpanSink, type ModelSpan, type TokenUsage } from '../index.js';
 
 interface FakeUsage {
   promptTokenCount: number;
@@ -41,6 +41,30 @@ describe('google.chat', () => {
   beforeEach(() => {
     mockGenerateContent.mockReset();
     mockClientCtor.mockReset();
+  });
+
+  afterEach(() => setModelSpanSink(null));
+
+  it('emits a model span to the registered sink with scope google.chat', async () => {
+    mockGenerateContent.mockResolvedValue(
+      fakeResponse('reply', 'STOP', { promptTokenCount: 12, candidatesTokenCount: 8 })
+    );
+    const spans: ModelSpan[] = [];
+    setModelSpanSink((s) => spans.push(s));
+
+    await chat({
+      systemPrompt: 'sys',
+      turns: [{ role: 'user', content: 'q' }],
+      apiKey: 'sk-test',
+    });
+
+    expect(spans).toHaveLength(1);
+    expect(spans[0]).toMatchObject({
+      scope: 'google.chat',
+      provider: 'google',
+      inputTokens: 12,
+      outputTokens: 8,
+    });
   });
 
   it('returns the model text + usage from a single-shot call', async () => {

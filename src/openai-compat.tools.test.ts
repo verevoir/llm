@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // Mock the openai SDK so the tool loop runs with canned completions (no network).
 const { createMock } = vi.hoisted(() => ({ createMock: vi.fn() }));
@@ -10,7 +10,7 @@ vi.mock('openai', () => ({
 }));
 
 import { createOpenAICompatAdapter } from './openai-compat.js';
-import type { ModelCatalogEntry } from './index.js';
+import { setModelSpanSink, type ModelCatalogEntry, type ModelSpan } from './index.js';
 
 const catalog: ModelCatalogEntry[] = [
   {
@@ -59,6 +59,7 @@ function textReply(text: string) {
 }
 
 beforeEach(() => createMock.mockReset());
+afterEach(() => setModelSpanSink(null));
 
 describe('openai-compat tool calling', () => {
   it('chatWithTools surfaces the model tool calls (single-shot, parsed args)', async () => {
@@ -120,6 +121,51 @@ describe('openai-compat tool calling', () => {
     });
     expect(r.toolResults[0]).toMatchObject({ content: 'boom', isError: true });
     expect(r.text).toBe('ok');
+  });
+
+  it('chatWithTools emits a model span scoped with the factory config provider name', async () => {
+    createMock.mockResolvedValueOnce(toolCallReply('{"x":1}'));
+    const spans: ModelSpan[] = [];
+    setModelSpanSink((s) => spans.push(s));
+
+    await a.chatWithTools({
+      systemPrompt: 's',
+      turns: [{ role: 'user', content: 'go' }],
+      tools: [TOOL],
+      apiKey: 'k',
+    });
+
+    expect(spans).toHaveLength(1);
+    expect(spans[0]).toMatchObject({
+      scope: 'tooltest.chatWithTools',
+      provider: 'tooltest',
+      inputTokens: 10,
+      outputTokens: 5,
+    });
+  });
+
+  it('chatWithToolLoop emits one span per iteration, scoped with the factory config provider name', async () => {
+    createMock
+      .mockResolvedValueOnce(toolCallReply('{"x":1}'))
+      .mockResolvedValueOnce(textReply('all done'));
+    const spans: ModelSpan[] = [];
+    setModelSpanSink((s) => spans.push(s));
+
+    await a.chatWithToolLoop({
+      systemPrompt: 's',
+      turns: [{ role: 'user', content: 'go' }],
+      tools: [TOOL],
+      executor: async () => 'recorded',
+      apiKey: 'k',
+    });
+
+    expect(spans).toHaveLength(2); // one per underlying model call
+    expect(spans.map((s) => s.scope)).toEqual([
+      'tooltest.chatWithToolLoop',
+      'tooltest.chatWithToolLoop',
+    ]);
+    expect(spans.every((s) => s.provider === 'tooltest')).toBe(true);
+    expect(spans.map((s) => s.inputTokens)).toEqual([10, 12]); // per-iteration, not aggregate
   });
 
   it('stops at maxIterations when the model keeps calling tools', async () => {

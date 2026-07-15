@@ -10,7 +10,14 @@ vi.mock('openai', () => ({
 }));
 
 import { createOpenAICompatAdapter } from './openai-compat.js';
-import { normalizeModelId, modelLabel, estimateCostUSD, type ModelCatalogEntry } from './index.js';
+import {
+  normalizeModelId,
+  modelLabel,
+  estimateCostUSD,
+  setModelSpanSink,
+  type ModelCatalogEntry,
+  type ModelSpan,
+} from './index.js';
 
 describe('createOpenAICompatAdapter', () => {
   const catalog: ModelCatalogEntry[] = [
@@ -69,6 +76,22 @@ describe('createOpenAICompatAdapter', () => {
       3,
       5
     );
+  });
+
+  it('emits a model span scoped with the factory config provider name, not a literal', async () => {
+    chatCreateMock.mockResolvedValueOnce({
+      choices: [{ message: { content: 'hi' }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 10, completion_tokens: 5 },
+    });
+    const spans: ModelSpan[] = [];
+    setModelSpanSink((s) => spans.push(s));
+    try {
+      await a.chat({ systemPrompt: 's', turns: [{ role: 'user', content: 'go' }], apiKey: 'k' });
+    } finally {
+      setModelSpanSink(null);
+    }
+    expect(spans).toHaveLength(1);
+    expect(spans[0]).toMatchObject({ scope: 'testco.chat', provider: 'testco' });
   });
 
   it('throws when the catalogue declares no modelClass anywhere', () => {

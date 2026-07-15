@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.19.0] — 2026-07-15
+
+**Model-span emission parity across every adapter** (STDIO-574). 0.18.0 wired the model-span hook only at the Anthropic adapter, so a consumer auditing via `setModelSpanSink` missed every non-Anthropic call. The emit-then-`onUsage` choke point is now a shared **exported `fireUsageHook`** on the core (`emitModelSpan` first — independent of the caller's `onUsage` — then the fail-soft hook), and every usage-firing site routes through it: the OpenAI-compatible factory (covering `/samba` + `/mistral`, with the scope built from the config's provider name), `/google`, `/openai`, and `/deepseek` — replacing four near-identical local helpers. Spans fire once per underlying model call — one per iteration in tool loops — with scope `<provider>.<entry>` (e.g. `samba.chatWithToolLoop`). Per-adapter sink tests cover every emitting path, including fail-soft through a real tool loop; README + llms.txt now document the sink and its coverage.
+
 ## [0.18.0] — 2026-06-30
 
 **Add an optional model-span hook** (STDIO-500). `setModelSpanSink` / `emitModelSpan` let a consumer record **every** model call as a span — not only the delegated ones — closing the audit gap where an inline coordinator burned the reasoning tier invisibly (the 494 failure mode). Fail-soft and **off by default** (a no-op unless a sink is registered, never throws); wired at the anthropic adapter's `fireUsageHook` choke point so `chat` / `chatWithTools` / `chatWithToolLoop` all emit, independent of the caller's `onUsage`. `@verevoir/llm` stays audit-agnostic — it hands a plain `ModelSpan` (a `TokenUsage` + `scope`) to whoever registers; the `@verevoir/mcp` audit and aigency-web executor become the sink. Other provider adapters to follow.
