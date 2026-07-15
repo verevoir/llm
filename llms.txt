@@ -103,7 +103,9 @@ consult calls to the injected `advisor.chat` — any adapter's `chat`, bound by
 the caller — with the advisor's `systemPrompt` and `modelClass: 'reasoning'`.
 The advisor guides, it never certifies: its reply returns as an ordinary tool
 result. A failing advisor yields a legible "advisor unavailable" result rather
-than a throw, so a dead advisor never kills the work. Optional `onConsult`
+than a throw, so a dead advisor never kills the work; a missing or empty
+question returns a legible ask-again result without calling the advisor.
+Optional `onConsult`
 hook (fail-soft, not fired on advisor failure) reports each consult's
 question/context/answer/usage for consult-rate metrics; the advisor's own
 adapter emits its model span as usual.

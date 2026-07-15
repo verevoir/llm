@@ -1,11 +1,7 @@
 import type { ChatOptions, ChatReply, TokenUsage, ToolDef, ToolExecutor } from './index.js';
 
-// Advisor pair (STDIO-574). A cheap executor model runs a tool loop carrying a
-// `consult_advisor` tool; when it calls that tool, a stronger advisor model
-// answers. The advisor GUIDES — it never certifies the work. Core stays
-// SDK-free: the advisor is dependency-injected as a `chat` function, so a
-// caller binds any adapter's `chat` (or its own) without this module knowing
-// which provider answers.
+// Advisor pair (STDIO-574): a cheap executor's tool loop consults a stronger
+// model one tool call away. The advisor GUIDES — it never certifies the work.
 
 /** One completed consult — what the executor asked, what the advisor said. */
 export interface ConsultInfo {
@@ -87,12 +83,19 @@ export function withAdvisor(
     },
   };
   const wrapped: ToolExecutor = async (toolUse) =>
-    toolUse.name === toolName ? consult(toolUse.input, advisor) : executor(toolUse);
+    toolUse.name === toolName ? consult(toolUse.input, advisor, toolName) : executor(toolUse);
   return { tools: [...tools, consultTool], executor: wrapped };
 }
 
-async function consult(input: Record<string, unknown>, advisor: AdvisorConfig): Promise<string> {
+async function consult(
+  input: Record<string, unknown>,
+  advisor: AdvisorConfig,
+  toolName: string
+): Promise<string> {
   const question = typeof input.question === 'string' ? input.question : '';
+  if (!question) {
+    return `${toolName} requires a question — call it again with a specific question`;
+  }
   const context = typeof input.context === 'string' && input.context ? input.context : undefined;
   let usage: TokenUsage | undefined;
   let reply: ChatReply;

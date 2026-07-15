@@ -161,6 +161,50 @@ describe('withAdvisor — consult routing', () => {
   });
 });
 
+describe('withAdvisor — question validation', () => {
+  it('returns an ask-again result without calling the advisor when the question is missing or not a string', async () => {
+    const advisorChat = mockAdvisorChat();
+    const { executor } = withAdvisor([], async () => 'inner', {
+      chat: advisorChat,
+      systemPrompt: 'the bar',
+    });
+
+    const result = await executor(consultUse({ question: 42 }));
+
+    expect(result).toBe(
+      'consult_advisor requires a question — call it again with a specific question'
+    );
+    expect(advisorChat).not.toHaveBeenCalled();
+  });
+
+  it('returns an ask-again result when the question is an empty string', async () => {
+    const { executor } = withAdvisor([], async () => 'inner', {
+      chat: mockAdvisorChat(),
+      systemPrompt: 'the bar',
+    });
+
+    const result = await executor(consultUse({ question: '' }));
+
+    expect(result).toBe(
+      'consult_advisor requires a question — call it again with a specific question'
+    );
+  });
+
+  it('names the overridden tool in the ask-again result so the executor retries the right tool', async () => {
+    const { executor } = withAdvisor([], async () => 'inner', {
+      chat: mockAdvisorChat(),
+      systemPrompt: 'the bar',
+      toolName: 'ask_reviewer',
+    });
+
+    const result = await executor({ id: 'c1', name: 'ask_reviewer', input: {} });
+
+    expect(result).toBe(
+      'ask_reviewer requires a question — call it again with a specific question'
+    );
+  });
+});
+
 describe('withAdvisor — advisor failure', () => {
   it('returns a legible advisor-unavailable result instead of throwing when the advisor call fails', async () => {
     const { executor } = withAdvisor([], async () => 'inner', {
