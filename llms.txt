@@ -93,6 +93,21 @@ from **every** adapter and every entry point (`chat`, `chatWithTools`, and
 that iteration's own usage, so expect multiple spans from a single loop call.
 Off by default; fail-soft; pass `null` to detach.
 
+## Advisor pair
+
+`withAdvisor(tools, executor, advisor)` (core export, SDK-free) wraps a tool
+set + executor so a cheap executor model can consult a stronger advisor
+mid-loop: it appends a `consult_advisor` ToolDef (question required, context
+optional; input never mutated, name collision throws at wrap time) and routes
+consult calls to the injected `advisor.chat` — any adapter's `chat`, bound by
+the caller — with the advisor's `systemPrompt` and `modelClass: 'reasoning'`.
+The advisor guides, it never certifies: its reply returns as an ordinary tool
+result. A failing advisor yields a legible "advisor unavailable" result rather
+than a throw, so a dead advisor never kills the work. Optional `onConsult`
+hook (fail-soft, not fired on advisor failure) reports each consult's
+question/context/answer/usage for consult-rate metrics; the advisor's own
+adapter emits its model span as usual.
+
 ## Model catalog + provider routing
 
 Model identity is de-brittled — decisions key on `provider/family`, not the exact

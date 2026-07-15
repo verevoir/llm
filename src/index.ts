@@ -37,6 +37,10 @@ export type ModelClass = 'reasoning' | 'drafting' | 'extraction';
 // a consumer can audit every model call, not only delegated ones.
 export { setModelSpanSink, emitModelSpan, type ModelSpan, type ModelSpanSink } from './audit-hook';
 
+// Advisor pair (STDIO-574) — a cheap executor's tool loop carries a
+// consult_advisor tool answered by a stronger, caller-bound model.
+export { withAdvisor, type AdvisorConfig, type ConsultInfo } from './pair.js';
+
 /**
  * Per-turn content. Plain `string` is the convenient v0 shape for
  * pure-text conversations. `ContentBlock[]` carries structured

@@ -119,6 +119,42 @@ expect multiple spans from one loop, each carrying that iteration's own usage
 (not the aggregate). Off by default (no sink, no behaviour change); a throwing
 sink is caught and warned, never breaking the call. Pass `null` to detach.
 
+## Advisor pair
+
+`withAdvisor(tools, executor, advisor)` (core export, SDK-free) turns any tool
+loop into a **pair**: a cheap executor model does the work, and a
+`consult_advisor` tool puts a stronger model one call away when it hits a
+decision it cannot confidently resolve. The advisor **guides — it never
+certifies**: its answer comes back as an ordinary tool result and the executor
+carries on. The advisor is dependency-injected as a `chat` function, so any
+adapter (or your own function) can answer:
+
+```ts
+import { withAdvisor } from '@verevoir/llm';
+import { anthropic } from '@verevoir/llm/anthropic';
+import { chatWithToolLoop } from '@verevoir/llm/samba';
+
+const { tools, executor } = withAdvisor(myTools, myExecutor, {
+  chat: anthropic.chat, // the advisor model — any adapter's chat
+  systemPrompt: 'You are the senior reviewer. Hold answers to the practices.',
+  onConsult: ({ question, usage }) => recordConsult(question, usage), // optional metrics
+});
+
+const result = await chatWithToolLoop({
+  systemPrompt: 'Do the task. Consult your advisor when unsure.',
+  turns: [{ role: 'user', content: task }],
+  tools,
+  executor, // consults route to anthropic; every other tool runs as before
+  modelClass: 'extraction', // the cheap executor tier
+});
+```
+
+The input `tools` array is never mutated; a name collision with the consult
+tool throws at wrap time (`toolName` renames it). A failing advisor never kills
+the work — the executor gets a legible "advisor unavailable" result and
+carries on. The advisor's own adapter emits its model span as usual, so
+`setModelSpanSink` sees both sides of the pair.
+
 ## See also
 
 - [`llms.txt`](./llms.txt) — LLM-agent-facing description of this package.
