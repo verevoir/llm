@@ -40,6 +40,16 @@ imports.
 - **Provision-before-code:** pull the bar with the verevoir MCP `provision` tool before
   changing code; source-changing commits carry a `Practices:` trailer.
 
+## Project context
+
+This package is one of the **verevoir foundation libraries**; the sibling repos live in
+the [verevoir GitHub org](https://github.com/verevoir), which is the route up to the
+broader project — everything beyond this repo starts there, not from this repo's local
+view. `@verevoir/llm` is the LLM call surface the others compose with:
+`@verevoir/accelerator`, `@verevoir/capabilities`, `@verevoir/mcp`, and
+`@verevoir/recipes` consume it. Each sibling carries its own `README.md` + `llms.txt`
+on the same pattern as this one.
+
 ## Pointers
 
 - `README.md` — human-facing usage (quickstart, subpaths, routing, accounting).

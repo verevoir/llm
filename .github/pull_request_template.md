@@ -1,14 +1,16 @@
-## Why
-
-<!-- The problem this change solves, and why now. Reference the work-item id (e.g. STDIO-NNN). -->
+<!-- Title carries the work-item id (e.g. `STDIO-NNN: …`) so the PR ties back to the tracker. -->
 
 ## What
 
-<!-- What changed, at the level a reviewer needs — the shape of the change, not a file list. -->
+<!-- The change, in prose — the shape of it, not a file list. -->
 
-## Verification
+## Why
 
-<!-- How you know it works: lint/typecheck/test status, the tests that cover the changed behaviour (happy path AND error paths). -->
+<!-- The motivation / decision; link the card or ADR. -->
+
+## Tests
+
+<!-- How it's verified: tests added, typecheck/lint, manual checks — and anything NOT covered, with the reason. -->
 
 <!--
 Source-changing PRs: name the practices this change was held to (the `provision` set).
