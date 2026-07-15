@@ -45,3 +45,23 @@ export function emitModelSpan(span: ModelSpan): void {
     console.warn('emitModelSpan: sink threw', err);
   }
 }
+
+/** Fire the model-span sink and the caller's `onUsage` hook for one model
+ * call. Shared by every adapter so span emission stays at parity across
+ * providers. The span goes first, independent of the caller's onUsage: the
+ * audit sink must see EVERY model call, including inline coordinator turns
+ * whose caller passes no onUsage. A throwing hook is caught and warned, so
+ * accounting can never break a model call. */
+export async function fireUsageHook(
+  hook: ((usage: TokenUsage) => Promise<void>) | undefined,
+  usage: TokenUsage,
+  scope: string
+): Promise<void> {
+  emitModelSpan({ ...usage, scope });
+  if (!hook) return;
+  try {
+    await hook(usage);
+  } catch (err) {
+    console.warn(`${scope}: onUsage callback threw`, err);
+  }
+}

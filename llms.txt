@@ -85,6 +85,12 @@ The `direction` field carries the model-class semantic (`reasoning` /
 `drafting` / `extraction`) so per-conversation / per-project rollups can break
 down "spent X on reasoning + Y on extraction" natively.
 
+For auditing, `setModelSpanSink(sink)` (core export) registers an optional
+process-wide sink that receives a `ModelSpan` — the call's `TokenUsage` plus the
+emitting `scope`, e.g. `samba.chatWithToolLoop` — once per underlying model call
+(per iteration in tool loops), from **every** adapter. Off by default; fail-soft;
+pass `null` to detach.
+
 ## Model catalog + provider routing
 
 Model identity is de-brittled — decisions key on `provider/family`, not the exact

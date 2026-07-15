@@ -12,6 +12,7 @@
  */
 
 import OpenAI from 'openai';
+import { fireUsageHook } from '../audit-hook.js';
 import {
   type ChatOptions,
   type ChatReply,
@@ -224,19 +225,6 @@ function shapeUsage(raw: RawResult['rawUsage'], direction: ModelClass): TokenUsa
     cacheCreationInputTokens: 0,
     cacheReadInputTokens: raw.cachedInputTokens,
   };
-}
-
-async function fireUsageHook(
-  hook: ChatOptions['onUsage'],
-  usage: TokenUsage,
-  scope: string
-): Promise<void> {
-  if (!hook) return;
-  try {
-    await hook(usage);
-  } catch (err) {
-    console.warn(`${scope}: onUsage callback threw`, err);
-  }
 }
 
 /** Throw the AbortSignal's reason (or a generic AbortError) when

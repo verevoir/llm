@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // Mock the OpenAI SDK before importing the adapter. Each test sets
 // up the fake `responses.create` to return a controlled Response
@@ -17,7 +17,7 @@ vi.mock('openai', () => ({
 
 // Import AFTER vi.mock so the mocked constructor is the one captured.
 import { chat } from './index.js';
-import type { TokenUsage } from '../index.js';
+import { setModelSpanSink, type ModelSpan, type TokenUsage } from '../index.js';
 
 interface FakeUsage {
   input_tokens: number;
@@ -41,6 +41,30 @@ describe('openai.chat', () => {
   beforeEach(() => {
     mockCreate.mockReset();
     mockClientCtor.mockReset();
+  });
+
+  afterEach(() => setModelSpanSink(null));
+
+  it('emits a model span to the registered sink with scope openai.chat', async () => {
+    mockCreate.mockResolvedValue(
+      fakeResponse('reply', 'completed', { input_tokens: 12, output_tokens: 8 })
+    );
+    const spans: ModelSpan[] = [];
+    setModelSpanSink((s) => spans.push(s));
+
+    await chat({
+      systemPrompt: 'sys',
+      turns: [{ role: 'user', content: 'q' }],
+      apiKey: 'sk-test',
+    });
+
+    expect(spans).toHaveLength(1);
+    expect(spans[0]).toMatchObject({
+      scope: 'openai.chat',
+      provider: 'openai',
+      inputTokens: 12,
+      outputTokens: 8,
+    });
   });
 
   it('returns the model text + usage from a single-shot call', async () => {

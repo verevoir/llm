@@ -18,6 +18,7 @@
  */
 
 import OpenAI from 'openai';
+import { fireUsageHook } from './audit-hook.js';
 import {
   type ChatOptions,
   type ChatReply,
@@ -269,13 +270,7 @@ export function createOpenAICompatAdapter(config: OpenAICompatConfig): OpenAICom
     }
 
     const usage = shapeUsage(raw.rawUsage, modelClass);
-    if (options.onUsage) {
-      try {
-        await options.onUsage(usage);
-      } catch (err) {
-        console.warn(`${provider}.chat: onUsage callback threw`, err);
-      }
-    }
+    await fireUsageHook(options.onUsage, usage, `${provider}.chat`);
 
     if (!raw.text) {
       throw new Error(
@@ -376,13 +371,7 @@ export function createOpenAICompatAdapter(config: OpenAICompatConfig): OpenAICom
       options.onRetry
     );
     const usage = shapeUsage(r.raw, modelClass);
-    if (options.onUsage) {
-      try {
-        await options.onUsage(usage);
-      } catch (err) {
-        console.warn(`${provider}.chatWithTools: onUsage threw`, err);
-      }
-    }
+    await fireUsageHook(options.onUsage, usage, `${provider}.chatWithTools`);
     return {
       toolUses: r.rawCalls.map(parseToolUse),
       text: r.text,
@@ -431,13 +420,11 @@ export function createOpenAICompatAdapter(config: OpenAICompatConfig): OpenAICom
       aggregate.inputTokens += r.raw.inputTokens;
       aggregate.outputTokens += r.raw.outputTokens;
       aggregate.cacheReadInputTokens += r.raw.cachedInputTokens;
-      if (options.onUsage) {
-        try {
-          await options.onUsage(shapeUsage(r.raw, modelClass));
-        } catch (err) {
-          console.warn(`${provider}.chatWithToolLoop: onUsage threw`, err);
-        }
-      }
+      await fireUsageHook(
+        options.onUsage,
+        shapeUsage(r.raw, modelClass),
+        `${provider}.chatWithToolLoop`
+      );
       if (options.onIteration) {
         try {
           await options.onIteration({

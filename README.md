@@ -105,6 +105,17 @@ per-conversation / per-project rollups need no external lookups. The
 `extraction`) so rollups can break down "spent X on reasoning + Y on extraction"
 natively.
 
+## Model-span audit hook
+
+`setModelSpanSink(sink)` registers an optional, process-wide sink that fires
+once per underlying model call — in tool loops, once per iteration's call —
+with a `ModelSpan`: the call's `TokenUsage` plus the emitting `scope`
+(`<provider>.<entry>`, e.g. `anthropic.chatWithToolLoop`, `samba.chat`). Every
+adapter emits it, so a consumer can audit every model call across providers
+from one registration, independent of any per-call `onUsage` hook. Off by
+default (no sink, no behaviour change); a throwing sink is caught and warned,
+never breaking the call. Pass `null` to detach.
+
 ## See also
 
 - [`llms.txt`](./llms.txt) — LLM-agent-facing description of this package.
