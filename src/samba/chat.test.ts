@@ -86,4 +86,28 @@ describe('samba — model-span emission', () => {
     expect(spans.map((s) => s.scope)).toEqual(['samba.chatWithToolLoop', 'samba.chatWithToolLoop']);
     expect(spans.every((s) => s.provider === 'samba')).toBe(true);
   });
+
+  it('a throwing sink is fail-soft — the tool loop completes with an unaffected result', async () => {
+    mockCreate.mockResolvedValueOnce(toolCallReply()).mockResolvedValueOnce(textReply('done'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    setModelSpanSink(() => {
+      throw new Error('sink boom');
+    });
+
+    const executor = vi.fn(async () => 'recorded');
+    const r = await chatWithToolLoop({
+      systemPrompt: 'sys',
+      turns: [{ role: 'user', content: 'go' }],
+      tools: [TOOL],
+      executor,
+      apiKey: 'sk-test',
+    });
+    warn.mockRestore();
+
+    expect(r.text).toBe('done');
+    expect(r.iterations).toBe(2);
+    expect(executor).toHaveBeenCalledOnce();
+    expect(r.toolResults[0]).toMatchObject({ content: 'recorded', isError: false });
+    expect(r.usage.outputTokens).toBe(13); // 5 + 8 summed across iterations
+  });
 });

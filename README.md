@@ -108,13 +108,16 @@ natively.
 ## Model-span audit hook
 
 `setModelSpanSink(sink)` registers an optional, process-wide sink that fires
-once per underlying model call — in tool loops, once per iteration's call —
-with a `ModelSpan`: the call's `TokenUsage` plus the emitting `scope`
-(`<provider>.<entry>`, e.g. `anthropic.chatWithToolLoop`, `samba.chat`). Every
-adapter emits it, so a consumer can audit every model call across providers
-from one registration, independent of any per-call `onUsage` hook. Off by
-default (no sink, no behaviour change); a throwing sink is caught and warned,
-never breaking the call. Pass `null` to detach.
+once per underlying model call with a `ModelSpan`: the call's `TokenUsage`
+plus the emitting `scope` (`<provider>.<entry>`, e.g.
+`anthropic.chatWithToolLoop`, `samba.chat`). Every adapter emits it from every
+entry point — `chat`, `chatWithTools`, and `chatWithToolLoop` alike — so a
+consumer can audit every model call across providers from one registration,
+independent of any per-call `onUsage` hook. Because emission is per underlying
+model call, a single `chatWithToolLoop` call yields **one span per iteration**:
+expect multiple spans from one loop, each carrying that iteration's own usage
+(not the aggregate). Off by default (no sink, no behaviour change); a throwing
+sink is caught and warned, never breaking the call. Pass `null` to detach.
 
 ## See also
 

@@ -15,7 +15,7 @@ vi.mock('@anthropic-ai/sdk', () => ({
   },
 }));
 
-import { chat } from './index.js';
+import { chat, chatWithTools } from './index.js';
 import { setModelSpanSink, type ModelSpan } from '../index.js';
 
 interface FakeUsage {
@@ -174,6 +174,36 @@ describe('chat — model-span emission', () => {
       provider: 'anthropic',
       inputTokens: 12,
       outputTokens: 8,
+    });
+  });
+
+  it('chatWithTools emits a model span with scope anthropic.chatWithTools', async () => {
+    mockStream.mockReturnValue(
+      fakeStream([{ type: 'tool_use', id: 'u1', name: 'noop', input: {} }], 'tool_use', {
+        input_tokens: 10,
+        output_tokens: 5,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+      })
+    );
+    const spans: ModelSpan[] = [];
+    setModelSpanSink((s) => spans.push(s));
+
+    await chatWithTools({
+      systemPrompt: 's',
+      turns: [{ role: 'user', content: 'x' }],
+      apiKey: 'sk-test',
+      tools: [
+        { name: 'noop', description: 'noop', input_schema: { type: 'object', properties: {} } },
+      ],
+    });
+
+    expect(spans).toHaveLength(1);
+    expect(spans[0]).toMatchObject({
+      scope: 'anthropic.chatWithTools',
+      provider: 'anthropic',
+      inputTokens: 10,
+      outputTokens: 5,
     });
   });
 });
