@@ -12,7 +12,7 @@ vi.mock('openai', () => ({
 }));
 
 // Import AFTER vi.mock so the mocked constructor is the one captured.
-import { chat, chatWithToolLoop } from './index.js';
+import { chat, chatWithTools, chatWithToolLoop } from './index.js';
 import { setModelSpanSink, type ModelSpan } from '../index.js';
 
 function textReply(content: string, usage = { prompt_tokens: 12, completion_tokens: 8 }) {
@@ -66,6 +66,27 @@ describe('samba — model-span emission', () => {
       provider: 'samba',
       inputTokens: 12,
       outputTokens: 8,
+    });
+  });
+
+  it('chatWithTools emits a model span with scope samba.chatWithTools', async () => {
+    mockCreate.mockResolvedValue(toolCallReply());
+    const spans: ModelSpan[] = [];
+    setModelSpanSink((s) => spans.push(s));
+
+    await chatWithTools({
+      systemPrompt: 'sys',
+      turns: [{ role: 'user', content: 'go' }],
+      tools: [TOOL],
+      apiKey: 'sk-test',
+    });
+
+    expect(spans).toHaveLength(1);
+    expect(spans[0]).toMatchObject({
+      scope: 'samba.chatWithTools',
+      provider: 'samba',
+      inputTokens: 10,
+      outputTokens: 5,
     });
   });
 
