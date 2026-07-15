@@ -35,7 +35,12 @@ export type ModelClass = 'reasoning' | 'drafting' | 'extraction';
 
 // Model-span hook (STDIO-500) — optional, fail-soft per-call instrumentation so
 // a consumer can audit every model call, not only delegated ones.
-export { setModelSpanSink, emitModelSpan, type ModelSpan, type ModelSpanSink } from './audit-hook';
+export {
+  setModelSpanSink,
+  emitModelSpan,
+  type ModelSpan,
+  type ModelSpanSink,
+} from './audit-hook.js';
 
 // Advisor pair (STDIO-574) — a cheap executor's tool loop carries a
 // consult_advisor tool answered by a stronger, caller-bound model.
