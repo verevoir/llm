@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.20.2] — 2026-07-21
+
+**Finalise the tool loop on cap-hit** (STDIO-594). When `chatWithToolLoop` reached its iteration cap mid-loop it returned `text: ''` — a silent empty result the caller had to treat as failure (e.g. a review lens that ran out of iterations produced no verdict at all). On hitting the cap the loop now makes one final model call **with no tools**, forcing the model to synthesise its answer from the work so far, and falls back to the previous empty-text behaviour only if that finalise call itself fails. Applied across all three adapter families — the Anthropic native path, the OpenAI-compatible factory (covering `/openai`, `/samba`, `/mistral`, `/deepseek`), and `/google` — each wrapped so a finalise failure degrades gracefully rather than throwing.
+
 ## [0.20.1] — 2026-07-15
 
 **Fix ESM resolution of the audit-hook export** (STDIO-573). 0.18.0–0.20.0 shipped `dist/index.js` re-exporting from `'./audit-hook'` without the `.js` extension, which native ESM refuses to resolve — so any consumer importing `@verevoir/llm` under plain Node crashed with `ERR_MODULE_NOT_FOUND` (the package's own vitest suite resolved it via Vite and never saw the break). Extension added (and on `audit-hook.ts`'s type-only import of `./index`, for `.d.ts` consistency); `prepublishOnly` now runs `scripts/check-dist-esm.mjs` after `build`, importing every built `exports` entrypoint under Node's own resolver, so an unresolvable entrypoint fails the publish instead of escaping to npm.
