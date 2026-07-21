@@ -1,6 +1,6 @@
 {
   "name": "@verevoir/llm",
-  "version": "0.20.1",
+  "version": "0.20.2",
   "description": "Provider-agnostic LLM call surface with token + cost accounting. SDK adapters in subpaths.",
   "license": "Apache-2.0",
   "type": "module",
@@ -87,6 +87,7 @@
     "node": ">=20"
   },
   "overrides": {
-    "vite": "^8.0.16"
+    "vite": "^8.0.16",
+    "protobufjs": "^7.6.5"
   }
 }
