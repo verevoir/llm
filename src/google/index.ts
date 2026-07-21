@@ -365,7 +365,12 @@ async function callGenerateWithTools(
   const response = await client.models.generateContent({
     model: modelId,
     contents: contents as never,
-    config: { systemInstruction: systemPrompt, tools: tools as never },
+    config: {
+      systemInstruction: systemPrompt,
+      // Omit tools when empty (a no-tools finalise call), like the other
+      // adapters — an empty tools array would be a malformed request.
+      tools: Array.isArray(tools) && tools.length > 0 ? (tools as never) : undefined,
+    },
   });
   const u = response.usageMetadata ?? {};
   const candidates = response.candidates ?? [];
@@ -513,11 +518,45 @@ export async function chatWithToolLoop(
     }
     contents.push({ role: 'user', parts: responseParts });
   }
-  return {
-    text: '',
-    toolUses: allToolUses,
-    toolResults: allToolResults,
-    iterations: iteration,
-    usage: aggregate,
-  };
+  // Iteration cap hit while the model was still calling tools. One FINAL
+  // no-tools call forces a written answer synthesised from the history,
+  // instead of returning nothing. Degrade to empty text if it fails.
+  throwIfAborted(options.abortSignal);
+  try {
+    const fin = await callWithRetries(
+      () =>
+        callGenerateWithTools(
+          client,
+          modelId,
+          options.systemPrompt,
+          contents,
+          [] as ReturnType<typeof toGeminiTools>
+        ),
+      options.onRetry
+    );
+    aggregate.inputTokens += fin.rawUsage.inputTokens;
+    aggregate.outputTokens += fin.rawUsage.outputTokens;
+    aggregate.cacheReadInputTokens += fin.rawUsage.cachedInputTokens;
+    await fireUsageHook(
+      options.onUsage,
+      shapeUsage(fin.rawUsage, modelClass),
+      'google.chatWithToolLoop'
+    );
+    return {
+      text: fin.text,
+      toolUses: allToolUses,
+      toolResults: allToolResults,
+      iterations: iteration,
+      usage: aggregate,
+    };
+  } catch (err) {
+    console.warn('google.chatWithToolLoop: final synthesis call failed', err);
+    return {
+      text: '',
+      toolUses: allToolUses,
+      toolResults: allToolResults,
+      iterations: iteration,
+      usage: aggregate,
+    };
+  }
 }

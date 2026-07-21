@@ -729,16 +729,47 @@ export async function chatWithToolLoop(
     ];
   }
 
-  // Iteration cap hit. Return what we have so the consumer can
-  // narrate progress; the text may be empty if the model never got
-  // to a final response.
-  return {
-    text: '',
-    toolUses: allToolUses,
-    toolResults: allToolResults,
-    iterations: iteration,
-    usage: aggregateUsage,
-  };
+  // Iteration cap hit while the model was still calling tools. Rather than
+  // return an empty answer (the model never wrote its final response), make
+  // one FINAL call with the tools removed — forcing it to synthesise a written
+  // answer from the history it built, instead of nothing. If this final call
+  // itself fails, degrade to the empty text rather than throwing.
+  throwIfAborted(options.abortSignal);
+  try {
+    const finalRequest = buildRequest({
+      modelClass,
+      systemPrompt: options.systemPrompt,
+      turns: messages,
+      tools: [], // no tools → the model must answer in text
+      cacheConversation: true,
+    });
+    const finalStreamed = await callWithRetries(
+      () => callStreamed(client, finalRequest, options.onProgress),
+      options.onRetry
+    );
+    const finalUsage = shapeUsage(finalStreamed.rawUsage, modelClass);
+    aggregateUsage.inputTokens += finalUsage.inputTokens;
+    aggregateUsage.outputTokens += finalUsage.outputTokens;
+    aggregateUsage.cacheCreationInputTokens += finalUsage.cacheCreationInputTokens;
+    aggregateUsage.cacheReadInputTokens += finalUsage.cacheReadInputTokens;
+    await fireUsageHook(options.onUsage, finalUsage, 'anthropic.chatWithToolLoop');
+    return {
+      text: finalStreamed.text,
+      toolUses: allToolUses,
+      toolResults: allToolResults,
+      iterations: iteration,
+      usage: aggregateUsage,
+    };
+  } catch (err) {
+    console.warn('anthropic.chatWithToolLoop: final synthesis call failed', err);
+    return {
+      text: '',
+      toolUses: allToolUses,
+      toolResults: allToolResults,
+      iterations: iteration,
+      usage: aggregateUsage,
+    };
+  }
 }
 
 /**
