@@ -170,6 +170,8 @@ describe('@verevoir/llm/google — tool calling', () => {
     // the finalise request omits tools, so the model had to answer in text
     const finalArgs = generateMock.mock.calls[2][0] as { config?: { tools?: unknown } };
     expect(finalArgs.config?.tools).toBeUndefined();
+    // the finalise call's usage folds into the aggregate (2 tool rounds @5 + finalise @3)
+    expect(r.usage.outputTokens).toBe(5 + 5 + 3);
   });
 
   it('degrades to empty text (never throws) when the finalise call fails', async () => {

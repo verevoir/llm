@@ -191,6 +191,8 @@ describe('openai-compat tool calling', () => {
     // the finalise request carried no tools, so the model had to answer in text
     const finalArgs = createMock.mock.calls[2][0] as { tools?: unknown };
     expect(finalArgs.tools).toBeUndefined();
+    // the finalise call's usage folds into the aggregate (2 tool rounds @5 + finalise @3)
+    expect(r.usage.outputTokens).toBe(5 + 5 + 3);
   });
 
   it('degrades to empty text (never throws) when the finalise call fails', async () => {
