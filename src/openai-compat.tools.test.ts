@@ -168,8 +168,13 @@ describe('openai-compat tool calling', () => {
     expect(spans.map((s) => s.inputTokens)).toEqual([10, 12]); // per-iteration, not aggregate
   });
 
-  it('stops at maxIterations when the model keeps calling tools', async () => {
-    createMock.mockResolvedValue(toolCallReply('{}'));
+  it('on cap-hit, makes a final no-tools call and returns its synthesised answer (not empty)', async () => {
+    // 2 tool-calling iterations exhaust the cap; the 3rd create() is the
+    // forced no-tools finalise.
+    createMock
+      .mockResolvedValueOnce(toolCallReply('{}'))
+      .mockResolvedValueOnce(toolCallReply('{}'))
+      .mockResolvedValueOnce(textReply('finished work'));
     const executor = vi.fn(async () => 'r');
     const r = await a.chatWithToolLoop({
       systemPrompt: 's',
@@ -180,7 +185,31 @@ describe('openai-compat tool calling', () => {
       maxIterations: 2,
     });
     expect(r.iterations).toBe(2);
-    expect(r.text).toBe('');
+    expect(r.text).toBe('finished work');
     expect(executor).toHaveBeenCalledTimes(2);
+    expect(createMock).toHaveBeenCalledTimes(3);
+    // the finalise request carried no tools, so the model had to answer in text
+    const finalArgs = createMock.mock.calls[2][0] as { tools?: unknown };
+    expect(finalArgs.tools).toBeUndefined();
+    // the finalise call's usage folds into the aggregate (2 tool rounds @5 + finalise @3)
+    expect(r.usage.outputTokens).toBe(5 + 5 + 3);
+  });
+
+  it('degrades to empty text (never throws) when the finalise call fails', async () => {
+    createMock
+      .mockResolvedValueOnce(toolCallReply('{}'))
+      .mockResolvedValueOnce(toolCallReply('{}'))
+      .mockRejectedValueOnce(new Error('finalise boom'));
+    const r = await a.chatWithToolLoop({
+      systemPrompt: 's',
+      turns: [{ role: 'user', content: 'go' }],
+      tools: [TOOL],
+      executor: async () => 'r',
+      apiKey: 'k',
+      maxIterations: 2,
+    });
+    expect(r.iterations).toBe(2);
+    expect(r.text).toBe('');
+    expect(createMock).toHaveBeenCalledTimes(3);
   });
 });

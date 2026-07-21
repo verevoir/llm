@@ -158,38 +158,67 @@ describe('chatWithToolLoop', () => {
     expect(result.usage.outputTokens).toBe(15);
   });
 
-  it('caps iterations and exits with empty text if the model never stops', async () => {
-    let toolIdCounter = 0;
-    mockStream.mockImplementation(() =>
-      fakeStream(
-        [
-          {
-            type: 'tool_use',
-            id: `u${++toolIdCounter}`,
-            name: 'noop',
-            input: {},
-          },
-        ],
-        'tool_use',
-        {
-          input_tokens: 1,
-          output_tokens: 1,
+  const toolUseNoop = (id: string) =>
+    fakeStream([{ type: 'tool_use', id, name: 'noop', input: {} }], 'tool_use', {
+      input_tokens: 1,
+      output_tokens: 1,
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: 0,
+    });
+
+  it('on cap-hit, makes a final no-tools call and returns its synthesised answer (not empty)', async () => {
+    // 3 tool-calling iterations exhaust maxIterations; the 4th call is the
+    // forced no-tools finalise, which produces the written answer.
+    mockStream
+      .mockReturnValueOnce(toolUseNoop('u1'))
+      .mockReturnValueOnce(toolUseNoop('u2'))
+      .mockReturnValueOnce(toolUseNoop('u3'))
+      .mockReturnValueOnce(
+        fakeStream([{ type: 'text', text: 'Here is the finished work.' }], 'end_turn', {
+          input_tokens: 5,
+          output_tokens: 7,
           cache_creation_input_tokens: 0,
           cache_read_input_tokens: 0,
-        }
-      )
-    );
+        })
+      );
 
     const result = await chatWithToolLoop({
       systemPrompt: 's',
       turns: [{ role: 'user', content: 'go' }],
       apiKey: 'sk-test',
       tools: [
-        {
-          name: 'noop',
-          description: 'noop',
-          input_schema: { type: 'object', properties: {} },
-        },
+        { name: 'noop', description: 'noop', input_schema: { type: 'object', properties: {} } },
+      ],
+      executor: async () => 'ok',
+      maxIterations: 3,
+    });
+
+    // iterations counts the tool-loop rounds; the finalise is a 4th model call.
+    expect(result.iterations).toBe(3);
+    expect(result.text).toBe('Here is the finished work.');
+    expect(mockStream).toHaveBeenCalledTimes(4);
+    // the finalise request carried NO tools, so the model had to answer in text
+    const finalRequest = mockStream.mock.calls[3][0] as { tools?: unknown[] };
+    expect(finalRequest.tools).toBeUndefined();
+    // the finalise call's usage is folded into the aggregate
+    expect(result.usage.outputTokens).toBe(1 + 1 + 1 + 7);
+  });
+
+  it('degrades to empty text (never throws) when the finalise call itself fails', async () => {
+    mockStream
+      .mockReturnValueOnce(toolUseNoop('u1'))
+      .mockReturnValueOnce(toolUseNoop('u2'))
+      .mockReturnValueOnce(toolUseNoop('u3'))
+      .mockImplementationOnce(() => {
+        throw new Error('finalise boom');
+      });
+
+    const result = await chatWithToolLoop({
+      systemPrompt: 's',
+      turns: [{ role: 'user', content: 'go' }],
+      apiKey: 'sk-test',
+      tools: [
+        { name: 'noop', description: 'noop', input_schema: { type: 'object', properties: {} } },
       ],
       executor: async () => 'ok',
       maxIterations: 3,
@@ -197,7 +226,7 @@ describe('chatWithToolLoop', () => {
 
     expect(result.iterations).toBe(3);
     expect(result.text).toBe('');
-    expect(mockStream).toHaveBeenCalledTimes(3);
+    expect(mockStream).toHaveBeenCalledTimes(4);
   });
 
   it('surfaces executor errors back to the model as is_error tool_results', async () => {

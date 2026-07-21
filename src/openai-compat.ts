@@ -463,13 +463,40 @@ export function createOpenAICompatAdapter(config: OpenAICompatConfig): OpenAICom
         allToolResults.push({ toolUseId: tc.id, content, isError });
       }
     }
-    return {
-      text: '',
-      toolUses: allToolUses,
-      toolResults: allToolResults,
-      iterations: iteration,
-      usage: aggregate,
-    };
+    // Iteration cap hit while the model was still calling tools. One FINAL
+    // no-tools call forces a written answer synthesised from the history,
+    // instead of returning nothing. Degrade to empty text if it fails.
+    throwIfAborted(options.abortSignal);
+    try {
+      const fin = await callWithRetries(
+        () => createWithTools(client, modelId, messages, toOpenAITools([])),
+        options.onRetry
+      );
+      aggregate.inputTokens += fin.raw.inputTokens;
+      aggregate.outputTokens += fin.raw.outputTokens;
+      aggregate.cacheReadInputTokens += fin.raw.cachedInputTokens;
+      await fireUsageHook(
+        options.onUsage,
+        shapeUsage(fin.raw, modelClass),
+        `${provider}.chatWithToolLoop`
+      );
+      return {
+        text: fin.text,
+        toolUses: allToolUses,
+        toolResults: allToolResults,
+        iterations: iteration,
+        usage: aggregate,
+      };
+    } catch (err) {
+      console.warn(`${provider}.chatWithToolLoop: final synthesis call failed`, err);
+      return {
+        text: '',
+        toolUses: allToolUses,
+        toolResults: allToolResults,
+        iterations: iteration,
+        usage: aggregate,
+      };
+    }
   }
 
   return {

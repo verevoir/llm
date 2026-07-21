@@ -149,8 +149,36 @@ describe('@verevoir/llm/google — tool calling', () => {
     expect(spans.map((s) => s.inputTokens)).toEqual([10, 12]); // per-iteration, not aggregate
   });
 
-  it('stops at maxIterations when the model keeps calling tools', async () => {
-    generateMock.mockResolvedValue(fnCallReply({ step: 'x' }));
+  it('on cap-hit, makes a final no-tools call and returns its synthesised answer (not empty)', async () => {
+    // 2 tool-calling iterations exhaust the cap; the 3rd generateContent is
+    // the forced no-tools finalise.
+    generateMock
+      .mockResolvedValueOnce(fnCallReply({ step: 'x' }))
+      .mockResolvedValueOnce(fnCallReply({ step: 'y' }))
+      .mockResolvedValueOnce(textReply('finished work'));
+    const r = await chatWithToolLoop({
+      systemPrompt: 's',
+      turns: [{ role: 'user', content: 'go' }],
+      tools: [TOOL],
+      executor: async () => 'r',
+      apiKey: 'k',
+      maxIterations: 2,
+    });
+    expect(r.iterations).toBe(2);
+    expect(r.text).toBe('finished work');
+    expect(generateMock).toHaveBeenCalledTimes(3);
+    // the finalise request omits tools, so the model had to answer in text
+    const finalArgs = generateMock.mock.calls[2][0] as { config?: { tools?: unknown } };
+    expect(finalArgs.config?.tools).toBeUndefined();
+    // the finalise call's usage folds into the aggregate (2 tool rounds @5 + finalise @3)
+    expect(r.usage.outputTokens).toBe(5 + 5 + 3);
+  });
+
+  it('degrades to empty text (never throws) when the finalise call fails', async () => {
+    generateMock
+      .mockResolvedValueOnce(fnCallReply({ step: 'x' }))
+      .mockResolvedValueOnce(fnCallReply({ step: 'y' }))
+      .mockRejectedValueOnce(new Error('finalise boom'));
     const r = await chatWithToolLoop({
       systemPrompt: 's',
       turns: [{ role: 'user', content: 'go' }],
@@ -161,5 +189,6 @@ describe('@verevoir/llm/google — tool calling', () => {
     });
     expect(r.iterations).toBe(2);
     expect(r.text).toBe('');
+    expect(generateMock).toHaveBeenCalledTimes(3);
   });
 });
