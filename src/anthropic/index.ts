@@ -46,9 +46,10 @@ export const PROVIDER = 'anthropic';
  * `currentId` change — and **decisions key on `provider/family`, never on the
  * version string** (the version is reporting metadata only).
  *
- * Pricing is Anthropic-published rates as of 2026-05-16; each tuple is
+ * Pricing is Anthropic-published rates as of 2026-07-23; each tuple is
  * `[input_per_million_USD, output_per_million_USD]`. Refresh `rates` here when
- * Anthropic publishes new pricing.
+ * Anthropic publishes new pricing — and pin the new numbers in the catalog test:
+ * a stale rate is silent, and it scales every cost this system reports.
  */
 const CATALOG: readonly ModelCatalogEntry[] = [
   {
@@ -56,7 +57,7 @@ const CATALOG: readonly ModelCatalogEntry[] = [
     family: 'opus',
     modelClass: 'reasoning',
     currentId: 'claude-opus-4-8',
-    rates: [15, 75],
+    rates: [5, 25],
     label: 'Opus',
     aliases: ['claude-opus-4-7'],
     prefixes: ['claude-opus-'],

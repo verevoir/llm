@@ -23,6 +23,17 @@ describe('@verevoir/llm/anthropic — exported model table', () => {
     }
   });
 
+  // A rate that merely EXISTS is not a rate that is RIGHT: the catalog carried
+  // Opus at [15, 75] (Opus-3 era) long after Opus 4.6+ moved to [5, 25], and
+  // every cost this system reported was 3x high for as long as it did. Rates are
+  // the one field where staleness is silent and scales everything downstream, so
+  // pin the published numbers — a pricing change must break this test.
+  it('prices each family at its published rate, not merely some rate', () => {
+    expect(rates['claude-opus-4-8']).toEqual([5, 25]);
+    expect(rates['claude-sonnet-4-6']).toEqual([3, 15]);
+    expect(rates['claude-haiku-4-5-20251001']).toEqual([1, 5]);
+  });
+
   it('registers friendly labels on import (side-effect)', () => {
     // Importing the adapter calls registerModelLabels for its models;
     // by the time this test runs, those labels are live on the core
