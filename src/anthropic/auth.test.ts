@@ -279,4 +279,16 @@ describe('anthropic client — 401 OAuth→API-key fallback (loud, once)', () =>
     };
     expect(lastReq.system).toHaveLength(1);
   });
+
+  it('after a latch, a later call fails clearly if the metered key is now gone (no silent OAuth re-attempt)', async () => {
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = 'oat-bad';
+    process.env.ANTHROPIC_API_KEY = 'sk-fallback';
+    mockStream.mockReturnValueOnce(failStream(401)); // first OAuth attempt → latch
+    mockStream.mockReturnValue(fakeStream()); // fallback succeeds
+    await chat({ systemPrompt: 'a', turns: [{ role: 'user', content: 'x' }] }); // latched
+    delete process.env.ANTHROPIC_API_KEY; // metered key removed after the latch
+    await expect(
+      chat({ systemPrompt: 'b', turns: [{ role: 'user', content: 'y' }] })
+    ).rejects.toThrow(/rejected earlier this session|no ANTHROPIC_API_KEY/i);
+  });
 });

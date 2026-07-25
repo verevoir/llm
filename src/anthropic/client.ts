@@ -8,10 +8,12 @@ import { resolveBaseUrl } from '../index.js';
 // directly. Its mutable state (the cached default client + the fallback latch) is
 // module-private, encapsulated behind functions rather than exposed as an object.
 
-// The cached default client, and the session OAuth→API-key fallback latch: a 401
-// on a subscription token latches OAuth off for the rest of the process (auth
-// does not change mid-session), so later calls skip it rather than re-hitting the
-// same 401. Private — mutated only here, reset only via resetClientStateForTests.
+// The cached default client + the session OAuth-fallback latch. The latch is set
+// only when a metered key was available to fall back to (see streamedCall), so once
+// latched, later calls use ANTHROPIC_API_KEY instead of re-hitting the 401 — and if
+// that key is no longer set, resolveClient fails clearly rather than silently
+// re-attempting the OAuth token that just 401'd. Private — reset only via
+// resetClientStateForTests.
 let defaultClient: Anthropic | null = null;
 let oauthDisabled = false;
 let oauthFallbackWarned = false;
@@ -93,10 +95,17 @@ export function resolveClient(perCallApiKey: string | null): {
       'No Anthropic credential: set CLAUDE_CODE_OAUTH_TOKEN (subscription) or ANTHROPIC_API_KEY, or pass a per-call apiKey.'
     );
   }
-  // A prior 401 latched OAuth off — fall back to the metered key when present.
+  // A prior 401 latched OAuth off — fall back to the metered key. The latch can
+  // only have been set when a key was present (see streamedCall); if that key is
+  // since gone, fail clearly rather than silently re-attempting the token that 401'd.
   if (auth.kind === 'oauth' && oauthDisabled) {
     const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
-    if (apiKey) auth = { kind: 'apiKey', apiKey };
+    if (!apiKey) {
+      throw new Error(
+        'CLAUDE_CODE_OAUTH_TOKEN was rejected earlier this session and no ANTHROPIC_API_KEY is set to fall back to — fix the token or set a metered key.'
+      );
+    }
+    auth = { kind: 'apiKey', apiKey };
   }
   if (perCallApiKey) return { client: buildClient(auth), oauth: false };
   if (!defaultClient) defaultClient = buildClient(auth);
