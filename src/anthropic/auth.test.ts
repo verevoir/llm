@@ -157,3 +157,105 @@ describe('anthropic client — subscription OAuth path', () => {
     ).rejects.toThrow(/CLAUDE_CODE_OAUTH_TOKEN.*ANTHROPIC_API_KEY|No Anthropic credential/);
   });
 });
+
+describe('anthropic client — 401 OAuth→API-key fallback (loud, once)', () => {
+  const KEYS = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_BASE_URL'];
+  const saved: Record<string, string | undefined> = {};
+  let errSpy: ReturnType<typeof vi.spyOn>;
+
+  function failStream(status: number) {
+    return {
+      on: () => {},
+      finalMessage: async () => {
+        throw Object.assign(new Error(`HTTP ${status}`), { status });
+      },
+    };
+  }
+
+  beforeEach(() => {
+    mockStream.mockReset();
+    mockClientCtor.mockReset();
+    for (const k of KEYS) {
+      saved[k] = process.env[k];
+      delete process.env[k];
+    }
+    resetAnthropicClientForTests();
+    errSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+  });
+
+  afterEach(() => {
+    for (const k of KEYS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+    resetAnthropicClientForTests();
+    errSpy.mockRestore();
+  });
+
+  it('falls back from a rejected OAuth token to the metered key, rebuilding the request WITHOUT the identity, and warns loudly', async () => {
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = 'oat-bad';
+    process.env.ANTHROPIC_API_KEY = 'sk-fallback';
+    mockStream.mockReturnValueOnce(failStream(401)); // OAuth attempt rejected
+    mockStream.mockReturnValueOnce(fakeStream()); // metered-key retry succeeds
+
+    const reply = await chat({ systemPrompt: 'REVIEW', turns: [{ role: 'user', content: 'x' }] });
+    expect(reply.content).toBe('ok');
+
+    // Two clients built: first OAuth (bearer), then the metered key.
+    expect(mockClientCtor).toHaveBeenCalledTimes(2);
+    expect((mockClientCtor.mock.calls[0][0] as Record<string, unknown>).authToken).toBe('oat-bad');
+    expect((mockClientCtor.mock.calls[1][0] as Record<string, unknown>).apiKey).toBe('sk-fallback');
+    expect((mockClientCtor.mock.calls[1][0] as Record<string, unknown>).authToken).toBeNull();
+
+    // The fallback request is rebuilt for the KEY path — no Claude-Code identity block.
+    const oauthReq = mockStream.mock.calls[0][0] as { system: unknown[] };
+    const keyReq = mockStream.mock.calls[1][0] as { system: unknown[] };
+    expect(oauthReq.system).toHaveLength(2); // identity + prompt
+    expect(keyReq.system).toHaveLength(1); // prompt only
+
+    // Loud, once.
+    const warned = errSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('');
+    expect(warned).toContain('CLAUDE_CODE_OAUTH_TOKEN was rejected');
+    expect(warned).toContain('BILLS YOUR API KEY');
+  });
+
+  it('does NOT fall back when there is no metered key — the 401 propagates', async () => {
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = 'oat-bad';
+    mockStream.mockReturnValue(failStream(401));
+    await expect(
+      chat({ systemPrompt: 's', turns: [{ role: 'user', content: 'x' }] })
+    ).rejects.toMatchObject({ status: 401 });
+    expect(mockClientCtor).toHaveBeenCalledTimes(1); // OAuth only, no fallback client
+  });
+
+  it('does NOT fall back for a per-call (BYOK) key — only ambient OAuth falls back', async () => {
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = 'oat';
+    process.env.ANTHROPIC_API_KEY = 'sk-fallback';
+    mockStream.mockReturnValue(failStream(401));
+    await expect(
+      chat({ systemPrompt: 's', turns: [{ role: 'user', content: 'x' }], apiKey: 'sk-byok' })
+    ).rejects.toMatchObject({ status: 401 });
+  });
+
+  it('latches: after one fallback, later calls go straight to the key (no repeat OAuth attempt or warning)', async () => {
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = 'oat-bad';
+    process.env.ANTHROPIC_API_KEY = 'sk-fallback';
+    mockStream.mockReturnValueOnce(failStream(401));
+    mockStream.mockReturnValue(fakeStream()); // all subsequent calls succeed
+
+    await chat({ systemPrompt: 'a', turns: [{ role: 'user', content: 'x' }] }); // triggers fallback
+    const ctorsAfterFirst = mockClientCtor.mock.calls.length;
+    const warnsAfterFirst = errSpy.mock.calls.length;
+
+    await chat({ systemPrompt: 'b', turns: [{ role: 'user', content: 'y' }] }); // should use key directly
+
+    // No new client built (cached key client reused), no second warning.
+    expect(mockClientCtor.mock.calls.length).toBe(ctorsAfterFirst);
+    expect(errSpy.mock.calls.length).toBe(warnsAfterFirst);
+    // The second call's request used the key path (no identity block).
+    const lastReq = mockStream.mock.calls[mockStream.mock.calls.length - 1][0] as {
+      system: unknown[];
+    };
+    expect(lastReq.system).toHaveLength(1);
+  });
+});

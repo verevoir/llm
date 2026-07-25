@@ -27,7 +27,10 @@ import { anthropic } from '@verevoir/llm/anthropic';
 const reply = await anthropic.chat({
   systemPrompt: 'You are a helpful assistant.',
   turns: [{ role: 'user', content: 'Hello' }],
-  apiKey: process.env.ANTHROPIC_API_KEY!,
+  // Pass NOTHING when auth is ambient: it resolves from the environment —
+  // CLAUDE_CODE_OAUTH_TOKEN (subscription) preferred, else ANTHROPIC_API_KEY.
+  // Pass `apiKey` ONLY to force a specific key (BYOK); an explicit key here
+  // short-circuits the OAuth preference.
   modelClass: 'reasoning',
 });
 

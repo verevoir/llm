@@ -116,6 +116,13 @@ registerProviderConnection({
 
 let defaultClient: Anthropic | null = null;
 
+// A subscription OAuth token that a 401 rejects is latched off for the rest of
+// the process (auth does not change mid-session): subsequent calls fall back to
+// the metered ANTHROPIC_API_KEY — loudly, once — rather than re-hitting the same
+// 401 on every call. See `streamedCall` / `noteOAuthRejected`.
+let oauthDisabled = false;
+let oauthFallbackWarned = false;
+
 /** The `anthropic-beta` flag a Claude subscription token
  * (`CLAUDE_CODE_OAUTH_TOKEN`) must carry to be accepted on the Messages API —
  * the same credential the Claude Code CLI and the CI review action use.
@@ -189,21 +196,102 @@ function buildClient(auth: NonNullable<ReturnType<typeof resolveAnthropicAuth>>)
  * common path); a BYOK per-call key builds a fresh client and is never the OAuth
  * path. Throws a clear error when no credential is configured. */
 function resolveClient(perCallApiKey: string | null): { client: Anthropic; oauth: boolean } {
-  const auth = resolveAnthropicAuth(perCallApiKey);
+  let auth = resolveAnthropicAuth(perCallApiKey);
   if (!auth) {
     throw new Error(
       'No Anthropic credential: set CLAUDE_CODE_OAUTH_TOKEN (subscription) or ANTHROPIC_API_KEY, or pass a per-call apiKey.'
     );
+  }
+  // A prior 401 latched OAuth off — fall back to the metered key when present.
+  if (auth.kind === 'oauth' && oauthDisabled) {
+    const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
+    if (apiKey) auth = { kind: 'apiKey', apiKey };
   }
   if (perCallApiKey) return { client: buildClient(auth), oauth: false };
   if (!defaultClient) defaultClient = buildClient(auth);
   return { client: defaultClient, oauth: auth.kind === 'oauth' };
 }
 
-/** Test seam: drop the cached default client so a test can re-resolve the
- * credential after changing the environment. */
+/** A 401/403 from the Anthropic SDK — an authentication rejection (bad key, a
+ * rejected or expired OAuth token, a missing/blocked Claude-Code identity), as
+ * opposed to a transient 429/5xx that {@link callWithRetries} handles. */
+function isAuthError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const status = (err as { status?: number }).status;
+  if (status === 401 || status === 403) return true;
+  const message =
+    typeof (err as { message?: string }).message === 'string'
+      ? (err as { message: string }).message
+      : '';
+  return /\b40[13]\b|authentication_error|invalid[ _-]?x-api-key|unauthorized|permission_error/i.test(
+    message
+  );
+}
+
+/** Latch OAuth off after a 401 and warn ONCE — loudly, because the fallback
+ * bills the metered key, the very cost the OAuth path exists to avoid. Never
+ * silent: a user who set CLAUDE_CODE_OAUTH_TOKEN must SEE that it was rejected
+ * and that spend has moved onto ANTHROPIC_API_KEY. The token itself is never
+ * logged (secret-handling) — only a status / short reason. */
+function noteOAuthRejected(err: unknown): void {
+  oauthDisabled = true;
+  defaultClient = null; // force a rebuild on the metered key
+  if (oauthFallbackWarned) return;
+  oauthFallbackWarned = true;
+  const status = (err as { status?: number })?.status;
+  const detail = status
+    ? `HTTP ${status}`
+    : String((err as { message?: string })?.message ?? 'auth error').slice(0, 80);
+  process.stderr.write(
+    `@verevoir/llm: CLAUDE_CODE_OAUTH_TOKEN was rejected (${detail}) — falling back to the ` +
+      `metered ANTHROPIC_API_KEY. THIS BILLS YOUR API KEY. Check the token, and ` +
+      `ANTHROPIC_OAUTH_BETA / ANTHROPIC_OAUTH_SYSTEM if Anthropic has changed the requirements.\n`
+  );
+}
+
+/**
+ * Run a streamed model call with a one-time, session-wide OAuth→API-key fallback
+ * on an authentication error. The subscription-OAuth path leans on undocumented
+ * headers + an identity gate that can change; rather than hard-fail every call
+ * when they do, a 401 falls back to the metered key — but LOUDLY (see
+ * {@link noteOAuthRejected}), never silently resuming the spend the OAuth path
+ * exists to avoid. `makeRequest(oauth)` rebuilds the payload for the chosen auth
+ * (the OAuth path carries the Claude-Code identity system block; the key path
+ * does not), so the fallback request is correctly shaped — not the OAuth request
+ * retried against a key. Fallback fires only when the failed call was
+ * OAuth-authed, no per-call key was supplied, and a metered key is available.
+ */
+async function streamedCall(
+  perCallApiKey: string | null,
+  makeRequest: (oauth: boolean) => Record<string, unknown>,
+  onProgress?: (info: ProgressInfo) => Promise<void>,
+  onRetry?: (info: ChatRetryInfo) => Promise<void>
+): Promise<StreamedResult> {
+  const first = resolveClient(perCallApiKey);
+  try {
+    return await callWithRetries(
+      () => callStreamed(first.client, makeRequest(first.oauth), onProgress),
+      onRetry
+    );
+  } catch (err) {
+    const canFallBack =
+      first.oauth && !perCallApiKey && isAuthError(err) && !!process.env.ANTHROPIC_API_KEY?.trim();
+    if (!canFallBack) throw err;
+    noteOAuthRejected(err);
+    const fallback = resolveClient(perCallApiKey); // now the metered-key client
+    return await callWithRetries(
+      () => callStreamed(fallback.client, makeRequest(fallback.oauth), onProgress),
+      onRetry
+    );
+  }
+}
+
+/** Test seam: drop the cached default client + reset the OAuth-fallback latch,
+ * so a test can re-resolve the credential after changing the environment. */
 export function resetAnthropicClientForTests(): void {
   defaultClient = null;
+  oauthDisabled = false;
+  oauthFallbackWarned = false;
 }
 
 // 16384 is the next escalation after 8192 hit the cap on a real
@@ -512,7 +600,6 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
   }
   throwIfAborted(options.abortSignal);
   const modelClass: ModelClass = options.modelClass ?? 'reasoning';
-  const { client, oauth } = resolveClient(options.apiKey ?? null);
 
   // A model given the report_progress tool (auto-injected when
   // onProgress is set) may end a turn having called ONLY that tool,
@@ -532,18 +619,19 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
   };
 
   for (let attempt = 0; attempt <= MAX_PROGRESS_CONTINUATIONS; attempt++) {
-    const request = buildRequest({
-      modelClass,
-      systemPrompt: options.systemPrompt,
-      turns: messages,
-      tools: options.onProgress ? [REPORT_PROGRESS_TOOL] : undefined,
-      // A continuation re-sends the growing history; cache its prefix.
-      cacheConversation: attempt > 0,
-      oauth,
-    });
-
-    const streamed = await callWithRetries(
-      () => callStreamed(client, request, options.onProgress),
+    const streamed = await streamedCall(
+      options.apiKey ?? null,
+      (oauth) =>
+        buildRequest({
+          modelClass,
+          systemPrompt: options.systemPrompt,
+          turns: messages,
+          tools: options.onProgress ? [REPORT_PROGRESS_TOOL] : undefined,
+          // A continuation re-sends the growing history; cache its prefix.
+          cacheConversation: attempt > 0,
+          oauth,
+        }),
+      options.onProgress,
       options.onRetry
     );
 
@@ -622,20 +710,21 @@ export async function chatWithTools(options: ChatWithToolsOptions): Promise<Chat
   }
   throwIfAborted(options.abortSignal);
   const modelClass: ModelClass = options.modelClass ?? 'reasoning';
-  const { client, oauth } = resolveClient(options.apiKey ?? null);
   const augmentedTools = options.onProgress
     ? [...options.tools, REPORT_PROGRESS_TOOL]
     : options.tools;
-  const request = buildRequest({
-    modelClass,
-    systemPrompt: options.systemPrompt,
-    turns: options.turns,
-    tools: augmentedTools,
-    oauth,
-  });
 
-  const streamed = await callWithRetries(
-    () => callStreamed(client, request, options.onProgress),
+  const streamed = await streamedCall(
+    options.apiKey ?? null,
+    (oauth) =>
+      buildRequest({
+        modelClass,
+        systemPrompt: options.systemPrompt,
+        turns: options.turns,
+        tools: augmentedTools,
+        oauth,
+      }),
+    options.onProgress,
     options.onRetry
   );
 
@@ -685,7 +774,6 @@ export async function chatWithToolLoop(
     throw new Error('anthropic.chatWithToolLoop() requires at least one tool');
   }
   const modelClass: ModelClass = options.modelClass ?? 'reasoning';
-  const { client, oauth } = resolveClient(options.apiKey ?? null);
   const augmentedTools = options.onProgress
     ? [...options.tools, REPORT_PROGRESS_TOOL]
     : options.tools;
@@ -718,20 +806,21 @@ export async function chatWithToolLoop(
     // is starting the NEXT iteration.
     throwIfAborted(options.abortSignal);
 
-    const request = buildRequest({
-      modelClass,
-      systemPrompt: options.systemPrompt,
-      turns: messages,
-      tools: augmentedTools,
-      // Each iteration re-sends the growing history; a breakpoint on
-      // the last message lets the next iteration read this prefix
-      // from cache instead of reprocessing it.
-      cacheConversation: true,
-      oauth,
-    });
-
-    const streamed = await callWithRetries(
-      () => callStreamed(client, request, options.onProgress),
+    const streamed = await streamedCall(
+      options.apiKey ?? null,
+      (oauth) =>
+        buildRequest({
+          modelClass,
+          systemPrompt: options.systemPrompt,
+          turns: messages,
+          tools: augmentedTools,
+          // Each iteration re-sends the growing history; a breakpoint on
+          // the last message lets the next iteration read this prefix
+          // from cache instead of reprocessing it.
+          cacheConversation: true,
+          oauth,
+        }),
+      options.onProgress,
       options.onRetry
     );
 
@@ -820,16 +909,18 @@ export async function chatWithToolLoop(
   // itself fails, degrade to the empty text rather than throwing.
   throwIfAborted(options.abortSignal);
   try {
-    const finalRequest = buildRequest({
-      modelClass,
-      systemPrompt: options.systemPrompt,
-      turns: messages,
-      tools: [], // no tools → the model must answer in text
-      cacheConversation: true,
-      oauth,
-    });
-    const finalStreamed = await callWithRetries(
-      () => callStreamed(client, finalRequest, options.onProgress),
+    const finalStreamed = await streamedCall(
+      options.apiKey ?? null,
+      (oauth) =>
+        buildRequest({
+          modelClass,
+          systemPrompt: options.systemPrompt,
+          turns: messages,
+          tools: [], // no tools → the model must answer in text
+          cacheConversation: true,
+          oauth,
+        }),
+      options.onProgress,
       options.onRetry
     );
     const finalUsage = shapeUsage(finalStreamed.rawUsage, modelClass);
