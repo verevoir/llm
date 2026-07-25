@@ -137,6 +137,13 @@ version string, so a version bump doesn't zero a model's cost.
   hosted provider (Anthropic, Gemini, SambaNova, Mistral, DeepSeek) always needs
   its key; a base-URL override alone does not make it configured. Routing sees
   only providers whose subpath has been imported.
+- Anthropic subscription auth — the Anthropic adapter prefers
+  `CLAUDE_CODE_OAUTH_TOKEN` (a Claude subscription token from `claude setup-token`)
+  over the metered `ANTHROPIC_API_KEY`, sending it as a bearer token with the
+  required `anthropic-beta` flag + a Claude-Code system identity (both overridable
+  via `ANTHROPIC_OAUTH_BETA` / `ANTHROPIC_OAUTH_SYSTEM`). Precedence: an explicit
+  per-call `apiKey` → `CLAUDE_CODE_OAUTH_TOKEN` → `ANTHROPIC_API_KEY` (fallback
+  only), so a set subscription token means the metered key is never billed.
 
 ## Status
 

@@ -116,19 +116,94 @@ registerProviderConnection({
 
 let defaultClient: Anthropic | null = null;
 
-function getDefaultClient(): Anthropic {
-  if (defaultClient) return defaultClient;
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    throw new Error('ANTHROPIC_API_KEY is not set and no per-call apiKey was passed.');
-  }
-  defaultClient = new Anthropic({ apiKey, baseURL: resolveBaseUrl('ANTHROPIC_BASE_URL') });
-  return defaultClient;
+/** The `anthropic-beta` flag a Claude subscription token
+ * (`CLAUDE_CODE_OAUTH_TOKEN`) must carry to be accepted on the Messages API —
+ * the same credential the Claude Code CLI and the CI review action use.
+ * Overridable via `ANTHROPIC_OAUTH_BETA` so an Anthropic change to the flag is a
+ * config edit, not a code release. */
+function oauthBetaHeader(env: NodeJS.ProcessEnv = process.env): string {
+  return env.ANTHROPIC_OAUTH_BETA?.trim() || 'oauth-2025-04-20';
 }
 
-function getClient(apiKey: string | null): Anthropic {
-  if (apiKey) return new Anthropic({ apiKey, baseURL: resolveBaseUrl('ANTHROPIC_BASE_URL') });
-  return getDefaultClient();
+/** The identity Anthropic requires as the FIRST system block when a request is
+ * authenticated with a subscription OAuth token — the token is authorised only
+ * for Claude-Code-shaped requests. Overridable via `ANTHROPIC_OAUTH_SYSTEM` for
+ * resilience if the required string changes. See {@link buildRequest}. */
+function oauthSystemIdentity(env: NodeJS.ProcessEnv = process.env): string {
+  return (
+    env.ANTHROPIC_OAUTH_SYSTEM?.trim() ||
+    "You are Claude Code, Anthropic's official CLI for Claude."
+  );
+}
+
+/**
+ * Resolve which Anthropic credential to use, in precedence order:
+ *   1. an explicit per-call `apiKey` (BYOK);
+ *   2. `CLAUDE_CODE_OAUTH_TOKEN` — the subscription token, **preferred over the
+ *      metered API key** so local review/generation runs on the subscription and
+ *      does not burn `ANTHROPIC_API_KEY`;
+ *   3. `ANTHROPIC_API_KEY`.
+ * Returns null when none is set (the caller turns that into a clear error). The
+ * returned token/key is for immediate client construction and is NEVER logged.
+ * Exported for tests.
+ */
+export function resolveAnthropicAuth(
+  perCallApiKey: string | null,
+  env: NodeJS.ProcessEnv = process.env
+): { kind: 'apiKey'; apiKey: string } | { kind: 'oauth'; authToken: string } | null {
+  if (perCallApiKey) return { kind: 'apiKey', apiKey: perCallApiKey };
+  const oauth = env.CLAUDE_CODE_OAUTH_TOKEN?.trim();
+  if (oauth) return { kind: 'oauth', authToken: oauth };
+  const apiKey = env.ANTHROPIC_API_KEY?.trim();
+  if (apiKey) return { kind: 'apiKey', apiKey };
+  return null;
+}
+
+/** Construct an SDK client for a resolved credential. A subscription OAuth token
+ * is sent as a bearer `authToken` with the required `anthropic-beta` header; an
+ * API key is sent as `apiKey`. */
+function buildClient(auth: NonNullable<ReturnType<typeof resolveAnthropicAuth>>): Anthropic {
+  const baseURL = resolveBaseUrl('ANTHROPIC_BASE_URL');
+  if (auth.kind === 'oauth') {
+    // apiKey: null is load-bearing — the SDK otherwise DEFAULTS apiKey from
+    // process.env.ANTHROPIC_API_KEY (the default fills an `undefined` field), so
+    // a present ANTHROPIC_API_KEY would ride along as an `x-api-key` header
+    // beside the bearer token and the API would authenticate (and BILL) the
+    // metered key — defeating the whole point. An explicit null suppresses that
+    // env auto-read, so only the subscription bearer token is sent.
+    return new Anthropic({
+      apiKey: null,
+      authToken: auth.authToken,
+      baseURL,
+      defaultHeaders: { 'anthropic-beta': oauthBetaHeader() },
+    });
+  }
+  // authToken: null symmetrically prevents a stray ANTHROPIC_AUTH_TOKEN in the
+  // env from overriding an explicit API key.
+  return new Anthropic({ apiKey: auth.apiKey, authToken: null, baseURL });
+}
+
+/** Resolve the client for a call plus whether it authenticates with a
+ * subscription OAuth token (which needs the Claude-Code system identity on every
+ * request — see {@link buildRequest}). The no-per-call-key client is cached (the
+ * common path); a BYOK per-call key builds a fresh client and is never the OAuth
+ * path. Throws a clear error when no credential is configured. */
+function resolveClient(perCallApiKey: string | null): { client: Anthropic; oauth: boolean } {
+  const auth = resolveAnthropicAuth(perCallApiKey);
+  if (!auth) {
+    throw new Error(
+      'No Anthropic credential: set CLAUDE_CODE_OAUTH_TOKEN (subscription) or ANTHROPIC_API_KEY, or pass a per-call apiKey.'
+    );
+  }
+  if (perCallApiKey) return { client: buildClient(auth), oauth: false };
+  if (!defaultClient) defaultClient = buildClient(auth);
+  return { client: defaultClient, oauth: auth.kind === 'oauth' };
+}
+
+/** Test seam: drop the cached default client so a test can re-resolve the
+ * credential after changing the environment. */
+export function resetAnthropicClientForTests(): void {
+  defaultClient = null;
 }
 
 // 16384 is the next escalation after 8192 hit the cap on a real
@@ -211,6 +286,7 @@ function buildRequest({
   turns,
   tools,
   cacheConversation = false,
+  oauth = false,
 }: {
   modelClass: ModelClass;
   systemPrompt: string;
@@ -221,21 +297,25 @@ function buildRequest({
    * Default false — single-shot calls only benefit from the system /
    * tools breakpoint below. */
   cacheConversation?: boolean;
+  /** When true the request authenticates with a subscription OAuth token, which
+   * Anthropic accepts only for Claude-Code-shaped requests — so the Claude-Code
+   * identity is prepended as the first system block. */
+  oauth?: boolean;
 }): Record<string, unknown> {
   // Render order is tools → system → messages, so the breakpoint on
   // the (single) system block caches the tools + system prefix
   // together — no separate tool breakpoint needed.
   const messages: WireMessage[] = turns.map((t) => ({ role: t.role, content: t.content }));
+  // On the OAuth path the Claude-Code identity leads as its own first system
+  // block (unbreakpointed); the cache breakpoint stays on the actual prompt
+  // block, so tools + identity + prompt cache together.
+  const promptBlock = { type: 'text' as const, text: systemPrompt, cache_control: EPHEMERAL_CACHE };
   const base: Record<string, unknown> = {
     model: models[modelClass],
     max_tokens: MAX_TOKENS,
-    system: [
-      {
-        type: 'text' as const,
-        text: systemPrompt,
-        cache_control: EPHEMERAL_CACHE,
-      },
-    ],
+    system: oauth
+      ? [{ type: 'text' as const, text: oauthSystemIdentity() }, promptBlock]
+      : [promptBlock],
     messages: cacheConversation ? withConversationCacheBreakpoint(messages) : messages,
   };
   if (tools && tools.length > 0) {
@@ -432,7 +512,7 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
   }
   throwIfAborted(options.abortSignal);
   const modelClass: ModelClass = options.modelClass ?? 'reasoning';
-  const client = getClient(options.apiKey ?? null);
+  const { client, oauth } = resolveClient(options.apiKey ?? null);
 
   // A model given the report_progress tool (auto-injected when
   // onProgress is set) may end a turn having called ONLY that tool,
@@ -459,6 +539,7 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
       tools: options.onProgress ? [REPORT_PROGRESS_TOOL] : undefined,
       // A continuation re-sends the growing history; cache its prefix.
       cacheConversation: attempt > 0,
+      oauth,
     });
 
     const streamed = await callWithRetries(
@@ -541,7 +622,7 @@ export async function chatWithTools(options: ChatWithToolsOptions): Promise<Chat
   }
   throwIfAborted(options.abortSignal);
   const modelClass: ModelClass = options.modelClass ?? 'reasoning';
-  const client = getClient(options.apiKey ?? null);
+  const { client, oauth } = resolveClient(options.apiKey ?? null);
   const augmentedTools = options.onProgress
     ? [...options.tools, REPORT_PROGRESS_TOOL]
     : options.tools;
@@ -550,6 +631,7 @@ export async function chatWithTools(options: ChatWithToolsOptions): Promise<Chat
     systemPrompt: options.systemPrompt,
     turns: options.turns,
     tools: augmentedTools,
+    oauth,
   });
 
   const streamed = await callWithRetries(
@@ -603,7 +685,7 @@ export async function chatWithToolLoop(
     throw new Error('anthropic.chatWithToolLoop() requires at least one tool');
   }
   const modelClass: ModelClass = options.modelClass ?? 'reasoning';
-  const client = getClient(options.apiKey ?? null);
+  const { client, oauth } = resolveClient(options.apiKey ?? null);
   const augmentedTools = options.onProgress
     ? [...options.tools, REPORT_PROGRESS_TOOL]
     : options.tools;
@@ -645,6 +727,7 @@ export async function chatWithToolLoop(
       // the last message lets the next iteration read this prefix
       // from cache instead of reprocessing it.
       cacheConversation: true,
+      oauth,
     });
 
     const streamed = await callWithRetries(
@@ -743,6 +826,7 @@ export async function chatWithToolLoop(
       turns: messages,
       tools: [], // no tools → the model must answer in text
       cacheConversation: true,
+      oauth,
     });
     const finalStreamed = await callWithRetries(
       () => callStreamed(client, finalRequest, options.onProgress),
