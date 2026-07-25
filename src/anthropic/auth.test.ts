@@ -15,8 +15,8 @@ vi.mock('@anthropic-ai/sdk', () => ({
   },
 }));
 
-import { chat, resolveAnthropicAuth } from './index.js';
-import { resetClientStateForTests } from './state.js';
+import { chat } from './index.js';
+import { resetClientStateForTests, resolveAnthropicAuth } from './client.js';
 
 function fakeStream() {
   return {
