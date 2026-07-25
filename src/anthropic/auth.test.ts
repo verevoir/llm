@@ -15,7 +15,8 @@ vi.mock('@anthropic-ai/sdk', () => ({
   },
 }));
 
-import { chat, resolveAnthropicAuth, resetAnthropicClientForTests } from './index.js';
+import { chat, resolveAnthropicAuth } from './index.js';
+import { resetClientStateForTests } from './state.js';
 
 function fakeStream() {
   return {
@@ -88,7 +89,7 @@ describe('anthropic client — subscription OAuth path', () => {
       saved[k] = process.env[k];
       delete process.env[k];
     }
-    resetAnthropicClientForTests();
+    resetClientStateForTests();
   });
 
   afterEach(() => {
@@ -96,7 +97,7 @@ describe('anthropic client — subscription OAuth path', () => {
       if (saved[k] === undefined) delete process.env[k];
       else process.env[k] = saved[k];
     }
-    resetAnthropicClientForTests();
+    resetClientStateForTests();
   });
 
   it('authenticates with the bearer token + oauth beta header, and apiKey:null so the metered key cannot ride along', async () => {
@@ -179,7 +180,7 @@ describe('anthropic client — 401 OAuth→API-key fallback (loud, once)', () =>
       saved[k] = process.env[k];
       delete process.env[k];
     }
-    resetAnthropicClientForTests();
+    resetClientStateForTests();
     errSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
   });
 
@@ -188,7 +189,7 @@ describe('anthropic client — 401 OAuth→API-key fallback (loud, once)', () =>
       if (saved[k] === undefined) delete process.env[k];
       else process.env[k] = saved[k];
     }
-    resetAnthropicClientForTests();
+    resetClientStateForTests();
     errSpy.mockRestore();
   });
 
@@ -235,6 +236,16 @@ describe('anthropic client — 401 OAuth→API-key fallback (loud, once)', () =>
     await expect(
       chat({ systemPrompt: 's', turns: [{ role: 'user', content: 'x' }], apiKey: 'sk-byok' })
     ).rejects.toMatchObject({ status: 401 });
+  });
+
+  it('does NOT fall back on a 403 (authorization, not a bad token) — the error propagates', async () => {
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = 'oat';
+    process.env.ANTHROPIC_API_KEY = 'sk-fallback';
+    mockStream.mockReturnValue(failStream(403));
+    await expect(
+      chat({ systemPrompt: 's', turns: [{ role: 'user', content: 'x' }] })
+    ).rejects.toMatchObject({ status: 403 });
+    expect(mockClientCtor).toHaveBeenCalledTimes(1); // OAuth only — no fallback client built
   });
 
   it('latches: after one fallback, later calls go straight to the key (no repeat OAuth attempt or warning)', async () => {

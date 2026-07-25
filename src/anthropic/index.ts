@@ -8,6 +8,7 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import { fireUsageHook } from '../audit-hook.js';
+import { clientState } from './state.js';
 import {
   type ChatOptions,
   type ChatReply,
@@ -114,14 +115,11 @@ registerProviderConnection({
   baseUrlEnv: 'ANTHROPIC_BASE_URL',
 });
 
-let defaultClient: Anthropic | null = null;
-
-// A subscription OAuth token that a 401 rejects is latched off for the rest of
-// the process (auth does not change mid-session): subsequent calls fall back to
-// the metered ANTHROPIC_API_KEY — loudly, once — rather than re-hitting the same
-// 401 on every call. See `streamedCall` / `noteOAuthRejected`.
-let oauthDisabled = false;
-let oauthFallbackWarned = false;
+// The cached default client and the session OAuth→API-key fallback latch live in
+// an internal module (./state.js), NOT on this public entry, so the test-only
+// reset never ships as package API. `clientState` is that mutable state; a 401 on
+// a subscription token latches OAuth off for the rest of the process (auth does
+// not change mid-session). See `streamedCall` / `noteOAuthRejected`.
 
 /** The `anthropic-beta` flag a Claude subscription token
  * (`CLAUDE_CODE_OAUTH_TOKEN`) must carry to be accepted on the Messages API —
@@ -172,12 +170,9 @@ export function resolveAnthropicAuth(
 function buildClient(auth: NonNullable<ReturnType<typeof resolveAnthropicAuth>>): Anthropic {
   const baseURL = resolveBaseUrl('ANTHROPIC_BASE_URL');
   if (auth.kind === 'oauth') {
-    // apiKey: null is load-bearing — the SDK otherwise DEFAULTS apiKey from
-    // process.env.ANTHROPIC_API_KEY (the default fills an `undefined` field), so
-    // a present ANTHROPIC_API_KEY would ride along as an `x-api-key` header
-    // beside the bearer token and the API would authenticate (and BILL) the
-    // metered key — defeating the whole point. An explicit null suppresses that
-    // env auto-read, so only the subscription bearer token is sent.
+    // apiKey: null stops the SDK defaulting it from process.env.ANTHROPIC_API_KEY
+    // and sending x-api-key beside the bearer token (which would bill the metered
+    // key) — only the subscription token is sent.
     return new Anthropic({
       apiKey: null,
       authToken: auth.authToken,
@@ -185,8 +180,7 @@ function buildClient(auth: NonNullable<ReturnType<typeof resolveAnthropicAuth>>)
       defaultHeaders: { 'anthropic-beta': oauthBetaHeader() },
     });
   }
-  // authToken: null symmetrically prevents a stray ANTHROPIC_AUTH_TOKEN in the
-  // env from overriding an explicit API key.
+  // authToken: null so a stray ANTHROPIC_AUTH_TOKEN can't override an explicit key.
   return new Anthropic({ apiKey: auth.apiKey, authToken: null, baseURL });
 }
 
@@ -203,29 +197,28 @@ function resolveClient(perCallApiKey: string | null): { client: Anthropic; oauth
     );
   }
   // A prior 401 latched OAuth off — fall back to the metered key when present.
-  if (auth.kind === 'oauth' && oauthDisabled) {
+  if (auth.kind === 'oauth' && clientState.oauthDisabled) {
     const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
     if (apiKey) auth = { kind: 'apiKey', apiKey };
   }
   if (perCallApiKey) return { client: buildClient(auth), oauth: false };
-  if (!defaultClient) defaultClient = buildClient(auth);
-  return { client: defaultClient, oauth: auth.kind === 'oauth' };
+  if (!clientState.defaultClient) clientState.defaultClient = buildClient(auth);
+  return { client: clientState.defaultClient, oauth: auth.kind === 'oauth' };
 }
 
-/** A 401/403 from the Anthropic SDK — an authentication rejection (bad key, a
- * rejected or expired OAuth token, a missing/blocked Claude-Code identity), as
- * opposed to a transient 429/5xx that {@link callWithRetries} handles. */
+/** A 401 from the Anthropic SDK — an authentication rejection (a rejected or
+ * expired OAuth token, a missing/blocked Claude-Code identity, a bad key), as
+ * opposed to a transient 429/5xx that {@link callWithRetries} handles. A 403 is
+ * deliberately EXCLUDED: it is authorization (permission denied on the org /
+ * project), not a bad token, so it must not trigger the metered-key fallback. */
 function isAuthError(err: unknown): boolean {
   if (!err || typeof err !== 'object') return false;
-  const status = (err as { status?: number }).status;
-  if (status === 401 || status === 403) return true;
+  if ((err as { status?: number }).status === 401) return true;
   const message =
     typeof (err as { message?: string }).message === 'string'
       ? (err as { message: string }).message
       : '';
-  return /\b40[13]\b|authentication_error|invalid[ _-]?x-api-key|unauthorized|permission_error/i.test(
-    message
-  );
+  return /\b401\b|authentication_error|invalid[ _-]?x-api-key|unauthorized/i.test(message);
 }
 
 /** Latch OAuth off after a 401 and warn ONCE — loudly, because the fallback
@@ -234,10 +227,10 @@ function isAuthError(err: unknown): boolean {
  * and that spend has moved onto ANTHROPIC_API_KEY. The token itself is never
  * logged (secret-handling) — only a status / short reason. */
 function noteOAuthRejected(err: unknown): void {
-  oauthDisabled = true;
-  defaultClient = null; // force a rebuild on the metered key
-  if (oauthFallbackWarned) return;
-  oauthFallbackWarned = true;
+  clientState.oauthDisabled = true;
+  clientState.defaultClient = null; // force a rebuild on the metered key
+  if (clientState.oauthFallbackWarned) return;
+  clientState.oauthFallbackWarned = true;
   const status = (err as { status?: number })?.status;
   const detail = status
     ? `HTTP ${status}`
@@ -284,14 +277,6 @@ async function streamedCall(
       onRetry
     );
   }
-}
-
-/** Test seam: drop the cached default client + reset the OAuth-fallback latch,
- * so a test can re-resolve the credential after changing the environment. */
-export function resetAnthropicClientForTests(): void {
-  defaultClient = null;
-  oauthDisabled = false;
-  oauthFallbackWarned = false;
 }
 
 // 16384 is the next escalation after 8192 hit the cap on a real
@@ -394,9 +379,8 @@ function buildRequest({
   // the (single) system block caches the tools + system prefix
   // together — no separate tool breakpoint needed.
   const messages: WireMessage[] = turns.map((t) => ({ role: t.role, content: t.content }));
-  // On the OAuth path the Claude-Code identity leads as its own first system
-  // block (unbreakpointed); the cache breakpoint stays on the actual prompt
-  // block, so tools + identity + prompt cache together.
+  // OAuth path: the Claude-Code identity leads as the first system block; the
+  // cache breakpoint stays on the prompt block so identity + prompt cache together.
   const promptBlock = { type: 'text' as const, text: systemPrompt, cache_control: EPHEMERAL_CACHE };
   const base: Record<string, unknown> = {
     model: models[modelClass],
