@@ -88,6 +88,7 @@
   },
   "overrides": {
     "vite": "^8.0.16",
-    "protobufjs": "^7.6.5"
+    "protobufjs": "^7.6.5",
+    "postcss": "^8.5.18"
   }
 }
