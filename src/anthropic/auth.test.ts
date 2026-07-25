@@ -15,8 +15,8 @@ vi.mock('@anthropic-ai/sdk', () => ({
   },
 }));
 
-import { chat } from './index.js';
-import { resetClientStateForTests, resolveAnthropicAuth } from './client.js';
+import { chat, chatWithTools, chatWithToolLoop } from './index.js';
+import { resetClientStateForTests } from './client.js';
 
 function fakeStream() {
   return {
@@ -36,40 +36,10 @@ function fakeStream() {
 
 const CLAUDE_CODE_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude.";
 
-describe('resolveAnthropicAuth — credential precedence', () => {
-  it('prefers an explicit per-call apiKey (BYOK) over the environment', () => {
-    const env = {
-      CLAUDE_CODE_OAUTH_TOKEN: 'oat',
-      ANTHROPIC_API_KEY: 'sk-env',
-    } as NodeJS.ProcessEnv;
-    expect(resolveAnthropicAuth('sk-call', env)).toEqual({ kind: 'apiKey', apiKey: 'sk-call' });
-  });
-
-  it('prefers the subscription OAuth token over the metered API key', () => {
-    const env = {
-      CLAUDE_CODE_OAUTH_TOKEN: 'oat-xyz',
-      ANTHROPIC_API_KEY: 'sk-env',
-    } as NodeJS.ProcessEnv;
-    expect(resolveAnthropicAuth(null, env)).toEqual({ kind: 'oauth', authToken: 'oat-xyz' });
-  });
-
-  it('falls back to ANTHROPIC_API_KEY when no OAuth token is set', () => {
-    const env = { ANTHROPIC_API_KEY: 'sk-env' } as NodeJS.ProcessEnv;
-    expect(resolveAnthropicAuth(null, env)).toEqual({ kind: 'apiKey', apiKey: 'sk-env' });
-  });
-
-  it('returns null when no credential is available', () => {
-    expect(resolveAnthropicAuth(null, {} as NodeJS.ProcessEnv)).toBeNull();
-  });
-
-  it('ignores blank/whitespace credential values', () => {
-    const env = {
-      CLAUDE_CODE_OAUTH_TOKEN: '   ',
-      ANTHROPIC_API_KEY: 'sk-env',
-    } as NodeJS.ProcessEnv;
-    expect(resolveAnthropicAuth(null, env)).toEqual({ kind: 'apiKey', apiKey: 'sk-env' });
-  });
-});
+// Credential precedence (per-call apiKey > CLAUDE_CODE_OAUTH_TOKEN > ANTHROPIC_API_KEY)
+// is covered THROUGH the public `chat` / `chatWithTools` / `chatWithToolLoop` entry
+// points below — resolveAnthropicAuth is an internal helper, exercised as a black box
+// via its observable effect on the constructed client + request (test-through-the-public-interface).
 
 describe('anthropic client — subscription OAuth path', () => {
   const KEYS = [
@@ -156,6 +126,46 @@ describe('anthropic client — subscription OAuth path', () => {
     await expect(
       chat({ systemPrompt: 's', turns: [{ role: 'user', content: 'x' }] })
     ).rejects.toThrow(/CLAUDE_CODE_OAUTH_TOKEN.*ANTHROPIC_API_KEY|No Anthropic credential/);
+  });
+
+  it('prefers an explicit per-call apiKey (BYOK) over the ambient OAuth token', async () => {
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = 'oat';
+    process.env.ANTHROPIC_API_KEY = 'sk-env';
+    await chat({ systemPrompt: 's', turns: [{ role: 'user', content: 'x' }], apiKey: 'sk-byok' });
+    const opts = mockClientCtor.mock.calls[0][0] as Record<string, unknown>;
+    expect(opts.apiKey).toBe('sk-byok');
+    expect(opts.authToken).toBeNull();
+    const request = mockStream.mock.calls[0][0] as { system: unknown[] };
+    expect(request.system).toHaveLength(1); // key path — no identity block
+  });
+
+  it('leads the identity on the OAuth path through chatWithTools too', async () => {
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = 'oat';
+    await chatWithTools({
+      systemPrompt: 'REVIEW',
+      turns: [{ role: 'user', content: 'x' }],
+      tools: [
+        { name: 'noop', description: 'noop', input_schema: { type: 'object', properties: {} } },
+      ],
+    });
+    const request = mockStream.mock.calls[0][0] as { system: { text: string }[] };
+    expect(request.system[0].text).toBe(CLAUDE_CODE_IDENTITY);
+    expect(request.system[1].text).toBe('REVIEW');
+  });
+
+  it('leads the identity on the OAuth path through chatWithToolLoop too', async () => {
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = 'oat';
+    await chatWithToolLoop({
+      systemPrompt: 'REVIEW',
+      turns: [{ role: 'user', content: 'x' }],
+      tools: [
+        { name: 'noop', description: 'noop', input_schema: { type: 'object', properties: {} } },
+      ],
+      executor: async () => 'x',
+    });
+    const request = mockStream.mock.calls[0][0] as { system: { text: string }[] };
+    expect(request.system[0].text).toBe(CLAUDE_CODE_IDENTITY);
+    expect(request.system[1].text).toBe('REVIEW');
   });
 });
 

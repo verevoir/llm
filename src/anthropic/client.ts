@@ -46,7 +46,7 @@ export function oauthSystemIdentity(env: NodeJS.ProcessEnv = process.env): strin
  * Returns null when none is set (the caller turns that into a clear error). The
  * returned token/key is for immediate client construction and is NEVER logged.
  */
-export function resolveAnthropicAuth(
+function resolveAnthropicAuth(
   perCallApiKey: string | null,
   env: NodeJS.ProcessEnv = process.env
 ): { kind: 'apiKey'; apiKey: string } | { kind: 'oauth'; authToken: string } | null {
