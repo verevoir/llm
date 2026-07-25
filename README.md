@@ -27,7 +27,10 @@ import { anthropic } from '@verevoir/llm/anthropic';
 const reply = await anthropic.chat({
   systemPrompt: 'You are a helpful assistant.',
   turns: [{ role: 'user', content: 'Hello' }],
-  apiKey: process.env.ANTHROPIC_API_KEY!,
+  // Pass NOTHING when auth is ambient: it resolves from the environment —
+  // CLAUDE_CODE_OAUTH_TOKEN (subscription) preferred, else ANTHROPIC_API_KEY.
+  // Pass `apiKey` ONLY to force a specific key (BYOK); an explicit key here
+  // short-circuits the OAuth preference.
   modelClass: 'reasoning',
 });
 
@@ -67,6 +70,17 @@ self-hosted endpoint — without a code change:
 | Mistral         | `MISTRAL_API_KEY`                   | `MISTRAL_BASE_URL`                    |
 | DeepSeek        | `DEEPSEEK_API_KEY`                  | `DEEPSEEK_BASE_URL`                   |
 | SambaNova       | `SAMBA_NOVA_API_KEY`                | `SAMBA_NOVA_BASE_URL`                 |
+
+**Anthropic — subscription OAuth, preferred over the metered key.** When
+`CLAUDE_CODE_OAUTH_TOKEN` is set (a Claude subscription token from
+`claude setup-token`), the Anthropic adapter authenticates with it as a bearer
+token — the same credential the Claude Code CLI and the CI review gate use —
+instead of billing `ANTHROPIC_API_KEY`. Precedence: an explicit per-call `apiKey`
+(BYOK) → `CLAUDE_CODE_OAUTH_TOKEN` → `ANTHROPIC_API_KEY` (the metered key is only
+the fallback, used when not already authenticated). The subscription token
+requires an `anthropic-beta` flag and a Claude-Code system identity on each
+request; both are sent automatically and are overridable via
+`ANTHROPIC_OAUTH_BETA` / `ANTHROPIC_OAUTH_SYSTEM` should Anthropic revise them.
 
 The override is keyed by **provider/endpoint, not model**: running DeepSeek-V3
 _via SambaNova_ uses `SAMBA_NOVA_*`, not `DEEPSEEK_*`. Setting only

@@ -8,6 +8,7 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import { fireUsageHook } from '../audit-hook.js';
+import { isAuthError, noteOAuthRejected, oauthSystemIdentity, resolveClient } from './client.js';
 import {
   type ChatOptions,
   type ChatReply,
@@ -27,7 +28,6 @@ import {
   type Turn,
   registerModelCatalog,
   registerProviderConnection,
-  resolveBaseUrl,
 } from '../index.js';
 
 // ────────────────────────────────────────────────────────────────────
@@ -114,21 +114,47 @@ registerProviderConnection({
   baseUrlEnv: 'ANTHROPIC_BASE_URL',
 });
 
-let defaultClient: Anthropic | null = null;
+// Credential resolution, client construction, and the OAuth→API-key fallback live
+// in ./client.js (internal — off the public surface): `resolveClient`,
+// `isAuthError`, `noteOAuthRejected` and `oauthSystemIdentity` (imported above),
+// plus `resolveAnthropicAuth` + the reset seam the co-located tests import. The
+// mutable client/latch state is private to that module. `streamedCall` below drives it.
 
-function getDefaultClient(): Anthropic {
-  if (defaultClient) return defaultClient;
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    throw new Error('ANTHROPIC_API_KEY is not set and no per-call apiKey was passed.');
+/**
+ * Run a streamed model call with a one-time, session-wide OAuth→API-key fallback
+ * on an authentication error. The subscription-OAuth path leans on undocumented
+ * headers + an identity gate that can change; rather than hard-fail every call
+ * when they do, a 401 falls back to the metered key — but LOUDLY (see
+ * {@link noteOAuthRejected}), never silently resuming the spend the OAuth path
+ * exists to avoid. `makeRequest(oauth)` rebuilds the payload for the chosen auth
+ * (the OAuth path carries the Claude-Code identity system block; the key path
+ * does not), so the fallback request is correctly shaped — not the OAuth request
+ * retried against a key. Fallback fires only when the failed call was
+ * OAuth-authed, no per-call key was supplied, and a metered key is available.
+ */
+async function streamedCall(
+  perCallApiKey: string | null,
+  makeRequest: (oauth: boolean) => Record<string, unknown>,
+  onProgress?: (info: ProgressInfo) => Promise<void>,
+  onRetry?: (info: ChatRetryInfo) => Promise<void>
+): Promise<StreamedResult> {
+  const first = resolveClient(perCallApiKey);
+  try {
+    return await callWithRetries(
+      () => callStreamed(first.client, makeRequest(first.oauth), onProgress),
+      onRetry
+    );
+  } catch (err) {
+    const canFallBack =
+      first.oauth && !perCallApiKey && isAuthError(err) && !!process.env.ANTHROPIC_API_KEY?.trim();
+    if (!canFallBack) throw err;
+    noteOAuthRejected(err);
+    const fallback = resolveClient(perCallApiKey); // now the metered-key client
+    return await callWithRetries(
+      () => callStreamed(fallback.client, makeRequest(fallback.oauth), onProgress),
+      onRetry
+    );
   }
-  defaultClient = new Anthropic({ apiKey, baseURL: resolveBaseUrl('ANTHROPIC_BASE_URL') });
-  return defaultClient;
-}
-
-function getClient(apiKey: string | null): Anthropic {
-  if (apiKey) return new Anthropic({ apiKey, baseURL: resolveBaseUrl('ANTHROPIC_BASE_URL') });
-  return getDefaultClient();
 }
 
 // 16384 is the next escalation after 8192 hit the cap on a real
@@ -211,6 +237,7 @@ function buildRequest({
   turns,
   tools,
   cacheConversation = false,
+  oauth = false,
 }: {
   modelClass: ModelClass;
   systemPrompt: string;
@@ -221,21 +248,24 @@ function buildRequest({
    * Default false — single-shot calls only benefit from the system /
    * tools breakpoint below. */
   cacheConversation?: boolean;
+  /** When true the request authenticates with a subscription OAuth token, which
+   * Anthropic accepts only for Claude-Code-shaped requests — so the Claude-Code
+   * identity is prepended as the first system block. */
+  oauth?: boolean;
 }): Record<string, unknown> {
   // Render order is tools → system → messages, so the breakpoint on
   // the (single) system block caches the tools + system prefix
   // together — no separate tool breakpoint needed.
   const messages: WireMessage[] = turns.map((t) => ({ role: t.role, content: t.content }));
+  // OAuth path: the Claude-Code identity leads as the first system block; the
+  // cache breakpoint stays on the prompt block so identity + prompt cache together.
+  const promptBlock = { type: 'text' as const, text: systemPrompt, cache_control: EPHEMERAL_CACHE };
   const base: Record<string, unknown> = {
     model: models[modelClass],
     max_tokens: MAX_TOKENS,
-    system: [
-      {
-        type: 'text' as const,
-        text: systemPrompt,
-        cache_control: EPHEMERAL_CACHE,
-      },
-    ],
+    system: oauth
+      ? [{ type: 'text' as const, text: oauthSystemIdentity() }, promptBlock]
+      : [promptBlock],
     messages: cacheConversation ? withConversationCacheBreakpoint(messages) : messages,
   };
   if (tools && tools.length > 0) {
@@ -432,7 +462,6 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
   }
   throwIfAborted(options.abortSignal);
   const modelClass: ModelClass = options.modelClass ?? 'reasoning';
-  const client = getClient(options.apiKey ?? null);
 
   // A model given the report_progress tool (auto-injected when
   // onProgress is set) may end a turn having called ONLY that tool,
@@ -452,17 +481,19 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
   };
 
   for (let attempt = 0; attempt <= MAX_PROGRESS_CONTINUATIONS; attempt++) {
-    const request = buildRequest({
-      modelClass,
-      systemPrompt: options.systemPrompt,
-      turns: messages,
-      tools: options.onProgress ? [REPORT_PROGRESS_TOOL] : undefined,
-      // A continuation re-sends the growing history; cache its prefix.
-      cacheConversation: attempt > 0,
-    });
-
-    const streamed = await callWithRetries(
-      () => callStreamed(client, request, options.onProgress),
+    const streamed = await streamedCall(
+      options.apiKey ?? null,
+      (oauth) =>
+        buildRequest({
+          modelClass,
+          systemPrompt: options.systemPrompt,
+          turns: messages,
+          tools: options.onProgress ? [REPORT_PROGRESS_TOOL] : undefined,
+          // A continuation re-sends the growing history; cache its prefix.
+          cacheConversation: attempt > 0,
+          oauth,
+        }),
+      options.onProgress,
       options.onRetry
     );
 
@@ -541,19 +572,21 @@ export async function chatWithTools(options: ChatWithToolsOptions): Promise<Chat
   }
   throwIfAborted(options.abortSignal);
   const modelClass: ModelClass = options.modelClass ?? 'reasoning';
-  const client = getClient(options.apiKey ?? null);
   const augmentedTools = options.onProgress
     ? [...options.tools, REPORT_PROGRESS_TOOL]
     : options.tools;
-  const request = buildRequest({
-    modelClass,
-    systemPrompt: options.systemPrompt,
-    turns: options.turns,
-    tools: augmentedTools,
-  });
 
-  const streamed = await callWithRetries(
-    () => callStreamed(client, request, options.onProgress),
+  const streamed = await streamedCall(
+    options.apiKey ?? null,
+    (oauth) =>
+      buildRequest({
+        modelClass,
+        systemPrompt: options.systemPrompt,
+        turns: options.turns,
+        tools: augmentedTools,
+        oauth,
+      }),
+    options.onProgress,
     options.onRetry
   );
 
@@ -603,7 +636,6 @@ export async function chatWithToolLoop(
     throw new Error('anthropic.chatWithToolLoop() requires at least one tool');
   }
   const modelClass: ModelClass = options.modelClass ?? 'reasoning';
-  const client = getClient(options.apiKey ?? null);
   const augmentedTools = options.onProgress
     ? [...options.tools, REPORT_PROGRESS_TOOL]
     : options.tools;
@@ -636,19 +668,21 @@ export async function chatWithToolLoop(
     // is starting the NEXT iteration.
     throwIfAborted(options.abortSignal);
 
-    const request = buildRequest({
-      modelClass,
-      systemPrompt: options.systemPrompt,
-      turns: messages,
-      tools: augmentedTools,
-      // Each iteration re-sends the growing history; a breakpoint on
-      // the last message lets the next iteration read this prefix
-      // from cache instead of reprocessing it.
-      cacheConversation: true,
-    });
-
-    const streamed = await callWithRetries(
-      () => callStreamed(client, request, options.onProgress),
+    const streamed = await streamedCall(
+      options.apiKey ?? null,
+      (oauth) =>
+        buildRequest({
+          modelClass,
+          systemPrompt: options.systemPrompt,
+          turns: messages,
+          tools: augmentedTools,
+          // Each iteration re-sends the growing history; a breakpoint on
+          // the last message lets the next iteration read this prefix
+          // from cache instead of reprocessing it.
+          cacheConversation: true,
+          oauth,
+        }),
+      options.onProgress,
       options.onRetry
     );
 
@@ -737,15 +771,18 @@ export async function chatWithToolLoop(
   // itself fails, degrade to the empty text rather than throwing.
   throwIfAborted(options.abortSignal);
   try {
-    const finalRequest = buildRequest({
-      modelClass,
-      systemPrompt: options.systemPrompt,
-      turns: messages,
-      tools: [], // no tools → the model must answer in text
-      cacheConversation: true,
-    });
-    const finalStreamed = await callWithRetries(
-      () => callStreamed(client, finalRequest, options.onProgress),
+    const finalStreamed = await streamedCall(
+      options.apiKey ?? null,
+      (oauth) =>
+        buildRequest({
+          modelClass,
+          systemPrompt: options.systemPrompt,
+          turns: messages,
+          tools: [], // no tools → the model must answer in text
+          cacheConversation: true,
+          oauth,
+        }),
+      options.onProgress,
       options.onRetry
     );
     const finalUsage = shapeUsage(finalStreamed.rawUsage, modelClass);
