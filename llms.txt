@@ -127,6 +127,10 @@ version string, so a version bump doesn't zero a model's cost.
   (cheapest configured by default). `resolveModelByTerm(term, opts)` resolves a
   loose human term ("deepseek") to a catalog entry; `modelConnection(term, opts)`
   returns a ready OpenAI-compatible `{ provider, modelId, baseUrl, apiKey }`.
+  A connection may also declare `altKeyEnvs` — additional env vars whose presence makes
+  the provider usable, because the credential CHECK must recognise every credential the
+  CALL path accepts. Anthropic declares `CLAUDE_CODE_OAUTH_TOKEN`, so the subscription
+  token alone configures it, with no `ANTHROPIC_API_KEY` needed.
 - `<PROVIDER>_BASE_URL` overrides — every adapter honours an env override for its
   endpoint (`OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`, `GEMINI_BASE_URL` /
   `GOOGLE_BASE_URL`, `MISTRAL_BASE_URL`, `DEEPSEEK_BASE_URL`, `SAMBA_NOVA_BASE_URL`),

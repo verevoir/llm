@@ -111,6 +111,8 @@ export const rates: RatesTable = Object.fromEntries(CATALOG.map((e) => [e.curren
 registerProviderConnection({
   provider: PROVIDER,
   apiKeyEnv: 'ANTHROPIC_API_KEY',
+  // Why: see `ProviderConnection.altKeyEnvs`.
+  altKeyEnvs: ['CLAUDE_CODE_OAUTH_TOKEN'],
   baseUrlEnv: 'ANTHROPIC_BASE_URL',
 });
 

@@ -101,6 +101,38 @@ describe('provider connection registry (STDIO-374)', () => {
     expect(isProviderConfigured(LOCAL)).toBe(true);
   });
 
+  // The credential check must recognise every credential the call path accepts:
+  // a provider whose adapter authenticates with a non-api-key token is usable.
+  // Shared fixture, one reason to fail per test.
+  describe('altKeyEnvs — an alternative credential', () => {
+    const ALT = 'routetest-alt';
+    const ALT_KEY = 'ROUTETEST_ALT_API_KEY';
+    const ALT_TOKEN = 'ROUTETEST_ALT_OAUTH_TOKEN';
+    beforeEach(() => {
+      registerProviderConnection({ provider: ALT, apiKeyEnv: ALT_KEY, altKeyEnvs: [ALT_TOKEN] });
+      delete process.env[ALT_KEY];
+      delete process.env[ALT_TOKEN];
+    });
+    afterEach(() => {
+      delete process.env[ALT_KEY];
+      delete process.env[ALT_TOKEN];
+    });
+
+    it('leaves the provider unconfigured when neither credential is set', () => {
+      expect(isProviderConfigured(ALT)).toBe(false);
+    });
+
+    it('configures the provider on the alternative credential alone, with no api key', () => {
+      process.env[ALT_TOKEN] = 'oauth-abc';
+      expect(isProviderConfigured(ALT)).toBe(true);
+    });
+
+    it('does NOT configure the provider on an empty/whitespace alternative credential', () => {
+      process.env[ALT_TOKEN] = '   ';
+      expect(isProviderConfigured(ALT)).toBe(false);
+    });
+  });
+
   it('reports an unknown provider as unconfigured', () => {
     expect(isProviderConfigured('nope-nonexistent')).toBe(false);
   });

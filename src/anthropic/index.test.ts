@@ -1,6 +1,59 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { models, rates, PROVIDER } from './index.js';
-import { modelLabel, normalizeModelId, estimateCostUSD, type PerModelUsage } from '../index.js';
+import {
+  modelLabel,
+  normalizeModelId,
+  estimateCostUSD,
+  isProviderConfigured,
+  providerConnection,
+  type PerModelUsage,
+} from '../index.js';
+
+describe('anthropic is configured by the subscription OAuth token alone', () => {
+  const KEY = 'ANTHROPIC_API_KEY';
+  const OAUTH = 'CLAUDE_CODE_OAUTH_TOKEN';
+  const saved = { key: process.env[KEY], oauth: process.env[OAUTH] };
+  // Establish a clean baseline BEFORE each test, not just restore after. Without
+  // this the suite depends on ambient env and on test order: a live
+  // ANTHROPIC_API_KEY could make the OAuth-only assertion pass for the wrong
+  // reason — precisely the distinction these tests exist to prove.
+  beforeEach(() => {
+    delete process.env[KEY];
+    delete process.env[OAUTH];
+  });
+  afterEach(() => {
+    if (saved.key === undefined) delete process.env[KEY];
+    else process.env[KEY] = saved.key;
+    if (saved.oauth === undefined) delete process.env[OAUTH];
+    else process.env[OAUTH] = saved.oauth;
+  });
+
+  it('declares the OAuth token as an alternative credential', () => {
+    expect(providerConnection(PROVIDER)?.altKeyEnvs).toContain(OAUTH);
+  });
+
+  it('is configured with ONLY the OAuth token set — no API key needed', () => {
+    // resolveClient prefers the OAuth token over the metered key, so a caller
+    // holding only the subscription token can make every call. Before this, the
+    // check looked at ANTHROPIC_API_KEY alone and routing refused to pick
+    // anthropic — "no reasoning tier configured" for a provider that worked.
+    delete process.env[KEY];
+    process.env[OAUTH] = 'oauth-token-value';
+    expect(isProviderConfigured(PROVIDER)).toBe(true);
+  });
+
+  it('is unconfigured when neither credential is set', () => {
+    delete process.env[KEY];
+    delete process.env[OAUTH];
+    expect(isProviderConfigured(PROVIDER)).toBe(false);
+  });
+
+  it('is still configured by the API key alone (unchanged)', () => {
+    delete process.env[OAUTH];
+    process.env[KEY] = 'sk-ant-x';
+    expect(isProviderConfigured(PROVIDER)).toBe(true);
+  });
+});
 
 describe('@verevoir/llm/anthropic — exported model table', () => {
   it('reports the anthropic provider id', () => {
