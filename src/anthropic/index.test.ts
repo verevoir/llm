@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { models, rates, PROVIDER } from './index.js';
 import {
   modelLabel,
@@ -13,6 +13,14 @@ describe('anthropic is configured by the subscription OAuth token alone', () => 
   const KEY = 'ANTHROPIC_API_KEY';
   const OAUTH = 'CLAUDE_CODE_OAUTH_TOKEN';
   const saved = { key: process.env[KEY], oauth: process.env[OAUTH] };
+  // Establish a clean baseline BEFORE each test, not just restore after. Without
+  // this the suite depends on ambient env and on test order: a live
+  // ANTHROPIC_API_KEY could make the OAuth-only assertion pass for the wrong
+  // reason — precisely the distinction these tests exist to prove.
+  beforeEach(() => {
+    delete process.env[KEY];
+    delete process.env[OAUTH];
+  });
   afterEach(() => {
     if (saved.key === undefined) delete process.env[KEY];
     else process.env[KEY] = saved.key;
