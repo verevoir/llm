@@ -566,6 +566,18 @@ export interface ProviderConnection {
   provider: string;
   /** Env var holding the API key (e.g. `SAMBA_NOVA_API_KEY`). */
   apiKeyEnv: string;
+  /**
+   * Additional env vars whose presence ALSO makes this provider usable — a
+   * credential that is not the API key but authenticates just as well. Anthropic
+   * declares `CLAUDE_CODE_OAUTH_TOKEN` here: the adapter prefers that token over
+   * the metered key, so a caller holding only the subscription token has a
+   * perfectly usable provider. Without this, {@link isProviderConfigured} would
+   * look only at `apiKeyEnv`, report the provider unconfigured, and routing would
+   * refuse to pick it — even though every call would have succeeded. The credential
+   * CHECK must recognise every credential the CALL path accepts, or the two
+   * disagree and the caller is told to set a key it does not need.
+   */
+  altKeyEnvs?: readonly string[];
   /** Env var that overrides the base URL (e.g. `SAMBA_NOVA_BASE_URL`), if any. */
   baseUrlEnv?: string;
   /**
@@ -600,14 +612,18 @@ export function providerConnection(provider: string): ProviderConnection | undef
 }
 
 /**
- * Whether a provider is usable right now: its API key is set, or a base-URL
- * override points it at a keyless local endpoint. Routing must never pick an
- * endpoint with no credential.
+ * Whether a provider is usable right now: its API key is set, one of its
+ * alternative credentials ({@link ProviderConnection.altKeyEnvs} — e.g.
+ * Anthropic's `CLAUDE_CODE_OAUTH_TOKEN`) is set, or a base-URL override points it
+ * at a keyless local endpoint. Routing must never pick an endpoint with no
+ * credential — but it must equally never refuse one that HAS a credential the
+ * call path accepts, which is why the alt keys are consulted here.
  */
 export function isProviderConfigured(provider: string): boolean {
   const c = PROVIDER_CONNECTIONS[provider];
   if (!c) return false;
   if (process.env[c.apiKeyEnv]?.trim()) return true;
+  if (c.altKeyEnvs?.some((env) => process.env[env]?.trim())) return true;
   // Only a keyless-capable provider (the generic OpenAI-compatible client) is
   // usable on a base-URL override alone — a hosted provider still needs its key.
   return !!(c.keylessCapable && c.baseUrlEnv && process.env[c.baseUrlEnv]?.trim());

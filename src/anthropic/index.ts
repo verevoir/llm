@@ -111,6 +111,11 @@ export const rates: RatesTable = Object.fromEntries(CATALOG.map((e) => [e.curren
 registerProviderConnection({
   provider: PROVIDER,
   apiKeyEnv: 'ANTHROPIC_API_KEY',
+  // `resolveClient` prefers the subscription OAuth token over the metered key, so
+  // a caller holding ONLY that token can make every call — the configured-check
+  // must agree, or routing reports "no provider configured" for a provider that
+  // would have worked, and the caller is told to set an API key it does not need.
+  altKeyEnvs: ['CLAUDE_CODE_OAUTH_TOKEN'],
   baseUrlEnv: 'ANTHROPIC_BASE_URL',
 });
 

@@ -101,6 +101,43 @@ describe('provider connection registry (STDIO-374)', () => {
     expect(isProviderConfigured(LOCAL)).toBe(true);
   });
 
+  it('is configured by an ALTERNATIVE credential (altKeyEnvs) with no api key set', () => {
+    // The credential check must recognise every credential the call path accepts:
+    // a provider whose adapter authenticates with a non-api-key token is usable.
+    const ALT = 'routetest-alt';
+    const ALT_KEY = 'ROUTETEST_ALT_API_KEY';
+    const ALT_TOKEN = 'ROUTETEST_ALT_OAUTH_TOKEN';
+    try {
+      registerProviderConnection({
+        provider: ALT,
+        apiKeyEnv: ALT_KEY,
+        altKeyEnvs: [ALT_TOKEN],
+      });
+      expect(isProviderConfigured(ALT)).toBe(false); // neither credential set
+      process.env[ALT_TOKEN] = 'oauth-abc';
+      expect(isProviderConfigured(ALT)).toBe(true); // alt credential alone suffices
+    } finally {
+      delete process.env[ALT_TOKEN];
+    }
+  });
+
+  it('an empty/whitespace alternative credential does NOT configure the provider', () => {
+    const ALT = 'routetest-alt-blank';
+    const ALT_KEY = 'ROUTETEST_ALTBLANK_API_KEY';
+    const ALT_TOKEN = 'ROUTETEST_ALTBLANK_OAUTH_TOKEN';
+    try {
+      registerProviderConnection({
+        provider: ALT,
+        apiKeyEnv: ALT_KEY,
+        altKeyEnvs: [ALT_TOKEN],
+      });
+      process.env[ALT_TOKEN] = '   ';
+      expect(isProviderConfigured(ALT)).toBe(false);
+    } finally {
+      delete process.env[ALT_TOKEN];
+    }
+  });
+
   it('reports an unknown provider as unconfigured', () => {
     expect(isProviderConfigured('nope-nonexistent')).toBe(false);
   });

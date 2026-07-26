@@ -122,7 +122,11 @@ version string, so a version bump doesn't zero a model's cost.
   resolves a drifted version forward to `{ provider, family }`; `catalogEntryFor`,
   `modelLabel`, `registerModelLabels` round it out.
 - Provider connection registry — adapters register their connection on import, so
-  routing can answer `isProviderConfigured` / `configuredProviders`,
+  routing can answer `isProviderConfigured` / `configuredProviders`. A connection may
+  declare `altKeyEnvs` — additional env vars whose presence also makes the provider
+  usable, because the credential CHECK must recognise every credential the CALL path
+  accepts. Anthropic declares `CLAUDE_CODE_OAUTH_TOKEN`, so the subscription token
+  alone configures it (no `ANTHROPIC_API_KEY` needed),
   `providersForFamily(family)` (the inverse index), and `resolveModel({ family?, modelClass?, configuredOnly?, prefer? })`
   (cheapest configured by default). `resolveModelByTerm(term, opts)` resolves a
   loose human term ("deepseek") to a catalog entry; `modelConnection(term, opts)`
