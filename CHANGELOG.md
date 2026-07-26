@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.21.1] — 2026-07-26
 
 **The OAuth token now COUNTS as a configured Anthropic credential** — closing the half of the 0.21.0 subscription work that made it unusable on its own. 0.21.0 taught the **call path** to prefer `CLAUDE_CODE_OAUTH_TOKEN`, but the **credential check** still looked only at `apiKeyEnv`: `isProviderConfigured('anthropic')` returned `false` when the subscription token was the only credential set, so routing refused to pick a provider whose every call would have succeeded. Callers saw "no reasoning tier configured" and had to set a dummy `ANTHROPIC_API_KEY` purely to satisfy a check that was looking at the wrong variable. `ProviderConnection` gains an optional **`altKeyEnvs`** — additional env vars whose presence also makes a provider usable — `isProviderConfigured` consults them (blank/whitespace values don't count), and the Anthropic adapter declares `altKeyEnvs: ['CLAUDE_CODE_OAUTH_TOKEN']`. The rule this encodes: **the credential check must recognise every credential the call path accepts**, or the two disagree and the caller is told to set a key they don't need. No change for API-key-only setups, and no other adapter declares alt keys.
 
