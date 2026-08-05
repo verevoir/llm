@@ -112,6 +112,20 @@ jobs:
           rm -rf "$D"
           git clone --filter=blob:none --no-checkout "https://x-access-token:${GITHUB_TOKEN}@github.com/verevoir/capabilities.git" "$D"
           ( cd "$D" && git checkout --quiet "$CAPS_SHA" && npm ci --no-fund )
+          # Staleness REPORT — the guard STDIO-661 was missing. It fails OPEN and
+          # never blocks: the age of the pin is maintenance debt, not a defect in
+          # the change under review, and a check that failed builds over it would
+          # be switched off within a week. What was missing was never enforcement,
+          # it was VISIBILITY — the pin sat 63 commits and two weeks behind in
+          # silence, withholding a fix written for the exact outage it then caused.
+          PIN_DATE="$( cd "$D" && git log -1 --format=%cs "$CAPS_SHA" )"
+          PIN_TS="$( cd "$D" && git log -1 --format=%ct "$CAPS_SHA" )"
+          PIN_AGE_DAYS=$(( ( $(date +%s) - PIN_TS ) / 86400 ))
+          PIN_BEHIND="$( cd "$D" && git rev-list --count "${CAPS_SHA}..origin/HEAD" 2>/dev/null || echo '?' )"
+          echo "reviewer pin: ${CAPS_SHA:0:12} ($PIN_DATE) — ${PIN_AGE_DAYS}d old, ${PIN_BEHIND} commits behind"
+          if [ "$PIN_AGE_DAYS" -gt 30 ]; then
+            echo "::warning title=Reviewer pin is ${PIN_AGE_DAYS} days old::${PIN_BEHIND} commits behind capabilities. A stale pin withholds fixes to the REVIEWER itself — see STDIO-661. Bump CAPS_SHA to the current release."
+          fi
           test -f "$D/dist/bin.js" && echo "reviewer MCP built at $D/dist/bin.js"
 
       - name: Adversarial review against the provisioned practices
