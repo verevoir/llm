@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import {
   estimateCostUSD,
   formatTokensCompact,
@@ -176,18 +176,23 @@ describe('modelLabel / registerModelLabels', () => {
 // adapter being imported. Provider id is namespaced to avoid colliding with a
 // real adapter's catalog if one is ever registered in this file.
 describe('model identity catalog — decisions key on provider/family', () => {
-  registerModelCatalog([
-    {
-      provider: 'test-co',
-      family: 'big',
-      modelClass: 'reasoning',
-      currentId: 'testco-big-1-0',
-      rates: [10, 40],
-      label: 'Big',
-      aliases: ['testco-big-0-9'],
-      prefixes: ['testco-big-'],
-    },
-  ]);
+  // Per test, not in the describe body: the last case here re-registers this
+  // same provider/family with different rates, and a describe body runs once,
+  // so the pricing case saw 10+40 or 20+80 depending on order.
+  beforeEach(() => {
+    registerModelCatalog([
+      {
+        provider: 'test-co',
+        family: 'big',
+        modelClass: 'reasoning',
+        currentId: 'testco-big-1-0',
+        rates: [10, 40],
+        label: 'Big',
+        aliases: ['testco-big-0-9'],
+        prefixes: ['testco-big-'],
+      },
+    ]);
+  });
 
   it('normalises the current id, an alias, and a brand-new version (prefix) to the same family', () => {
     expect(normalizeModelId('testco-big-1-0')).toEqual({ provider: 'test-co', family: 'big' });

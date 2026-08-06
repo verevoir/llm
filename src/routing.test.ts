@@ -10,6 +10,7 @@ import {
   providersForFamily,
   resolveModel,
   resolveModelByTerm,
+  modelLabel,
   modelConnection,
   type ModelCatalogEntry,
 } from './index.js';
@@ -225,8 +226,30 @@ describe('resolveModelByTerm + modelConnection (STDIO-378)', () => {
     label: 'DeepSeek V3.2',
     prefixes: ['DeepSeek-V3'],
   };
+  // Namespaced, like the identity fixtures in index.test.ts and for the same
+  // reason: another test in this file registers `prefixes: ['claude']`, and
+  // `MODEL_CATALOG` has no removal (STDIO-676). Under a real `claude-*` id the
+  // bare-prefix case below then extends TWO prefixes and its answer depends on
+  // whether that test has run — a fixture deciding the assertion.
+  const opus: ModelCatalogEntry = {
+    provider: 'rt2-samba',
+    family: 'rt2-opus',
+    modelClass: 'reasoning',
+    currentId: 'rt2opus-4-8',
+    rates: [15, 75],
+    label: 'RT2 Opus',
+    aliases: ['rt2opus-4-7'],
+    prefixes: ['rt2opus-'],
+  };
+  // BOTH registered for EVERY test in this block, and by the outer fixture
+  // rather than an inner one. `MODEL_CATALOG` is module-level and
+  // `registerModelCatalog` only appends or replaces by provider+family — there
+  // is no removal — so an entry registered by one nested block persists into
+  // whatever runs next, and which tests those are is declaration order, which
+  // is not a guarantee. Registering everything the file needs once means no
+  // test mutates the catalog another test reads, so order cannot matter.
   beforeEach(() => {
-    registerModelCatalog([entry]);
+    registerModelCatalog([entry, opus]);
     registerProviderConnection({
       provider: 'rt2-samba',
       apiKeyEnv: 'RT2_KEY',
@@ -248,6 +271,41 @@ describe('resolveModelByTerm + modelConnection (STDIO-378)', () => {
 
   it('returns null when the provider is unconfigured', () => {
     expect(resolveModelByTerm('deepseek')).toBeNull();
+  });
+
+  // Every case here is one term in, one outcome out. The `why` is on
+  // `resolveModelByTerm` itself; these names are the inventory of what it
+  // promises.
+  describe('selection: a version the catalog cannot serve', () => {
+    beforeEach(() => {
+      process.env.RT2_KEY = 'k';
+    });
+
+    it.each([
+      ['a version ahead of the current one', 'rt2opus-5'],
+      ['a version far ahead of it', 'rt2opus-9-1'],
+      ['a partial version that is not the one served', 'rt2opus-4'],
+    ])('refuses %s', (_what, term) => {
+      expect(resolveModelByTerm(term)).toBeNull();
+    });
+
+    it.each([
+      ['the family', 'rt2-opus'],
+      ['the family in any case', 'RT2-Opus'],
+      ['the label', 'RT2 Opus'],
+      ['the id it serves', 'rt2opus-4-8'],
+      ['an alias, an id it used to serve', 'rt2opus-4-7'],
+      ['the bare prefix, naming no version', 'rt2opus-'],
+    ])('resolves %s', (_what, term) => {
+      expect(resolveModelByTerm(term)?.currentId).toBe('rt2opus-4-8');
+    });
+
+    it('refuses a version while NORMALISATION of the same id still resolves', () => {
+      // The asymmetry is the design, so it is asserted in one place rather than
+      // left to two suites that could drift apart.
+      expect(modelLabel('rt2opus-9-1')).toBe('RT2 Opus');
+      expect(resolveModelByTerm('rt2opus-9-1')).toBeNull();
+    });
   });
 
   it('builds a usable connection (id + endpoint + key) from a loose term', () => {
