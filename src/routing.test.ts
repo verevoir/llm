@@ -10,6 +10,7 @@ import {
   providersForFamily,
   resolveModel,
   resolveModelByTerm,
+  modelLabel,
   modelConnection,
   type ModelCatalogEntry,
 } from './index.js';
@@ -248,6 +249,67 @@ describe('resolveModelByTerm + modelConnection (STDIO-378)', () => {
 
   it('returns null when the provider is unconfigured', () => {
     expect(resolveModelByTerm('deepseek')).toBeNull();
+  });
+
+  describe('a version the catalog cannot serve is REFUSED, never substituted', () => {
+    const opus: ModelCatalogEntry = {
+      provider: 'rt2-samba',
+      family: 'opus',
+      modelClass: 'reasoning',
+      currentId: 'claude-opus-4-8',
+      rates: [15, 75],
+      label: 'Opus',
+      aliases: ['claude-opus-4-7'],
+      prefixes: ['claude-opus-'],
+    };
+    beforeEach(() => {
+      registerModelCatalog([opus]);
+      process.env.RT2_KEY = 'k';
+    });
+
+    it('refuses an id whose VERSION the catalog does not hold', () => {
+      // The whole point. This used to return the opus entry, whose `currentId`
+      // is `claude-opus-4-8` — so a caller asking for 5 ran 4-8, and nothing
+      // anywhere said so. Not a warning, not a slower answer: a different model
+      // doing the work while every log agreed it was the one asked for.
+      expect(resolveModelByTerm('claude-opus-5')).toBeNull();
+      expect(resolveModelByTerm('claude-opus-9-1')).toBeNull();
+    });
+
+    it('still resolves the FAMILY, which is the naming to prefer', () => {
+      // "Opus" is a more useful name than a pinned version, and it is the one
+      // that stays true across a release. Refusing versions must not cost this.
+      expect(resolveModelByTerm('opus')?.currentId).toBe('claude-opus-4-8');
+      expect(resolveModelByTerm('Opus')?.currentId).toBe('claude-opus-4-8');
+    });
+
+    it('still resolves the exact id it does serve', () => {
+      expect(resolveModelByTerm('claude-opus-4-8')?.currentId).toBe('claude-opus-4-8');
+    });
+
+    it('still resolves an ALIAS — an id it used to serve is one it knows', () => {
+      // The distinction that makes this refusal principled rather than blunt:
+      // an alias is a version the catalog vouches for, so it resolves. Only a
+      // version nobody registered is refused.
+      expect(resolveModelByTerm('claude-opus-4-7')?.currentId).toBe('claude-opus-4-8');
+    });
+
+    it('does not refuse a term that merely SHARES a prefix without extending it', () => {
+      // `claude` is shorter than the prefix, so it names no version at all —
+      // it is a loose term, and loose terms are what this function is for.
+      expect(resolveModelByTerm('claude')?.currentId).toBe('claude-opus-4-8');
+    });
+
+    it('normalisation still resolves forward, because it answers a different question', () => {
+      // The asymmetry, pinned so neither side can be "unified" with the other.
+      // An id that was ALREADY USED must price and label even if unseen —
+      // dropping it to "unknown" loses the cost of a call that really happened.
+      // An id ASKED FOR that we cannot serve must fail. Same prefixes, opposite
+      // rules, because forward-matching is safe looking backwards and unsafe
+      // looking forwards.
+      expect(modelLabel('claude-opus-9-1')).not.toBe('claude-opus-9-1');
+      expect(resolveModelByTerm('claude-opus-9-1')).toBeNull();
+    });
   });
 
   it('builds a usable connection (id + endpoint + key) from a loose term', () => {
