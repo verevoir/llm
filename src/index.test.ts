@@ -176,16 +176,9 @@ describe('modelLabel / registerModelLabels', () => {
 // adapter being imported. Provider id is namespaced to avoid colliding with a
 // real adapter's catalog if one is ever registered in this file.
 describe('model identity catalog — decisions key on provider/family', () => {
-  // IN A FIXTURE, not in the describe body. A describe body runs once at
-  // collection, so this registered the family once and every test then shared
-  // one mutable catalog entry — and the last test in this block deliberately
-  // REPLACES it, with different rates. Whichever of the two ran first decided
-  // whether `prices an unseen version…` saw 10+40 or 20+80, and vitest does not
-  // promise an order. Under `--sequence.shuffle` it failed about two runs in
-  // five. Re-registering per test makes every case start from the same catalog,
-  // so the replacement test can mutate freely and nothing downstream inherits
-  // it. (`registerModelCatalog` replaces by provider+family and has no removal,
-  // which is why a fresh registration is the only way back.)
+  // Per test, not in the describe body: the last case here re-registers this
+  // same provider/family with different rates, and a describe body runs once,
+  // so the pricing case saw 10+40 or 20+80 depending on order.
   beforeEach(() => {
     registerModelCatalog([
       {

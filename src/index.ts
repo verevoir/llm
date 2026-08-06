@@ -697,10 +697,13 @@ export function resolveModel(opts: ResolveModelOptions = {}): ModelCatalogEntry 
  * warning, not a slower answer, just a different mind doing the work while
  * every log says otherwise.
  *
- * So a term carrying a version the catalog does not hold is null. A term naming
- * a FAMILY is not — "opus", "sonnet", "deepseek" ask for a class and get the
- * current member of it, which is the naming the operator asked us to prefer and
- * the only one that stays true across a release.
+ * So a term carrying a version the catalog does not hold is null — including a
+ * PARTIAL one: `claude-opus-4` is refused while `claude-opus-4-8` resolves,
+ * because 4 is not 4-8 and answering it with 4-8 is the same substitution one
+ * digit smaller. A term naming no version is unaffected: "opus", "claude" and
+ * the bare prefix `claude-opus-` all ask for a class and get the current member
+ * of it, which is the naming to prefer and the only one that stays true across
+ * a release.
  */
 export function resolveModelByTerm(
   term: string,
