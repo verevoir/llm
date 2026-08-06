@@ -226,8 +226,25 @@ describe('resolveModelByTerm + modelConnection (STDIO-378)', () => {
     label: 'DeepSeek V3.2',
     prefixes: ['DeepSeek-V3'],
   };
+  const opus: ModelCatalogEntry = {
+    provider: 'rt2-samba',
+    family: 'opus',
+    modelClass: 'reasoning',
+    currentId: 'claude-opus-4-8',
+    rates: [15, 75],
+    label: 'Opus',
+    aliases: ['claude-opus-4-7'],
+    prefixes: ['claude-opus-'],
+  };
+  // BOTH registered for EVERY test in this block, and by the outer fixture
+  // rather than an inner one. `MODEL_CATALOG` is module-level and
+  // `registerModelCatalog` only appends or replaces by provider+family — there
+  // is no removal — so an entry registered by one nested block persists into
+  // whatever runs next, and which tests those are is declaration order, which
+  // is not a guarantee. Registering everything the file needs once means no
+  // test mutates the catalog another test reads, so order cannot matter.
   beforeEach(() => {
-    registerModelCatalog([entry]);
+    registerModelCatalog([entry, opus]);
     registerProviderConnection({
       provider: 'rt2-samba',
       apiKeyEnv: 'RT2_KEY',
@@ -252,28 +269,21 @@ describe('resolveModelByTerm + modelConnection (STDIO-378)', () => {
   });
 
   describe('a version the catalog cannot serve is REFUSED, never substituted', () => {
-    const opus: ModelCatalogEntry = {
-      provider: 'rt2-samba',
-      family: 'opus',
-      modelClass: 'reasoning',
-      currentId: 'claude-opus-4-8',
-      rates: [15, 75],
-      label: 'Opus',
-      aliases: ['claude-opus-4-7'],
-      prefixes: ['claude-opus-'],
-    };
     beforeEach(() => {
-      registerModelCatalog([opus]);
       process.env.RT2_KEY = 'k';
     });
 
-    it('refuses an id whose VERSION the catalog does not hold', () => {
+    // One input per case, so a failure names the term that broke rather than
+    // stopping at the first and hiding the rest.
+    it.each([
+      ['a version ahead of the catalog', 'claude-opus-5'],
+      ['a version far ahead of it', 'claude-opus-9-1'],
+    ])('refuses %s', (_what, term) => {
       // The whole point. This used to return the opus entry, whose `currentId`
       // is `claude-opus-4-8` — so a caller asking for 5 ran 4-8, and nothing
-      // anywhere said so. Not a warning, not a slower answer: a different model
-      // doing the work while every log agreed it was the one asked for.
-      expect(resolveModelByTerm('claude-opus-5')).toBeNull();
-      expect(resolveModelByTerm('claude-opus-9-1')).toBeNull();
+      // anywhere said so. Not a warning, not a slower answer: a different
+      // model doing the work while every log agreed it was the one asked for.
+      expect(resolveModelByTerm(term)).toBeNull();
     });
 
     it('still resolves the FAMILY, which is the naming to prefer', () => {

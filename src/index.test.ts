@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import {
   estimateCostUSD,
   formatTokensCompact,
@@ -176,18 +176,30 @@ describe('modelLabel / registerModelLabels', () => {
 // adapter being imported. Provider id is namespaced to avoid colliding with a
 // real adapter's catalog if one is ever registered in this file.
 describe('model identity catalog — decisions key on provider/family', () => {
-  registerModelCatalog([
-    {
-      provider: 'test-co',
-      family: 'big',
-      modelClass: 'reasoning',
-      currentId: 'testco-big-1-0',
-      rates: [10, 40],
-      label: 'Big',
-      aliases: ['testco-big-0-9'],
-      prefixes: ['testco-big-'],
-    },
-  ]);
+  // IN A FIXTURE, not in the describe body. A describe body runs once at
+  // collection, so this registered the family once and every test then shared
+  // one mutable catalog entry — and the last test in this block deliberately
+  // REPLACES it, with different rates. Whichever of the two ran first decided
+  // whether `prices an unseen version…` saw 10+40 or 20+80, and vitest does not
+  // promise an order. Under `--sequence.shuffle` it failed about two runs in
+  // five. Re-registering per test makes every case start from the same catalog,
+  // so the replacement test can mutate freely and nothing downstream inherits
+  // it. (`registerModelCatalog` replaces by provider+family and has no removal,
+  // which is why a fresh registration is the only way back.)
+  beforeEach(() => {
+    registerModelCatalog([
+      {
+        provider: 'test-co',
+        family: 'big',
+        modelClass: 'reasoning',
+        currentId: 'testco-big-1-0',
+        rates: [10, 40],
+        label: 'Big',
+        aliases: ['testco-big-0-9'],
+        prefixes: ['testco-big-'],
+      },
+    ]);
+  });
 
   it('normalises the current id, an alias, and a brand-new version (prefix) to the same family', () => {
     expect(normalizeModelId('testco-big-1-0')).toEqual({ provider: 'test-co', family: 'big' });

@@ -708,23 +708,16 @@ export function resolveModelByTerm(
 ): ModelCatalogEntry | null {
   const lc = term.trim().toLowerCase();
   if (!lc) return null;
-  // Everything the catalog can vouch for by name: a family, a label, the id it
-  // currently serves, or an id it used to serve.
-  const named = (e: ModelCatalogEntry): boolean =>
+  const vouchedForByName = (e: ModelCatalogEntry): boolean =>
     e.family.toLowerCase() === lc ||
     e.currentId.toLowerCase() === lc ||
     e.label?.toLowerCase() === lc ||
     (e.aliases?.some((a) => a.toLowerCase() === lc) ?? false);
-  // A term that EXTENDS a known prefix is naming a version — `claude-opus-` plus
-  // something. If no entry above vouched for it by name, that version is one
-  // the catalog does not have, and the honest answer is that we cannot serve it.
-  const namesAnUnknownVersion =
-    !MODEL_CATALOG.some(named) &&
-    MODEL_CATALOG.some(
-      (e) =>
-        e.prefixes?.some((p) => lc.startsWith(p.toLowerCase()) && lc !== p.toLowerCase()) ?? false
-    );
-  if (namesAnUnknownVersion) return null;
+  const extendsAKnownPrefix = (e: ModelCatalogEntry): boolean =>
+    e.prefixes?.some((p) => lc.startsWith(p.toLowerCase()) && lc !== p.toLowerCase()) ?? false;
+  const namesAVersionWeDoNotHave =
+    !MODEL_CATALOG.some(vouchedForByName) && MODEL_CATALOG.some(extendsAKnownPrefix);
+  if (namesAVersionWeDoNotHave) return null;
   const matches = (e: ModelCatalogEntry): boolean =>
     e.family.toLowerCase().includes(lc) ||
     e.currentId.toLowerCase().includes(lc) ||
