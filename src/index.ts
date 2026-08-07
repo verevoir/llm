@@ -691,16 +691,17 @@ export function resolveModel(opts: ResolveModelOptions = {}): ModelCatalogEntry 
  * field. Normalising is backward-looking: an id that was *already used* must
  * still price and label, so `claude-opus-9-1` arriving in a usage report should
  * fall to the opus family rather than "unknown", and {@link modelLabel} matches
- * forward for exactly that reason. Selecting is forward-looking: `claude-opus-5`
+ * forward for exactly that reason. Selecting is forward-looking: `claude-opus-6`
  * asked *for* is a request the catalog cannot fill, and answering it with
- * `claude-opus-4-8` runs a different model with no symptom at all — not a
+ * `claude-opus-5` runs a different model with no symptom at all — not a
  * warning, not a slower answer, just a different mind doing the work while
  * every log says otherwise.
  *
  * So a term carrying a version the catalog does not hold is null — including a
- * PARTIAL one: `claude-opus-4` is refused while `claude-opus-4-8` resolves,
- * because 4 is not 4-8 and answering it with 4-8 is the same substitution one
- * digit smaller. A term naming no version is unaffected: "opus", "claude" and
+ * PARTIAL one: `claude-opus-4` is refused while `claude-opus-4-8` resolves (as a
+ * superseded alias), because 4 is not 4-8 and answering it with 4-8 is the same
+ * substitution one digit smaller. A term naming no version is unaffected:
+ * "opus", "claude" and
  * the bare prefix `claude-opus-` all ask for a class and get the current member
  * of it, which is the naming to prefer and the only one that stays true across
  * a release.

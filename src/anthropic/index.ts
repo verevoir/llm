@@ -50,25 +50,47 @@ export const PROVIDER = 'anthropic';
  * `[input_per_million_USD, output_per_million_USD]`. Refresh `rates` here when
  * Anthropic publishes new pricing — and pin the new numbers in the catalog test:
  * a stale rate is silent, and it scales every cost this system reports.
+ *
+ * RATES ARE PROVISIONAL FOR OPUS AND SONNET (STDIO-681). Their `currentId`s
+ * moved to the Claude 5 generation so the tiers resolve to a current model; the
+ * TUPLES below are still the Claude 4.x published numbers, carried over
+ * UNVERIFIED. So every cost figure this system reports for opus or sonnet is an
+ * estimate against the PREVIOUS generation's pricing and must not be quoted as
+ * spend until the published Claude 5 rates are pinned here and in the catalog
+ * test. That is exactly the defect the paragraph above describes — taken on
+ * deliberately and briefly, with a card, rather than shipped as a guess wearing
+ * the costume of a number.
+ *
+ * `currentId` being a BUILD-TIME constant is itself the deeper problem, and it
+ * is what let opus sit a generation behind: a new model cannot be reached until
+ * this package, then accelerator, then capabilities are each released in order.
+ * Anthropic serves `GET /v1/models`, so the ids are discoverable at RUNTIME
+ * against the calling credential. Pricing and `modelClass` are not — no provider
+ * publishes the first, and the second is our judgement — so those stay here,
+ * keyed by FAMILY, which is already how every decision keys. See STDIO-682.
  */
 const CATALOG: readonly ModelCatalogEntry[] = [
   {
     provider: PROVIDER,
     family: 'opus',
     modelClass: 'reasoning',
-    currentId: 'claude-opus-4-8',
-    rates: [5, 25],
+    currentId: 'claude-opus-5',
+    rates: [5, 25], // PROVISIONAL — Claude 4.8 pricing; see the note above.
     label: 'Opus',
-    aliases: ['claude-opus-4-7'],
+    // Superseded ids stay ALIASES rather than being dropped: a transcript, a
+    // ledger or a stored cost row naming claude-opus-4-8 must still normalise
+    // to this family, or historical data silently stops pricing and labelling.
+    aliases: ['claude-opus-4-8', 'claude-opus-4-7'],
     prefixes: ['claude-opus-'],
   },
   {
     provider: PROVIDER,
     family: 'sonnet',
     modelClass: 'drafting',
-    currentId: 'claude-sonnet-4-6',
-    rates: [3, 15],
+    currentId: 'claude-sonnet-5',
+    rates: [3, 15], // PROVISIONAL — Claude 4.6 pricing; see the note above.
     label: 'Sonnet',
+    aliases: ['claude-sonnet-4-6'],
     prefixes: ['claude-sonnet-'],
   },
   {

@@ -61,8 +61,8 @@ describe('@verevoir/llm/anthropic — exported model table', () => {
   });
 
   it('maps the three model classes to concrete model ids', () => {
-    expect(models.reasoning).toBe('claude-opus-4-8');
-    expect(models.drafting).toBe('claude-sonnet-4-6');
+    expect(models.reasoning).toBe('claude-opus-5');
+    expect(models.drafting).toBe('claude-sonnet-5');
     expect(models.extraction).toBe('claude-haiku-4-5-20251001');
   });
 
@@ -82,9 +82,26 @@ describe('@verevoir/llm/anthropic — exported model table', () => {
   // the one field where staleness is silent and scales everything downstream, so
   // pin the published numbers — a pricing change must break this test.
   it('prices each family at its published rate, not merely some rate', () => {
-    expect(rates['claude-opus-4-8']).toEqual([5, 25]);
-    expect(rates['claude-sonnet-4-6']).toEqual([3, 15]);
+    // PROVISIONAL for opus and sonnet: these are the Claude 4.x numbers carried
+    // across the Claude 5 id bump UNVERIFIED (STDIO-681). They are pinned here
+    // anyway — precisely so that correcting them BREAKS this test rather than
+    // slipping in silently, which is the failure this test exists to stop.
+    expect(rates['claude-opus-5']).toEqual([5, 25]);
+    expect(rates['claude-sonnet-5']).toEqual([3, 15]);
     expect(rates['claude-haiku-4-5-20251001']).toEqual([1, 5]);
+  });
+
+  it('still prices and labels a SUPERSEDED id, so stored cost rows keep working', () => {
+    // A transcript or ledger row naming claude-opus-4-8 predates the bump and
+    // cannot be rewritten. Dropping the old id from the catalog would make it
+    // normalise to nothing, and historical spend would quietly stop pricing.
+    expect(normalizeModelId('claude-opus-4-8')).toEqual({ provider: 'anthropic', family: 'opus' });
+    expect(normalizeModelId('claude-sonnet-4-6')).toEqual({
+      provider: 'anthropic',
+      family: 'sonnet',
+    });
+    expect(modelLabel('claude-opus-4-8')).toBe('Opus');
+    expect(modelLabel('claude-sonnet-4-6')).toBe('Sonnet');
   });
 
   it('registers friendly labels on import (side-effect)', () => {
@@ -92,8 +109,8 @@ describe('@verevoir/llm/anthropic — exported model table', () => {
     // by the time this test runs, those labels are live on the core
     // helper. The label registry is the consumer-visible affordance —
     // tile UI calls modelLabel(id) and expects "Opus" / "Haiku".
-    expect(modelLabel('claude-opus-4-8')).toBe('Opus');
-    expect(modelLabel('claude-sonnet-4-6')).toBe('Sonnet');
+    expect(modelLabel('claude-opus-5')).toBe('Opus');
+    expect(modelLabel('claude-sonnet-5')).toBe('Sonnet');
     expect(modelLabel('claude-haiku-4-5-20251001')).toBe('Haiku');
   });
 });
