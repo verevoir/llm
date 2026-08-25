@@ -72,14 +72,9 @@
  * same class of customisation (CLAUDE.md, skills, plugins, hooks, MCP
  * servers, custom commands/agents) while leaving "Auth, model selection,
  * built-in tools, and permissions" to work normally — determinism
- * without losing the subscription route.
- *
- * (This reasoning is built from the CLI's own `--help` text as relayed
- * this session by the operator, who ran the real binary — it has not
- * been independently reproduced by anything that built or tested this
- * file. See this change's PR body for exactly what remains unverified,
- * and do not treat the shapes below as confirmed until a real invocation
- * has been run and read.)
+ * without losing the subscription route. (The CLI's exact auth
+ * behaviour under `--safe-mode` is still relayed, not independently
+ * observed — see the PR body for what remains open.)
  *
  * `--tools ""` IS A POSITIVE DECLARATION, NOT AN OMISSION. Passing no
  * `--tools` flag at all might mean "use the CLI's default tool set" —
@@ -101,9 +96,59 @@
  * silently compare two different things while appearing to compare one.
  * Text out, parsed the same way on both substrates, is the point.
  *
- * `--output-format json`'S SHAPE IS UNVERIFIED BEYOND WHAT WAS RELAYED
- * THIS SESSION. `extractReply` below parses defensively for exactly that
- * reason — see its own comment.
+ * `--output-format json`'S SHAPE IS NOW CONFIRMED, AGAINST A REAL
+ * INVOCATION — the operator ran `claude -p ... --output-format json` and
+ * relayed the raw payload verbatim. Recorded here in detail because an
+ * earlier version of this file guessed at the shape, and the guess was
+ * wrong in specific, correctable ways:
+ *   - The reply text is a FLAT STRING under `result` — not `content`,
+ *     not `text`, not nested. This adapter now reads exactly that field.
+ *   - `stop_reason` is a real top-level field (`"end_turn"` observed)
+ *     and maps directly to `ChatReply.stopReason`.
+ *   - `usage` carries the same four token-count field names this file
+ *     already expected (`input_tokens`, `output_tokens`,
+ *     `cache_read_input_tokens`, `cache_creation_input_tokens`) — that
+ *     part of the original guess held up.
+ *   - There is NO version field anywhere in the payload. The
+ *     speculative `version` / `cli_version` payload check this file
+ *     used to carry has been removed entirely — it was a guess and the
+ *     guess was wrong. `resolveCliVersion()`'s memoized `claude
+ *     --version` spawn (below) is now the ONLY source of
+ *     `substrateVersion`, confirmed necessary rather than merely
+ *     defensive.
+ *   - `is_error: true` CAN APPEAR ALONGSIDE A ZERO EXIT CODE. `chat()`
+ *     checks both signals: a non-zero exit still refuses outright
+ *     (unchanged), and a zero exit whose parsed payload carries
+ *     `is_error: true` now ALSO refuses — exit code alone was not a
+ *     sufficient failure signal.
+ *
+ * A SINGLE CALL CAN INVOKE MORE THAN ONE MODEL. The observed payload's
+ * `modelUsage` carried usage for BOTH `claude-haiku-4-5-20251001` (896
+ * input tokens) and `claude-opus-5[1m]` (281 input tokens) for one
+ * trivial prompt — the CLI evidently does some internal work (routing,
+ * title generation, or similar) on a smaller model alongside whichever
+ * model actually answers. `TokenUsage.model` is a single field and
+ * cannot carry two models, so `determinePrimaryModel()` (below) reports
+ * the entry whose token counts match the top-level `usage` block — the
+ * model that produced the visible reply. The OTHER model is not
+ * silently dropped: whenever `modelUsage` names more than one model,
+ * every entry is named in a `console.warn`, with its own token counts
+ * and cost, so a second model having run stays visible even though only
+ * one can be the reported `model`.
+ *
+ * COST FIGURES ARE PRESENT (`total_cost_usd`, and per-model
+ * `modelUsage[].costUSD`) AND DELIBERATELY NOT SURFACED ONTO
+ * `TokenUsage`. The payload does not state whether that number is
+ * billed or notional — there is no route-equivalent field in it — so
+ * asserting either would be a claim this adapter cannot back up. What
+ * this adapter DOES know, independently and for certain: no billed
+ * credential was available to spend, because `ANTHROPIC_API_KEY` /
+ * `ANTHROPIC_API_KEY_FILE` are stripped from the child's environment
+ * before the CLI ever runs (see `childEnv()`) — so whatever this
+ * number represents, it was not charged to the operator's billed key.
+ * Surfacing it onto `TokenUsage` as a settled billed-vs-notional figure
+ * would misrepresent it; that dual-cost design (`decisions/023`, in
+ * aigency-governance) is deliberate, separate, out-of-scope work.
  *
  * THIS IS `chat()` ONLY — no `chatWithTools` / `chatWithToolLoop`,
  * matching `google/index.ts`'s own staged-rollout precedent for a first
@@ -111,29 +156,6 @@
  * a subsequent release"). A tool-calling loop over a subprocess boundary
  * is a materially larger design than this reviewer use case needs, and
  * `--tools ""` makes it moot for this adapter's actual purpose anyway.
- *
- * SUBSTRATE VERSION IS RECORDED ON EVERY CALL, THE SAME WAY `route` IS.
- * Flags and auth behaviour can shift between `claude` CLI releases —
- * `--bare`'s own auth behaviour is exactly the kind of thing that could
- * change, and it is the difference between a subscription call and
- * spending purchased credits (see the file header above). A run whose
- * substrate version is not recorded cannot be attributed later if
- * behaviour changes after an upgrade — the same argument that produced
- * `route`, one level down (see `TokenUsage.substrateVersion` in
- * `../index.ts`). This also makes a controlled version-bump measurement
- * possible at all: same corpus, same lenses, same prompts, one version
- * bump, does the finding text change — that comparison needs every run to
- * carry the version it was made under, or "before" and "after" are
- * indistinguishable in the record.
- *
- * `resolveCliVersion()` below reads the payload first (checking whether
- * `--output-format json` already reports a version — unverified, so this
- * is speculative field-name matching, same posture as `extractReply`'s
- * text extraction) and falls back to a SEPARATE, MEMOIZED `claude
- * --version` spawn, cached for the lifetime of the process. The version
- * cannot change mid-run, so this never re-spawns per call — a second
- * process per reviewer call, purely to ask a value that is already known,
- * would double this adapter's process count for no new information.
  */
 
 import { spawn } from 'node:child_process';
@@ -211,77 +233,120 @@ function joinTurns(turns: ChatOptions['turns']): string {
   return turns.map((t) => `## ${t.role}\n${contentToText(t.content)}`).join('\n\n');
 }
 
+/** Per-model usage entry inside `--output-format json`'s `modelUsage` map —
+ * confirmed real, see the file header's "A SINGLE CALL CAN INVOKE MORE
+ * THAN ONE MODEL". */
+interface ModelUsageEntry {
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadInputTokens?: number;
+  cacheCreationInputTokens?: number;
+  /** Present, and deliberately not surfaced onto TokenUsage — see the
+   * file header's "COST FIGURES ARE PRESENT" section. */
+  costUSD?: number;
+  /** The canonical model id (e.g. `claude-opus-5`), distinct from the
+   * `modelUsage` map's own key (e.g. `claude-opus-5[1m]`, which carries a
+   * context-window suffix). Preferred over the raw key when present. */
+  canonicalModel?: string;
+}
+
 /**
- * Best-effort field names for `--output-format json`'s envelope — pending
- * real verification (see the file header). Named fields not confirmed
- * present are optional so a shape lacking them still parses. `version` /
- * `cli_version` are speculative candidates for a substrate-version field,
- * on the same unverified footing as `result`/`content`/`text` for the
- * reply body — checked first so a real version in the payload costs
- * nothing extra to use; falls back to `resolveCliVersion()` when absent.
+ * `--output-format json`'s real, confirmed envelope shape — see the file
+ * header for how this was established and what changed from the original
+ * guess. Fields not confirmed present in every observed shape stay
+ * optional so a shape lacking one still parses without throwing.
  */
 interface ClaudeCliJsonResult {
+  /** The reply text — a flat string. Confirmed; this is the only text
+   * field this adapter reads. */
   result?: string;
-  content?: string;
-  text?: string;
-  version?: string;
-  cli_version?: string;
+  /** True when the CLI itself reports a failure, independent of the
+   * process exit code — see the file header's "`is_error: true` CAN
+   * APPEAR ALONGSIDE A ZERO EXIT CODE". */
+  is_error?: boolean;
+  /** Diagnostic context for an `is_error: true` payload, e.g.
+   * `"error_max_turns"`. Included in this adapter's thrown error message
+   * when present. */
+  subtype?: string;
+  /** Maps directly to {@link ChatReply.stopReason}. */
+  stop_reason?: string;
   usage?: {
     input_tokens?: number;
     output_tokens?: number;
     cache_read_input_tokens?: number;
     cache_creation_input_tokens?: number;
   };
+  /** Per-model usage breakdown — see the file header's "A SINGLE CALL CAN
+   * INVOKE MORE THAN ONE MODEL". Keyed by the model id as the CLI names
+   * it internally (which may carry a suffix like `[1m]`); prefer each
+   * entry's own `canonicalModel` field over the key. */
+  modelUsage?: Record<string, ModelUsageEntry>;
+  /** Present, and deliberately not surfaced onto TokenUsage — see the
+   * file header's "COST FIGURES ARE PRESENT" section. */
+  total_cost_usd?: number;
 }
 
-interface ExtractedReply {
-  text: string;
-  usage: ClaudeCliJsonResult['usage'];
-  /** A version string found directly in the payload, if the envelope
-   * carried a recognised field for it — see `ClaudeCliJsonResult`'s own
-   * comment. `undefined` when absent, which is the common case pending
-   * confirmation of the real shape; the caller falls back to
-   * `resolveCliVersion()` in that case. */
-  versionFromPayload: string | undefined;
-  /** True when stdout parsed as JSON and a known text field was found —
-   * false means the raw-text fallback below was used, which is worth the
-   * caller knowing about on first real runs (see the file header). */
-  recognisedShape: boolean;
+/** Parses `--output-format json`'s stdout. Returns `null` on anything that
+ * isn't valid JSON (e.g. a genuinely unrecognised shape, or a future CLI
+ * version changing it) — the caller falls back to raw text in that case,
+ * per the file header. */
+function parseCliJson(stdout: string): ClaudeCliJsonResult | null {
+  try {
+    return JSON.parse(stdout) as ClaudeCliJsonResult;
+  } catch {
+    return null;
+  }
+}
+
+interface PrimaryModelResult {
+  /** The model to report as {@link TokenUsage.model} — the entry whose
+   * token counts match the top-level `usage` block, i.e. the model that
+   * produced the visible reply. `'unknown'` when `modelUsage` is absent
+   * or empty. */
+  model: string;
+  /** True when `modelUsage` named more than one model — see the file
+   * header. The caller warns rather than silently dropping the rest. */
+  sawMultipleModels: boolean;
+  /** Every `modelUsage` entry, human-readable, for the warning message —
+   * empty string when there's nothing to report. */
+  breakdown: string;
 }
 
 /**
- * Parse `--output-format json`'s stdout defensively, because its exact
- * shape was not independently confirmed from this environment (see the
- * file header). A recognised `result`/`content`/`text` field is used
- * directly; anything else degrades to treating the whole of stdout as the
- * reply text, exactly the same posture `parseReply` itself takes toward
- * its OWN input (scan for what's expected, don't fail hard on what
- * surrounds it) — but here it means an unrecognised envelope is silently
- * swallowed as if it were plain text, which could hide a real integration
- * break on first real use. `recognisedShape` surfaces that distinction
- * rather than hiding it.
+ * Decide which single model to report as {@link TokenUsage.model} when
+ * `modelUsage` may name more than one — see the file header's "A SINGLE
+ * CALL CAN INVOKE MORE THAN ONE MODEL". Matches the entry whose token
+ * counts equal the top-level `usage` block (the model that actually
+ * produced the reply text); falls back to the first entry if no exact
+ * match is found, since at least one real model id is still better than
+ * `'unknown'` in that case.
  */
-function extractReply(stdout: string): ExtractedReply {
-  try {
-    const parsed = JSON.parse(stdout) as ClaudeCliJsonResult;
-    const text = parsed.result ?? parsed.content ?? parsed.text;
-    if (typeof text === 'string') {
-      return {
-        text,
-        usage: parsed.usage,
-        versionFromPayload: parsed.version ?? parsed.cli_version,
-        recognisedShape: true,
-      };
-    }
-  } catch {
-    // Not JSON at all — fall through to the raw-text fallback below.
+function determinePrimaryModel(
+  usage: ClaudeCliJsonResult['usage'],
+  modelUsage: ClaudeCliJsonResult['modelUsage']
+): PrimaryModelResult {
+  const entries = Object.entries(modelUsage ?? {});
+  if (entries.length === 0) {
+    return { model: 'unknown', sawMultipleModels: false, breakdown: '' };
   }
-  return { text: stdout, usage: undefined, versionFromPayload: undefined, recognisedShape: false };
+  const breakdown = entries
+    .map(
+      ([key, u]) =>
+        `${u.canonicalModel ?? key}: ${u.inputTokens ?? 0} in / ${u.outputTokens ?? 0} out, $${(u.costUSD ?? 0).toFixed(6)}`
+    )
+    .join('; ');
+  const match = usage
+    ? entries.find(
+        ([, u]) => u.inputTokens === usage.input_tokens && u.outputTokens === usage.output_tokens
+      )
+    : undefined;
+  const [key, u] = match ?? entries[0];
+  return { model: u.canonicalModel ?? key, sawMultipleModels: entries.length > 1, breakdown };
 }
 
 // ── Substrate version, memoized for the process's lifetime ──────────────
-// See the file header's "SUBSTRATE VERSION IS RECORDED ON EVERY CALL" for
-// why this exists and why it must not re-spawn per call.
+// See the file header — there is NO version field anywhere in the real
+// payload, so this spawn is now the ONLY source of substrateVersion.
 
 let cachedCliVersionPromise: Promise<string | undefined> | null = null;
 
@@ -332,6 +397,7 @@ export function resetClaudeCliVersionCacheForTests(): void {
 
 function shapeUsage(
   usage: ClaudeCliJsonResult['usage'],
+  model: string,
   substrateVersion: string | undefined
 ): TokenUsage {
   // Constant, never computed — see the file header's "REFUSE, NEVER
@@ -339,10 +405,7 @@ function shapeUsage(
   const route: CredentialRoute = 'subscription-oauth';
   return {
     provider: PROVIDER,
-    // No --model pin confirmed from what was relayed this session — this
-    // adapter cannot yet guarantee which concrete model answered. See the
-    // file header and this change's PR body.
-    model: 'unknown',
+    model,
     direction: 'reasoning',
     route,
     substrateVersion,
@@ -422,28 +485,52 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
     );
   }
 
-  const { text, usage, versionFromPayload, recognisedShape } = extractReply(spawned.stdout);
-  if (!recognisedShape) {
-    console.warn(
-      'claudeCli.chat(): --output-format json did not match any known field ' +
-        '(result/content/text) — treating stdout as raw text. This shape has not been ' +
-        'independently verified; see the file header.'
+  const parsed = parseCliJson(spawned.stdout);
+
+  if (parsed?.is_error) {
+    // Confirmed real: the CLI can exit 0 while its own payload says
+    // is_error: true — see the file header. Exit code alone is not a
+    // sufficient failure signal for this adapter.
+    throw new Error(
+      `claude -p reported is_error: true (subtype=${parsed.subtype ?? 'unknown'})` +
+        (parsed.result ? ` — ${parsed.result}` : '')
     );
   }
 
-  // Payload first (costs nothing extra if it's there — see the file
-  // header); the memoized `--version` spawn only runs when the payload
-  // didn't carry one, and only once per process either way.
-  const substrateVersion = versionFromPayload ?? (await resolveCliVersion());
+  let text: string;
+  if (parsed && typeof parsed.result === 'string') {
+    text = parsed.result;
+  } else {
+    text = spawned.stdout;
+    console.warn(
+      'claudeCli.chat(): --output-format json did not carry a string "result" field — ' +
+        'treating stdout as raw text. The real envelope has been observed and "result" is ' +
+        'the confirmed field (see the file header); this fallback is for a shape that does ' +
+        'not match it, e.g. non-JSON stdout or a future CLI change.'
+    );
+  }
 
-  const usageRecord = shapeUsage(usage, substrateVersion);
+  const { model, sawMultipleModels, breakdown } = determinePrimaryModel(
+    parsed?.usage,
+    parsed?.modelUsage
+  );
+  if (sawMultipleModels) {
+    console.warn(
+      `claudeCli.chat(): this call invoked more than one model — ${breakdown}. ` +
+        `TokenUsage.model reports only "${model}" (the entry matching the reply's own usage ` +
+        'figures); the others are named here rather than silently discarded, because ' +
+        'TokenUsage has no field for a per-call model breakdown.'
+    );
+  }
+
+  const substrateVersion = await resolveCliVersion();
+  const usageRecord = shapeUsage(parsed?.usage, model, substrateVersion);
   await fireUsageHook(options.onUsage, usageRecord, 'claudeCli.chat');
 
   return {
     content: text,
     usage: usageRecord,
-    // Not confirmed exposed by --output-format json — see the file header.
-    stopReason: 'end_turn',
+    stopReason: parsed?.stop_reason ?? 'end_turn',
   };
 }
 

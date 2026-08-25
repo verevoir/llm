@@ -103,11 +103,12 @@ const DEFAULT_VERSION_OUTPUT = '2.1.243 (Claude Code)';
 
 /**
  * Queues the main `-p` call to succeed with `mainStdout`, followed by the
- * `claude --version` fallback call this adapter makes whenever the main
- * payload doesn't carry its own version field — which is every test's
- * default fixture (`{ result: 'ok' }` etc. never includes `version`).
- * Returns the main call's `written` stdin array, matching what tests
- * asserted before this adapter gained the version fallback.
+ * `claude --version` fallback call this adapter makes on every real call —
+ * the confirmed real payload never carries a version field of its own (see
+ * index.ts's file header), so the fallback spawn is now unconditional, not
+ * merely a possibility a test fixture needs to trigger. Returns the main
+ * call's `written` stdin array, matching what tests asserted before this
+ * adapter gained the version fallback.
  */
 function mockSuccessfulCall(mainStdout: string, opts: { versionOutput?: string } = {}) {
   const main = queueCall(mainStdout);
@@ -193,7 +194,7 @@ describe('claudeCli.chat', () => {
     expect(result.usage.provider).toBe(PROVIDER);
   });
 
-  it('extracts content, usage, and returns them from a recognised json envelope', async () => {
+  it('extracts the reply text from the confirmed "result" field', async () => {
     mockSuccessfulCall(
       JSON.stringify({
         result: 'VERDICT: rejected\nFINDING: something is wrong',
@@ -209,15 +210,17 @@ describe('claudeCli.chat', () => {
     expect(result.usage.cacheReadInputTokens).toBe(5);
   });
 
-  it('falls back to raw stdout as text and warns when the json shape is not recognised', async () => {
+  it('falls back to raw stdout as text and warns when "result" is not a string', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    // Valid JSON, but none of the known fields — an unrecognised envelope.
+    // Valid JSON, but no string "result" field — an unrecognised envelope.
     mockSuccessfulCall(JSON.stringify({ something_else: 'entirely' }));
 
     const result = await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] });
 
     expect(result.content).toBe(JSON.stringify({ something_else: 'entirely' }));
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining('did not match any known field'));
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('did not carry a string "result" field')
+    );
     warn.mockRestore();
   });
 
@@ -295,37 +298,130 @@ describe('claudeCli.chat', () => {
     expect(mockSpawn).not.toHaveBeenCalled();
   });
 
+  // ── The real, observed --output-format json envelope ──────────────────
+  // Everything in this block is against the actual payload the operator
+  // relayed from a real `claude -p ... --output-format json` run — see
+  // index.ts's file header for the full reasoning behind each decision.
+
+  describe('the real --output-format json envelope', () => {
+    it('maps stop_reason from the payload to ChatReply.stopReason', async () => {
+      mockSuccessfulCall(JSON.stringify({ result: 'ok', stop_reason: 'max_tokens' }));
+
+      const result = await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] });
+
+      expect(result.stopReason).toBe('max_tokens');
+    });
+
+    it('defaults stopReason to end_turn when the payload carries no stop_reason', async () => {
+      mockSuccessfulCall(JSON.stringify({ result: 'ok' }));
+
+      const result = await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] });
+
+      expect(result.stopReason).toBe('end_turn');
+    });
+
+    it('refuses even on a zero exit code when the payload itself reports is_error: true', async () => {
+      queueCall(
+        JSON.stringify({
+          is_error: true,
+          subtype: 'error_max_turns',
+          result: 'ran out of turns',
+        })
+      );
+
+      await expect(
+        chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] })
+      ).rejects.toThrow(/is_error: true \(subtype=error_max_turns\).*ran out of turns/);
+
+      // The exit code was never in question here — the call succeeded at
+      // the process level (queueCall, not queueFailingCall) and refused
+      // purely because of the payload's own is_error field.
+      expect(mockSpawn).toHaveBeenCalledTimes(1);
+    });
+
+    it('reports the model matching the top-level usage figures when modelUsage lists more than one, and warns about the rest rather than silently dropping them', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      mockSuccessfulCall(
+        JSON.stringify({
+          result: 'VERDICT: approved',
+          usage: { input_tokens: 281, output_tokens: 10 },
+          modelUsage: {
+            'claude-haiku-4-5-20251001': {
+              inputTokens: 896,
+              outputTokens: 11,
+              costUSD: 0.000951,
+              canonicalModel: 'claude-haiku-4-5',
+            },
+            'claude-opus-5[1m]': {
+              inputTokens: 281,
+              outputTokens: 10,
+              costUSD: 0.001655,
+              canonicalModel: 'claude-opus-5',
+            },
+          },
+        })
+      );
+
+      const result = await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] });
+
+      // The opus entry matches the top-level usage figures (281 in / 10
+      // out) — that's the model that produced the visible reply.
+      expect(result.usage.model).toBe('claude-opus-5');
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('invoked more than one model'));
+      // The haiku call is NOT silently discarded — it's named in the warning.
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('claude-haiku-4-5'));
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('claude-opus-5'));
+      warn.mockRestore();
+    });
+
+    it('does not warn about multiple models when modelUsage names only one', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      mockSuccessfulCall(
+        JSON.stringify({
+          result: 'ok',
+          usage: { input_tokens: 10, output_tokens: 5 },
+          modelUsage: {
+            'claude-opus-5[1m]': {
+              inputTokens: 10,
+              outputTokens: 5,
+              costUSD: 0.0001,
+              canonicalModel: 'claude-opus-5',
+            },
+          },
+        })
+      );
+
+      const result = await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] });
+
+      expect(result.usage.model).toBe('claude-opus-5');
+      expect(warn).not.toHaveBeenCalledWith(expect.stringContaining('invoked more than one model'));
+      warn.mockRestore();
+    });
+
+    it('reports model "unknown" when the payload carries no modelUsage at all', async () => {
+      mockSuccessfulCall(JSON.stringify({ result: 'ok' }));
+
+      const result = await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] });
+
+      expect(result.usage.model).toBe('unknown');
+    });
+  });
+
   // ── substrateVersion ────────────────────────────────────────────────
+  // The confirmed real payload never carries a version field (see index.ts's
+  // file header) — this memoized `claude --version` spawn is the only
+  // source of substrateVersion, not a fallback for a payload path that
+  // turned out not to exist.
 
   describe('substrateVersion', () => {
-    it('falls back to spawning "claude --version" once when the payload carries no version field', async () => {
-      mockSuccessfulCall(JSON.stringify({ result: 'ok' }), {
-        versionOutput: '2.1.243 (Claude Code)',
-      });
-
-      const result = await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] });
-
-      expect(mockSpawn).toHaveBeenCalledTimes(2);
-      const versionCall = mockSpawn.mock.calls[1];
-      expect(versionCall[1]).toEqual(['--version']);
-      expect(result.usage.substrateVersion).toBe('2.1.243 (Claude Code)');
-    });
-
-    it('uses a version already present in the payload and spawns no second process', async () => {
-      queueCall(JSON.stringify({ result: 'ok', version: '2.1.243 (Claude Code)' }));
-
-      const result = await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] });
-
-      expect(mockSpawn).toHaveBeenCalledTimes(1);
-      expect(result.usage.substrateVersion).toBe('2.1.243 (Claude Code)');
-    });
-
-    it('caches the fallback version across multiple chat() calls, spawning "claude --version" only once', async () => {
+    it('spawns "claude --version" exactly once per process and caches the result', async () => {
       mockSuccessfulCall(JSON.stringify({ result: 'first' }), {
         versionOutput: '2.1.243 (Claude Code)',
       });
       const first = await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q1' }] });
       expect(mockSpawn).toHaveBeenCalledTimes(2);
+      const versionCall = mockSpawn.mock.calls[1];
+      expect(versionCall[1]).toEqual(['--version']);
 
       // Second call: only the main call is queued — the version is already
       // cached from the first call, so no second "claude --version" spawn
