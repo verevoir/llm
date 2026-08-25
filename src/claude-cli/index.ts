@@ -111,6 +111,29 @@
  * a subsequent release"). A tool-calling loop over a subprocess boundary
  * is a materially larger design than this reviewer use case needs, and
  * `--tools ""` makes it moot for this adapter's actual purpose anyway.
+ *
+ * SUBSTRATE VERSION IS RECORDED ON EVERY CALL, THE SAME WAY `route` IS.
+ * Flags and auth behaviour can shift between `claude` CLI releases —
+ * `--bare`'s own auth behaviour is exactly the kind of thing that could
+ * change, and it is the difference between a subscription call and
+ * spending purchased credits (see the file header above). A run whose
+ * substrate version is not recorded cannot be attributed later if
+ * behaviour changes after an upgrade — the same argument that produced
+ * `route`, one level down (see `TokenUsage.substrateVersion` in
+ * `../index.ts`). This also makes a controlled version-bump measurement
+ * possible at all: same corpus, same lenses, same prompts, one version
+ * bump, does the finding text change — that comparison needs every run to
+ * carry the version it was made under, or "before" and "after" are
+ * indistinguishable in the record.
+ *
+ * `resolveCliVersion()` below reads the payload first (checking whether
+ * `--output-format json` already reports a version — unverified, so this
+ * is speculative field-name matching, same posture as `extractReply`'s
+ * text extraction) and falls back to a SEPARATE, MEMOIZED `claude
+ * --version` spawn, cached for the lifetime of the process. The version
+ * cannot change mid-run, so this never re-spawns per call — a second
+ * process per reviewer call, purely to ask a value that is already known,
+ * would double this adapter's process count for no new information.
  */
 
 import { spawn } from 'node:child_process';
@@ -191,12 +214,18 @@ function joinTurns(turns: ChatOptions['turns']): string {
 /**
  * Best-effort field names for `--output-format json`'s envelope — pending
  * real verification (see the file header). Named fields not confirmed
- * present are optional so a shape lacking them still parses.
+ * present are optional so a shape lacking them still parses. `version` /
+ * `cli_version` are speculative candidates for a substrate-version field,
+ * on the same unverified footing as `result`/`content`/`text` for the
+ * reply body — checked first so a real version in the payload costs
+ * nothing extra to use; falls back to `resolveCliVersion()` when absent.
  */
 interface ClaudeCliJsonResult {
   result?: string;
   content?: string;
   text?: string;
+  version?: string;
+  cli_version?: string;
   usage?: {
     input_tokens?: number;
     output_tokens?: number;
@@ -208,6 +237,12 @@ interface ClaudeCliJsonResult {
 interface ExtractedReply {
   text: string;
   usage: ClaudeCliJsonResult['usage'];
+  /** A version string found directly in the payload, if the envelope
+   * carried a recognised field for it — see `ClaudeCliJsonResult`'s own
+   * comment. `undefined` when absent, which is the common case pending
+   * confirmation of the real shape; the caller falls back to
+   * `resolveCliVersion()` in that case. */
+  versionFromPayload: string | undefined;
   /** True when stdout parsed as JSON and a known text field was found —
    * false means the raw-text fallback below was used, which is worth the
    * caller knowing about on first real runs (see the file header). */
@@ -231,15 +266,74 @@ function extractReply(stdout: string): ExtractedReply {
     const parsed = JSON.parse(stdout) as ClaudeCliJsonResult;
     const text = parsed.result ?? parsed.content ?? parsed.text;
     if (typeof text === 'string') {
-      return { text, usage: parsed.usage, recognisedShape: true };
+      return {
+        text,
+        usage: parsed.usage,
+        versionFromPayload: parsed.version ?? parsed.cli_version,
+        recognisedShape: true,
+      };
     }
   } catch {
     // Not JSON at all — fall through to the raw-text fallback below.
   }
-  return { text: stdout, usage: undefined, recognisedShape: false };
+  return { text: stdout, usage: undefined, versionFromPayload: undefined, recognisedShape: false };
 }
 
-function shapeUsage(usage: ClaudeCliJsonResult['usage']): TokenUsage {
+// ── Substrate version, memoized for the process's lifetime ──────────────
+// See the file header's "SUBSTRATE VERSION IS RECORDED ON EVERY CALL" for
+// why this exists and why it must not re-spawn per call.
+
+let cachedCliVersionPromise: Promise<string | undefined> | null = null;
+
+/** `claude --version`'s stdout is expected to read like `2.1.243 (Claude
+ * Code)` — recorded verbatim, trimmed, rather than parsed into parts. Parsing
+ * out just the number would assume a stable format this adapter has not
+ * independently confirmed; the whole string is unambiguous and just as
+ * usable for attribution. */
+function parseVersionOutput(stdout: string): string | undefined {
+  const trimmed = stdout.trim();
+  return trimmed === '' ? undefined : trimmed;
+}
+
+/**
+ * Resolve the installed `claude` CLI's version by spawning `claude
+ * --version` once and caching the result for every subsequent call in this
+ * process. A failure (spawn error, non-zero exit, empty output) caches as
+ * `undefined` rather than retrying — the version cannot change mid-run, so
+ * a failed lookup is as stable a fact as a successful one, and retrying it
+ * on every `chat()` call would reintroduce the extra spawn this exists to
+ * avoid.
+ */
+function resolveCliVersion(): Promise<string | undefined> {
+  if (!cachedCliVersionPromise) {
+    cachedCliVersionPromise = (async () => {
+      try {
+        const { stdout, exitCode } = await runClaudeCli(['--version'], '');
+        if (exitCode !== 0) return undefined;
+        return parseVersionOutput(stdout);
+      } catch {
+        return undefined;
+      }
+    })();
+  }
+  return cachedCliVersionPromise;
+}
+
+/**
+ * Test-only: clears the process-wide version cache so tests can observe
+ * `resolveCliVersion()`'s spawn-and-cache behaviour in isolation rather
+ * than inheriting a value memoized by an earlier test in the same run.
+ * Never called from production code — the whole point of the cache is
+ * that a real process only needs the version resolved once.
+ */
+export function resetClaudeCliVersionCacheForTests(): void {
+  cachedCliVersionPromise = null;
+}
+
+function shapeUsage(
+  usage: ClaudeCliJsonResult['usage'],
+  substrateVersion: string | undefined
+): TokenUsage {
   // Constant, never computed — see the file header's "REFUSE, NEVER
   // SUBSTITUTE" point 2 for why this is safe to assert rather than derive.
   const route: CredentialRoute = 'subscription-oauth';
@@ -251,6 +345,7 @@ function shapeUsage(usage: ClaudeCliJsonResult['usage']): TokenUsage {
     model: 'unknown',
     direction: 'reasoning',
     route,
+    substrateVersion,
     inputTokens: usage?.input_tokens ?? 0,
     outputTokens: usage?.output_tokens ?? 0,
     cacheCreationInputTokens: usage?.cache_creation_input_tokens ?? 0,
@@ -266,7 +361,9 @@ interface SpawnResult {
 
 /** Runs the CLI once, writing `input` to its stdin and collecting stdout /
  * stderr / exit code. Separated from `chat()` so tests can mock exactly
- * this seam without reimplementing stream plumbing per test. */
+ * this seam without reimplementing stream plumbing per test. Also used by
+ * `resolveCliVersion()` for the (memoized, at most once per process)
+ * `--version` invocation. */
 function runClaudeCli(args: string[], input: string): Promise<SpawnResult> {
   return new Promise((resolve, reject) => {
     const child = spawn('claude', args, { env: childEnv() });
@@ -325,7 +422,7 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
     );
   }
 
-  const { text, usage, recognisedShape } = extractReply(spawned.stdout);
+  const { text, usage, versionFromPayload, recognisedShape } = extractReply(spawned.stdout);
   if (!recognisedShape) {
     console.warn(
       'claudeCli.chat(): --output-format json did not match any known field ' +
@@ -334,7 +431,12 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
     );
   }
 
-  const usageRecord = shapeUsage(usage);
+  // Payload first (costs nothing extra if it's there — see the file
+  // header); the memoized `--version` spawn only runs when the payload
+  // didn't carry one, and only once per process either way.
+  const substrateVersion = versionFromPayload ?? (await resolveCliVersion());
+
+  const usageRecord = shapeUsage(usage, substrateVersion);
   await fireUsageHook(options.onUsage, usageRecord, 'claudeCli.chat');
 
   return {

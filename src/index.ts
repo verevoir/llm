@@ -126,6 +126,24 @@ export interface TokenUsage {
   direction: ModelClass;
   /** Which credential mechanism served this call — see {@link CredentialRoute}. */
   route: CredentialRoute;
+  /**
+   * The version of the SUBSTRATE that served this call, when the substrate
+   * is an external program whose version can drift independently of this
+   * package's own release — e.g. the installed `claude` CLI binary
+   * (`@verevoir/llm/claude-cli`). `undefined` for a direct API adapter
+   * (Anthropic, Google, OpenAI-compatible): there the wire protocol is
+   * this package's own responsibility, so nothing about "which version
+   * answered" is unknown or needs reporting the same way.
+   *
+   * Same field family as {@link route}, one level down: `route` answers
+   * WHICH credential mechanism served a call; this answers WHICH VERSION
+   * of that mechanism did. Recorded for the same reason `route` is — a
+   * call whose substrate version is not attributable cannot be compared
+   * across a version change. Concretely, this is what lets a controlled
+   * CLI upgrade be isolated as the one variable that changed between two
+   * otherwise-identical runs, rather than an unrecorded confound.
+   */
+  substrateVersion?: string;
   /** Standard input tokens. */
   inputTokens: number;
   /** Output tokens (completion + tool-use args). */

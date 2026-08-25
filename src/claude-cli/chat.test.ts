@@ -10,7 +10,7 @@ vi.mock('node:child_process', () => ({
 }));
 
 // Import AFTER vi.mock so the mocked spawn is the one captured.
-import { chat, PROVIDER } from './index.js';
+import { chat, PROVIDER, resetClaudeCliVersionCacheForTests } from './index.js';
 import { setModelSpanSink, type ModelSpan, type TokenUsage } from '../index.js';
 
 /** A fake child process: stdout/stderr are EventEmitters (matching the
@@ -53,11 +53,77 @@ function fail(child: ReturnType<typeof fakeChild>['child'], stderr: string, exit
   });
 }
 
+/**
+ * Queues ONE spawn invocation. The event emission (`succeed`/`fail`) is
+ * scheduled INSIDE the mock implementation, at the moment `spawn()` is
+ * actually called by the adapter — not at test-setup time. This matters
+ * once a test chains two spawn calls (a main call, then the version
+ * fallback): `runClaudeCli` attaches its 'data'/'close' listeners
+ * synchronously, right after calling `spawn()`, with no `await` in
+ * between — so as long as emission is scheduled at call-time, listeners
+ * are always attached before the queued microtask fires. Scheduling the
+ * emission at test-setup time instead (before `spawn()` for a LATER call
+ * in the chain has even happened) races the listener attachment: the
+ * event fires into an EventEmitter nobody is listening to yet, is lost,
+ * and the adapter hangs waiting for a 'close' that already happened.
+ */
+function queueCall(stdout: string, exitCode = 0) {
+  const { child, written } = fakeChild();
+  mockSpawn.mockImplementationOnce(() => {
+    succeed(child, stdout, exitCode);
+    return child;
+  });
+  return { child, written };
+}
+
+/** Same call-time-deferred scheduling as {@link queueCall}, for a non-zero
+ * exit. */
+function queueFailingCall(stderr: string, exitCode = 1) {
+  const { child, written } = fakeChild();
+  mockSpawn.mockImplementationOnce(() => {
+    fail(child, stderr, exitCode);
+    return child;
+  });
+  return { child, written };
+}
+
+/** Same call-time-deferred scheduling as {@link queueCall}, for a
+ * spawn-level failure (e.g. ENOENT) rather than a process exit. */
+function queueErroringCall(err: Error) {
+  const { child, written } = fakeChild();
+  mockSpawn.mockImplementationOnce(() => {
+    queueMicrotask(() => child.emit('error', err));
+    return child;
+  });
+  return { child, written };
+}
+
+/** `claude --version`'s real relayed output — see index.ts's `parseVersionOutput`. */
+const DEFAULT_VERSION_OUTPUT = '2.1.243 (Claude Code)';
+
+/**
+ * Queues the main `-p` call to succeed with `mainStdout`, followed by the
+ * `claude --version` fallback call this adapter makes whenever the main
+ * payload doesn't carry its own version field — which is every test's
+ * default fixture (`{ result: 'ok' }` etc. never includes `version`).
+ * Returns the main call's `written` stdin array, matching what tests
+ * asserted before this adapter gained the version fallback.
+ */
+function mockSuccessfulCall(mainStdout: string, opts: { versionOutput?: string } = {}) {
+  const main = queueCall(mainStdout);
+  queueCall(opts.versionOutput ?? DEFAULT_VERSION_OUTPUT);
+  return { written: main.written };
+}
+
 describe('claudeCli.chat', () => {
   const originalApiKey = process.env.ANTHROPIC_API_KEY;
 
   beforeEach(() => {
     mockSpawn.mockReset();
+    // Every test starts with no cached version — otherwise a test earlier
+    // in this file would leave a value in the process-wide cache and later
+    // tests would silently skip the fallback spawn they expect to see.
+    resetClaudeCliVersionCacheForTests();
   });
 
   afterEach(() => {
@@ -67,13 +133,10 @@ describe('claudeCli.chat', () => {
   });
 
   it('spawns "claude" with -p, --system-prompt, --tools "" (disabled), json output, no persistence, safe-mode', async () => {
-    const { child } = fakeChild();
-    mockSpawn.mockReturnValue(child);
-    succeed(child, JSON.stringify({ result: 'ok' }));
+    mockSuccessfulCall(JSON.stringify({ result: 'ok' }));
 
     await chat({ systemPrompt: 'you are a lens', turns: [{ role: 'user', content: 'diff here' }] });
 
-    expect(mockSpawn).toHaveBeenCalledTimes(1);
     const [command, args] = mockSpawn.mock.calls[0];
     expect(command).toBe('claude');
     expect(args).toEqual([
@@ -90,9 +153,7 @@ describe('claudeCli.chat', () => {
   });
 
   it('writes the single turn content to stdin', async () => {
-    const { child, written } = fakeChild();
-    mockSpawn.mockReturnValue(child);
-    succeed(child, JSON.stringify({ result: 'ok' }));
+    const { written } = mockSuccessfulCall(JSON.stringify({ result: 'ok' }));
 
     await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'the diff text' }] });
 
@@ -100,9 +161,7 @@ describe('claudeCli.chat', () => {
   });
 
   it('joins multiple turns as a labelled transcript', async () => {
-    const { child, written } = fakeChild();
-    mockSpawn.mockReturnValue(child);
-    succeed(child, JSON.stringify({ result: 'ok' }));
+    const { written } = mockSuccessfulCall(JSON.stringify({ result: 'ok' }));
 
     await chat({
       systemPrompt: 'sys',
@@ -117,9 +176,7 @@ describe('claudeCli.chat', () => {
 
   it('strips ANTHROPIC_API_KEY from the child environment even when set in the parent', async () => {
     process.env.ANTHROPIC_API_KEY = 'sk-should-never-reach-the-child';
-    const { child } = fakeChild();
-    mockSpawn.mockReturnValue(child);
-    succeed(child, JSON.stringify({ result: 'ok' }));
+    mockSuccessfulCall(JSON.stringify({ result: 'ok' }));
 
     await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] });
 
@@ -128,9 +185,7 @@ describe('claudeCli.chat', () => {
   });
 
   it('reports route as the constant subscription-oauth', async () => {
-    const { child } = fakeChild();
-    mockSpawn.mockReturnValue(child);
-    succeed(child, JSON.stringify({ result: 'ok' }));
+    mockSuccessfulCall(JSON.stringify({ result: 'ok' }));
 
     const result = await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] });
 
@@ -139,10 +194,7 @@ describe('claudeCli.chat', () => {
   });
 
   it('extracts content, usage, and returns them from a recognised json envelope', async () => {
-    const { child } = fakeChild();
-    mockSpawn.mockReturnValue(child);
-    succeed(
-      child,
+    mockSuccessfulCall(
       JSON.stringify({
         result: 'VERDICT: rejected\nFINDING: something is wrong',
         usage: { input_tokens: 100, output_tokens: 20, cache_read_input_tokens: 5 },
@@ -159,10 +211,8 @@ describe('claudeCli.chat', () => {
 
   it('falls back to raw stdout as text and warns when the json shape is not recognised', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const { child } = fakeChild();
-    mockSpawn.mockReturnValue(child);
     // Valid JSON, but none of the known fields — an unrecognised envelope.
-    succeed(child, JSON.stringify({ something_else: 'entirely' }));
+    mockSuccessfulCall(JSON.stringify({ something_else: 'entirely' }));
 
     const result = await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] });
 
@@ -172,9 +222,7 @@ describe('claudeCli.chat', () => {
   });
 
   it('treats non-JSON stdout as the raw reply text', async () => {
-    const { child } = fakeChild();
-    mockSpawn.mockReturnValue(child);
-    succeed(child, 'plain text reply, not json at all');
+    mockSuccessfulCall('plain text reply, not json at all');
 
     const result = await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] });
 
@@ -182,9 +230,7 @@ describe('claudeCli.chat', () => {
   });
 
   it('emits a model span to the registered sink with scope claudeCli.chat', async () => {
-    const { child } = fakeChild();
-    mockSpawn.mockReturnValue(child);
-    succeed(child, JSON.stringify({ result: 'ok' }));
+    mockSuccessfulCall(JSON.stringify({ result: 'ok' }));
     const spans: ModelSpan[] = [];
     setModelSpanSink((s) => spans.push(s));
 
@@ -195,9 +241,9 @@ describe('claudeCli.chat', () => {
   });
 
   it('fires onUsage with the shaped usage record', async () => {
-    const { child } = fakeChild();
-    mockSpawn.mockReturnValue(child);
-    succeed(child, JSON.stringify({ result: 'ok', usage: { input_tokens: 7, output_tokens: 3 } }));
+    mockSuccessfulCall(
+      JSON.stringify({ result: 'ok', usage: { input_tokens: 7, output_tokens: 3 } })
+    );
     const onUsage = vi.fn<(u: TokenUsage) => Promise<void>>(async () => {});
 
     await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }], onUsage });
@@ -207,9 +253,7 @@ describe('claudeCli.chat', () => {
   });
 
   it('throws, naming the exit code and stderr, on a non-zero exit', async () => {
-    const { child } = fakeChild();
-    mockSpawn.mockReturnValue(child);
-    fail(child, 'auth failed: no session', 1);
+    queueFailingCall('auth failed: no session', 1);
 
     await expect(
       chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] })
@@ -217,9 +261,7 @@ describe('claudeCli.chat', () => {
   });
 
   it('throws, naming the spawn failure, when claude cannot be run at all (e.g. ENOENT)', async () => {
-    const { child } = fakeChild();
-    mockSpawn.mockReturnValue(child);
-    queueMicrotask(() => child.emit('error', new Error('spawn claude ENOENT')));
+    queueErroringCall(new Error('spawn claude ENOENT'));
 
     await expect(
       chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] })
@@ -251,5 +293,83 @@ describe('claudeCli.chat', () => {
       })
     ).rejects.toThrow(/tool_use.*not supported/);
     expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  // ── substrateVersion ────────────────────────────────────────────────
+
+  describe('substrateVersion', () => {
+    it('falls back to spawning "claude --version" once when the payload carries no version field', async () => {
+      mockSuccessfulCall(JSON.stringify({ result: 'ok' }), {
+        versionOutput: '2.1.243 (Claude Code)',
+      });
+
+      const result = await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] });
+
+      expect(mockSpawn).toHaveBeenCalledTimes(2);
+      const versionCall = mockSpawn.mock.calls[1];
+      expect(versionCall[1]).toEqual(['--version']);
+      expect(result.usage.substrateVersion).toBe('2.1.243 (Claude Code)');
+    });
+
+    it('uses a version already present in the payload and spawns no second process', async () => {
+      queueCall(JSON.stringify({ result: 'ok', version: '2.1.243 (Claude Code)' }));
+
+      const result = await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] });
+
+      expect(mockSpawn).toHaveBeenCalledTimes(1);
+      expect(result.usage.substrateVersion).toBe('2.1.243 (Claude Code)');
+    });
+
+    it('caches the fallback version across multiple chat() calls, spawning "claude --version" only once', async () => {
+      mockSuccessfulCall(JSON.stringify({ result: 'first' }), {
+        versionOutput: '2.1.243 (Claude Code)',
+      });
+      const first = await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q1' }] });
+      expect(mockSpawn).toHaveBeenCalledTimes(2);
+
+      // Second call: only the main call is queued — the version is already
+      // cached from the first call, so no second "claude --version" spawn
+      // should happen. If the adapter re-spawned it anyway, this call
+      // would have nothing queued to answer it and would hang, failing the
+      // test on timeout rather than a wrong assertion — the single queued
+      // call below IS that missing-mock canary.
+      queueCall(JSON.stringify({ result: 'second' }));
+      const second = await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q2' }] });
+
+      expect(mockSpawn).toHaveBeenCalledTimes(3); // 2 from the first call + 1 main-only from the second
+      expect(first.usage.substrateVersion).toBe('2.1.243 (Claude Code)');
+      expect(second.usage.substrateVersion).toBe('2.1.243 (Claude Code)');
+    });
+
+    it('reports substrateVersion as undefined, without throwing, when the version fallback spawn fails', async () => {
+      queueCall(JSON.stringify({ result: 'ok' }));
+      queueErroringCall(new Error('spawn claude ENOENT'));
+
+      const result = await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] });
+
+      expect(result.usage.substrateVersion).toBeUndefined();
+      expect(result.content).toBe('ok'); // the main call still succeeded and parsed normally
+    });
+
+    it('reports substrateVersion as undefined when "claude --version" exits non-zero', async () => {
+      queueCall(JSON.stringify({ result: 'ok' }));
+      queueFailingCall('unknown flag', 2);
+
+      const result = await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] });
+
+      expect(result.usage.substrateVersion).toBeUndefined();
+    });
+
+    it('is included on the model span emitted to the registered sink', async () => {
+      mockSuccessfulCall(JSON.stringify({ result: 'ok' }), {
+        versionOutput: '2.1.243 (Claude Code)',
+      });
+      const spans: ModelSpan[] = [];
+      setModelSpanSink((s) => spans.push(s));
+
+      await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] });
+
+      expect(spans[0]).toMatchObject({ substrateVersion: '2.1.243 (Claude Code)' });
+    });
   });
 });
