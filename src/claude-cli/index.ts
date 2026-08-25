@@ -35,19 +35,38 @@
  * hazard this whole design exists to avoid.
  *
  * REFUSE, NEVER SUBSTITUTE. "Purchased API credits are for GitHub Actions
- * only" is not negotiable, so three independent mechanisms enforce it —
- * one failing must not silently open the others:
- *   1. Every billed-credential env var this library knows about is
- *      stripped from the CHILD process's environment before it is
+ * only" is not negotiable, so multiple independent mechanisms enforce it —
+ * one failing must not silently open the others. **None of the claims below
+ * is an absolute guarantee; each names what is actually defended against and
+ * what is relayed rather than independently verified — corrected after a
+ * review found the first version of this section overstating both (it
+ * claimed the stripped list left the CLI "nothing to fall back to" and that
+ * there was "no other route this call could have taken"; neither survived
+ * the review finding `ANTHROPIC_AUTH_TOKEN` unstripped).**
+ *   1. Every billed-credential env var THIS CODEBASE CURRENTLY KNOWS ABOUT
+ *      is stripped from the CHILD process's environment before it is
  *      spawned — not merely left unset by omission, but deleted from a
- *      COPY of the parent env (see `STRIPPED_ENV_VARS`, `childEnv`). Even
- *      if the installed `claude` binary has its own undocumented fallback
- *      to a billed key when no subscription session is present, it has
- *      nothing to fall back TO.
- *   2. `route` is reported as the CONSTANT `'subscription-oauth'` — never
- *      computed — because with (1) in place, a call that succeeded at
- *      all can only have gone through the CLI's own logged-in session.
- *      There is no other route this call could have taken.
+ *      COPY of the parent env (see `STRIPPED_ENV_VARS`, `childEnv`). This
+ *      list was built by reading what `anthropic/client.ts`, this
+ *      package's own sibling adapter for the same provider, already
+ *      treats as a live credential vector (`ANTHROPIC_API_KEY`,
+ *      `ANTHROPIC_API_KEY_FILE`, `ANTHROPIC_AUTH_TOKEN` — the last of
+ *      these was missing until a review caught it), plus two
+ *      precautionary strips for enterprise routing the real CLI is
+ *      reported, but not independently confirmed here, to support
+ *      (`CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`).
+ *      **This list is not provably exhaustive** — it strips every
+ *      billed-credential vector this codebase currently knows about, not
+ *      every one the `claude` binary might ever read; an undocumented or
+ *      future CLI-internal fallback this list does not yet name would
+ *      not be caught by it.
+ *   2. `route` is reported as the CONSTANT `'subscription-oauth'`. This
+ *      reflects the deliberate design — this adapter has no fallback
+ *      ladder and exists specifically so a caller can avoid the metered
+ *      path — not a proof that (1) closes every path the CLI could take
+ *      to reach a billed credential. Its safety is only as strong as
+ *      (1)'s completeness, which is stated immediately above as not
+ *      provable from this repository alone.
  *   3. A non-zero exit is thrown as a plain `Error`, never retried
  *      against a different credential. This adapter has exactly one
  *      credential path and no fallback ladder — unlike
@@ -142,12 +161,14 @@
  * billed or notional — there is no route-equivalent field in it — so
  * asserting either would be a claim this adapter cannot back up. What
  * this adapter DOES know, independently and for certain: no billed
- * credential was available to spend, because `ANTHROPIC_API_KEY` /
- * `ANTHROPIC_API_KEY_FILE` are stripped from the child's environment
+ * credential was available to spend, because the env vars this adapter
+ * knows can carry one (`ANTHROPIC_API_KEY`, `ANTHROPIC_API_KEY_FILE`,
+ * `ANTHROPIC_AUTH_TOKEN`) are stripped from the child's environment
  * before the CLI ever runs (see `childEnv()`) — so whatever this
- * number represents, it was not charged to the operator's billed key.
- * Surfacing it onto `TokenUsage` as a settled billed-vs-notional figure
- * would misrepresent it; that dual-cost design (`decisions/023`, in
+ * number represents, it was not charged to the operator's billed key
+ * via any credential this codebase has verified as live. Surfacing it
+ * onto `TokenUsage` as a settled billed-vs-notional figure would
+ * misrepresent it; that dual-cost design (`decisions/023`, in
  * aigency-governance) is deliberate, separate, out-of-scope work.
  *
  * THIS IS `chat()` ONLY — no `chatWithTools` / `chatWithToolLoop`,
@@ -167,8 +188,28 @@ import type { ChatOptions, ChatReply, CredentialRoute, TokenUsage, TurnContent }
 export const PROVIDER = 'claude-cli';
 
 /** Billed-credential env vars stripped from the child process's environment
- * before every invocation. See the file header's "REFUSE, NEVER SUBSTITUTE". */
-const STRIPPED_ENV_VARS = ['ANTHROPIC_API_KEY', 'ANTHROPIC_API_KEY_FILE'] as const;
+ * before every invocation. See the file header's "REFUSE, NEVER SUBSTITUTE" —
+ * and its honest caveat that this list is everything this codebase currently
+ * knows about, not a proof of completeness. */
+const STRIPPED_ENV_VARS = [
+  // Verified necessary: `anthropic/client.ts` in this same package already
+  // treats these as live billed-credential vectors for the same provider.
+  'ANTHROPIC_API_KEY',
+  'ANTHROPIC_API_KEY_FILE',
+  // Added after a review found this one missing — client.ts's own comment on
+  // it ("authToken: null so a stray ANTHROPIC_AUTH_TOKEN can't override an
+  // explicit key") is what confirms it is a real vector, not a new claim
+  // invented here.
+  'ANTHROPIC_AUTH_TOKEN',
+  // Precautionary, NOT independently verified — relayed only: the real
+  // `claude` CLI is reported to support enterprise routing to AWS Bedrock /
+  // Google Vertex, gated by these two toggles. Stripping a variable that
+  // turns out not to matter costs nothing; failing to strip one that does is
+  // the one violation this file exists to prevent — that asymmetry is the
+  // whole justification for stripping these without direct confirmation.
+  'CLAUDE_CODE_USE_BEDROCK',
+  'CLAUDE_CODE_USE_VERTEX',
+] as const;
 
 function childEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env };
