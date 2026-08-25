@@ -233,6 +233,10 @@ function shapeUsage(raw: RawResult['rawUsage'], direction: ModelClass): TokenUsa
     provider: PROVIDER,
     model: models[direction],
     direction,
+    // This adapter has exactly one credential mechanism (DEEPSEEK_API_KEY, or
+    // a per-call key) — there is no second route to distinguish, so this is
+    // a constant rather than a computed value. See CredentialRoute.
+    route: 'api-key',
     // Worst-case treatment: charge cached input at the standard rate.
     // Matches the other adapters' convention.
     inputTokens: raw.inputTokens,

@@ -5,6 +5,7 @@ const span = (over: Partial<ModelSpan> = {}): ModelSpan => ({
   provider: 'anthropic',
   model: 'claude-opus-4-7',
   direction: 'reasoning',
+  route: 'api-key',
   inputTokens: 100,
   outputTokens: 20,
   cacheCreationInputTokens: 0,

@@ -18,6 +18,7 @@ import {
   type ChatWithToolsOptions,
   type ChatWithToolsResult,
   type ContentBlock,
+  type CredentialRoute,
   type ModelCatalogEntry,
   type ModelClass,
   type ProgressInfo,
@@ -161,23 +162,25 @@ async function streamedCall(
   makeRequest: (oauth: boolean) => Record<string, unknown>,
   onProgress?: (info: ProgressInfo) => Promise<void>,
   onRetry?: (info: ChatRetryInfo) => Promise<void>
-): Promise<StreamedResult> {
+): Promise<StreamedResult & { route: CredentialRoute }> {
   const first = resolveClient(perCallApiKey);
   try {
-    return await callWithRetries(
+    const result = await callWithRetries(
       () => callStreamed(first.client, makeRequest(first.oauth), onProgress),
       onRetry
     );
+    return { ...result, route: first.oauth ? 'subscription-oauth' : 'api-key' };
   } catch (err) {
     const canFallBack =
       first.oauth && !perCallApiKey && isAuthError(err) && !!process.env.ANTHROPIC_API_KEY?.trim();
     if (!canFallBack) throw err;
     noteOAuthRejected(err);
     const fallback = resolveClient(perCallApiKey); // now the metered-key client
-    return await callWithRetries(
+    const result = await callWithRetries(
       () => callStreamed(fallback.client, makeRequest(fallback.oauth), onProgress),
       onRetry
     );
+    return { ...result, route: fallback.oauth ? 'subscription-oauth' : 'api-key' };
   }
 }
 
@@ -452,13 +455,28 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function shapeUsage(raw: StreamedResult['rawUsage'], direction: ModelClass): TokenUsage {
+function shapeUsage(
+  raw: StreamedResult['rawUsage'],
+  direction: ModelClass,
+  route: CredentialRoute
+): TokenUsage {
   return {
     provider: PROVIDER,
     model: models[direction],
     direction,
+    route,
     ...raw,
   };
+}
+
+/** Collapse the routes seen across an aggregated result's underlying calls to
+ * one {@link CredentialRoute} — the single route if every call agreed, else
+ * `'mixed'`, reported rather than picking one arbitrarily and hiding the
+ * other. Never called with an empty array: every aggregate return site has
+ * made at least one underlying call by the time it returns. */
+function combineRoutes(routes: readonly CredentialRoute[]): CredentialRoute {
+  const distinct = new Set(routes);
+  return distinct.size === 1 ? routes[0] : 'mixed';
 }
 
 /** Throw the AbortSignal's reason (or a generic AbortError) when
@@ -503,6 +521,7 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
     cacheCreationInputTokens: 0,
     cacheReadInputTokens: 0,
   };
+  const routesSeen: CredentialRoute[] = [];
 
   for (let attempt = 0; attempt <= MAX_PROGRESS_CONTINUATIONS; attempt++) {
     const streamed = await streamedCall(
@@ -520,6 +539,7 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
       options.onProgress,
       options.onRetry
     );
+    routesSeen.push(streamed.route);
 
     aggregate.inputTokens += streamed.rawUsage.inputTokens;
     aggregate.outputTokens += streamed.rawUsage.outputTokens;
@@ -527,7 +547,7 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
     aggregate.cacheReadInputTokens += streamed.rawUsage.cacheReadInputTokens;
     await fireUsageHook(
       options.onUsage,
-      shapeUsage(streamed.rawUsage, modelClass),
+      shapeUsage(streamed.rawUsage, modelClass, streamed.route),
       'anthropic.chat'
     );
 
@@ -539,7 +559,7 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
       }
       return {
         content: streamed.text,
-        usage: shapeUsage(aggregate, modelClass),
+        usage: shapeUsage(aggregate, modelClass, combineRoutes(routesSeen)),
         stopReason: streamed.stopReason,
       };
     }
@@ -624,7 +644,7 @@ export async function chatWithTools(options: ChatWithToolsOptions): Promise<Chat
     );
   }
 
-  const usage = shapeUsage(streamed.rawUsage, modelClass);
+  const usage = shapeUsage(streamed.rawUsage, modelClass, streamed.route);
   await fireUsageHook(options.onUsage, usage, 'anthropic.chatWithTools');
 
   return {
@@ -671,10 +691,11 @@ export async function chatWithToolLoop(
 
   const allToolUses: ToolUse[] = [];
   const allToolResults: ChatWithToolLoopResult['toolResults'] = [];
-  const aggregateUsage: TokenUsage = {
-    provider: PROVIDER,
-    model: models[modelClass],
-    direction: modelClass,
+  const routesSeen: CredentialRoute[] = [];
+  // Counts only — the full TokenUsage (provider/model/direction/route) is
+  // built at each return site via shapeUsage, once the routes every
+  // underlying call actually used are known.
+  const aggregateUsage = {
     inputTokens: 0,
     outputTokens: 0,
     cacheCreationInputTokens: 0,
@@ -710,8 +731,10 @@ export async function chatWithToolLoop(
       options.onRetry
     );
 
+    routesSeen.push(streamed.route);
+
     // Per-iteration usage hook + aggregate tally.
-    const iterUsage = shapeUsage(streamed.rawUsage, modelClass);
+    const iterUsage = shapeUsage(streamed.rawUsage, modelClass, streamed.route);
     aggregateUsage.inputTokens += iterUsage.inputTokens;
     aggregateUsage.outputTokens += iterUsage.outputTokens;
     aggregateUsage.cacheCreationInputTokens += iterUsage.cacheCreationInputTokens;
@@ -737,7 +760,7 @@ export async function chatWithToolLoop(
         toolUses: allToolUses,
         toolResults: allToolResults,
         iterations: iteration,
-        usage: aggregateUsage,
+        usage: shapeUsage(aggregateUsage, modelClass, combineRoutes(routesSeen)),
       };
     }
 
@@ -809,7 +832,8 @@ export async function chatWithToolLoop(
       options.onProgress,
       options.onRetry
     );
-    const finalUsage = shapeUsage(finalStreamed.rawUsage, modelClass);
+    routesSeen.push(finalStreamed.route);
+    const finalUsage = shapeUsage(finalStreamed.rawUsage, modelClass, finalStreamed.route);
     aggregateUsage.inputTokens += finalUsage.inputTokens;
     aggregateUsage.outputTokens += finalUsage.outputTokens;
     aggregateUsage.cacheCreationInputTokens += finalUsage.cacheCreationInputTokens;
@@ -820,7 +844,7 @@ export async function chatWithToolLoop(
       toolUses: allToolUses,
       toolResults: allToolResults,
       iterations: iteration,
-      usage: aggregateUsage,
+      usage: shapeUsage(aggregateUsage, modelClass, combineRoutes(routesSeen)),
     };
   } catch (err) {
     console.warn('anthropic.chatWithToolLoop: final synthesis call failed', err);
@@ -829,7 +853,7 @@ export async function chatWithToolLoop(
       toolUses: allToolUses,
       toolResults: allToolResults,
       iterations: iteration,
-      usage: aggregateUsage,
+      usage: shapeUsage(aggregateUsage, modelClass, combineRoutes(routesSeen)),
     };
   }
 }

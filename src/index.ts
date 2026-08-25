@@ -91,6 +91,28 @@ export interface Turn {
 }
 
 /**
+ * Which credential mechanism actually authenticated a call — reported
+ * POSITIVELY on every {@link TokenUsage}, never left to be inferred from
+ * what is absent. Every adapter sets this at the exact point it already
+ * knows the answer (e.g. the Anthropic adapter's `resolveClient` already
+ * computes whether a call used the subscription token or the metered key;
+ * before this field existed, that fact was computed and discarded rather
+ * than reported).
+ *
+ * `'api-key'` covers every metered-key provider, and — for now — any
+ * adapter with only one credential path (Google, the OpenAI-compatible
+ * factory). `'subscription-oauth'` is the Anthropic Claude subscription
+ * token path. `'mixed'` is for an AGGREGATED result (e.g.
+ * {@link ChatWithToolLoopResult.usage}, which sums usage across several
+ * underlying calls) whose calls did not all use the same route — reported
+ * rather than picking one arbitrarily and hiding that the other happened.
+ *
+ * New adapters or new mechanisms add new values here rather than reusing
+ * one that does not describe them.
+ */
+export type CredentialRoute = 'api-key' | 'subscription-oauth' | 'mixed';
+
+/**
  * Per-call token + provenance record. Returned alongside every reply.
  * The (provider, model, direction) triple is the model-direction grid
  * used for cost rollups.
@@ -102,6 +124,8 @@ export interface TokenUsage {
   model: string;
   /** The model-class semantic the caller asked for. */
   direction: ModelClass;
+  /** Which credential mechanism served this call — see {@link CredentialRoute}. */
+  route: CredentialRoute;
   /** Standard input tokens. */
   inputTokens: number;
   /** Output tokens (completion + tool-use args). */

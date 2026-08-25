@@ -242,6 +242,10 @@ export function createOpenAICompatAdapter(config: OpenAICompatConfig): OpenAICom
       provider,
       model: models[direction],
       direction,
+      // This factory has exactly one credential mechanism (apiKeyEnv, or a
+      // per-call key) — there is no second route to distinguish, so this is
+      // a constant rather than a computed value. See CredentialRoute.
+      route: 'api-key',
       inputTokens: raw.inputTokens,
       outputTokens: raw.outputTokens,
       cacheCreationInputTokens: 0,
@@ -403,6 +407,8 @@ export function createOpenAICompatAdapter(config: OpenAICompatConfig): OpenAICom
       provider,
       model: modelId,
       direction: modelClass,
+      // Single credential mechanism — see shapeUsage's comment above.
+      route: 'api-key',
       inputTokens: 0,
       outputTokens: 0,
       cacheCreationInputTokens: 0,
