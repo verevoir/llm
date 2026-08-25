@@ -118,6 +118,9 @@ function mockSuccessfulCall(mainStdout: string, opts: { versionOutput?: string }
 
 describe('claudeCli.chat', () => {
   const originalApiKey = process.env.ANTHROPIC_API_KEY;
+  const originalAuthToken = process.env.ANTHROPIC_AUTH_TOKEN;
+  const originalUseBedrock = process.env.CLAUDE_CODE_USE_BEDROCK;
+  const originalUseVertex = process.env.CLAUDE_CODE_USE_VERTEX;
 
   beforeEach(() => {
     mockSpawn.mockReset();
@@ -131,6 +134,12 @@ describe('claudeCli.chat', () => {
     setModelSpanSink(null);
     if (originalApiKey === undefined) delete process.env.ANTHROPIC_API_KEY;
     else process.env.ANTHROPIC_API_KEY = originalApiKey;
+    if (originalAuthToken === undefined) delete process.env.ANTHROPIC_AUTH_TOKEN;
+    else process.env.ANTHROPIC_AUTH_TOKEN = originalAuthToken;
+    if (originalUseBedrock === undefined) delete process.env.CLAUDE_CODE_USE_BEDROCK;
+    else process.env.CLAUDE_CODE_USE_BEDROCK = originalUseBedrock;
+    if (originalUseVertex === undefined) delete process.env.CLAUDE_CODE_USE_VERTEX;
+    else process.env.CLAUDE_CODE_USE_VERTEX = originalUseVertex;
   });
 
   it('spawns "claude" with -p, --system-prompt, --tools "" (disabled), json output, no persistence, safe-mode', async () => {
@@ -183,6 +192,20 @@ describe('claudeCli.chat', () => {
 
     const spawnOptions = mockSpawn.mock.calls[0][2] as { env: Record<string, string | undefined> };
     expect(spawnOptions.env.ANTHROPIC_API_KEY).toBeUndefined();
+  });
+
+  it('strips ANTHROPIC_AUTH_TOKEN and the Bedrock/Vertex routing toggles from the child environment — client.ts already treats the first as a live credential vector; the other two are a precautionary strip against CLI-reported enterprise routing this repository cannot independently verify', async () => {
+    process.env.ANTHROPIC_AUTH_TOKEN = 'sk-should-never-reach-the-child';
+    process.env.CLAUDE_CODE_USE_BEDROCK = '1';
+    process.env.CLAUDE_CODE_USE_VERTEX = '1';
+    mockSuccessfulCall(JSON.stringify({ result: 'ok' }));
+
+    await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] });
+
+    const spawnOptions = mockSpawn.mock.calls[0][2] as { env: Record<string, string | undefined> };
+    expect(spawnOptions.env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
+    expect(spawnOptions.env.CLAUDE_CODE_USE_BEDROCK).toBeUndefined();
+    expect(spawnOptions.env.CLAUDE_CODE_USE_VERTEX).toBeUndefined();
   });
 
   it('reports route as the constant subscription-oauth', async () => {
