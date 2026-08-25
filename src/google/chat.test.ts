@@ -88,6 +88,9 @@ describe('google.chat', () => {
     expect(result.usage.direction).toBe('reasoning');
     expect(result.usage.inputTokens).toBe(12);
     expect(result.usage.outputTokens).toBe(8);
+    // Single credential mechanism for this adapter — route is a constant,
+    // not computed, but the caller-visible field must still be checked.
+    expect(result.usage.route).toBe('api-key');
   });
 
   it('passes turn role + content through to generateContent (assistant → model)', async () => {

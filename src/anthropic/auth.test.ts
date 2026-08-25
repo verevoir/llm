@@ -74,7 +74,7 @@ describe('anthropic client — subscription OAuth path', () => {
     process.env.CLAUDE_CODE_OAUTH_TOKEN = 'oat-secret';
     process.env.ANTHROPIC_API_KEY = 'sk-should-not-be-used';
 
-    await chat({ systemPrompt: 'do it', turns: [{ role: 'user', content: 'x' }] });
+    const reply = await chat({ systemPrompt: 'do it', turns: [{ role: 'user', content: 'x' }] });
 
     expect(mockClientCtor).toHaveBeenCalledTimes(1);
     const opts = mockClientCtor.mock.calls[0][0] as Record<string, unknown>;
@@ -84,6 +84,10 @@ describe('anthropic client — subscription OAuth path', () => {
     // never billed on the OAuth path.
     expect(opts.apiKey).toBeNull();
     expect(opts.defaultHeaders).toEqual({ 'anthropic-beta': 'oauth-2025-04-20' });
+    // route is the caller-visible half of this same guarantee: a successful
+    // OAuth-authenticated call must positively report which credential
+    // answered, not merely which one was attempted.
+    expect(reply.usage.route).toBe('subscription-oauth');
   });
 
   it('leads the system prompt with the Claude-Code identity on the OAuth path', async () => {
@@ -112,7 +116,7 @@ describe('anthropic client — subscription OAuth path', () => {
   it('uses the API key with no identity block and no bearer when only ANTHROPIC_API_KEY is set', async () => {
     process.env.ANTHROPIC_API_KEY = 'sk-env';
 
-    await chat({ systemPrompt: 'PLAIN', turns: [{ role: 'user', content: 'x' }] });
+    const reply = await chat({ systemPrompt: 'PLAIN', turns: [{ role: 'user', content: 'x' }] });
 
     const opts = mockClientCtor.mock.calls[0][0] as Record<string, unknown>;
     expect(opts.apiKey).toBe('sk-env');
@@ -120,6 +124,7 @@ describe('anthropic client — subscription OAuth path', () => {
     const request = mockStream.mock.calls[0][0] as { system: { text: string }[] };
     expect(request.system).toHaveLength(1);
     expect(request.system[0].text).toBe('PLAIN');
+    expect(reply.usage.route).toBe('api-key');
   });
 
   it('throws a clear error when no credential is configured at all', async () => {
@@ -211,6 +216,11 @@ describe('anthropic client — 401 OAuth→API-key fallback (loud, once)', () =>
 
     const reply = await chat({ systemPrompt: 'REVIEW', turns: [{ role: 'user', content: 'x' }] });
     expect(reply.content).toBe('ok');
+    // The fallback succeeded via the metered key, so the call's reported
+    // route reflects who actually answered — the API key, not the OAuth
+    // token that was rejected. This is the exact field a prior review found
+    // this test exercising without ever asserting on it.
+    expect(reply.usage.route).toBe('api-key');
 
     // Two clients built: first OAuth (bearer), then the metered key.
     expect(mockClientCtor).toHaveBeenCalledTimes(2);
@@ -290,5 +300,55 @@ describe('anthropic client — 401 OAuth→API-key fallback (loud, once)', () =>
     await expect(
       chat({ systemPrompt: 'b', turns: [{ role: 'user', content: 'y' }] })
     ).rejects.toThrow(/rejected earlier this session|no ANTHROPIC_API_KEY/i);
+  });
+
+  // combineRoutes()'s only non-trivial branch — reporting 'mixed' when an
+  // aggregate's underlying calls disagreed on route — was, until a review
+  // found it, completely unexercised: every existing fallback test above
+  // asserts a SINGLE streamedCall's outcome, which never produces 'mixed'
+  // on its own (a fallback within one streamedCall still returns exactly
+  // one route: whichever client ultimately answered). 'mixed' can only
+  // arise across MULTIPLE streamedCall invocations inside one aggregate —
+  // chatWithToolLoop's iteration loop, where one iteration answers via
+  // OAuth and a LATER iteration hits the 401 and falls back.
+  it('reports "mixed" when a tool-loop iteration answers via OAuth and a later iteration falls back to the metered key', async () => {
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = 'oat-good-then-rejected';
+    process.env.ANTHROPIC_API_KEY = 'sk-fallback';
+
+    // Iteration 1: OAuth succeeds, the model calls a tool — this iteration's
+    // streamedCall returns route: 'subscription-oauth'.
+    mockStream.mockReturnValueOnce({
+      on: () => {},
+      finalMessage: async () => ({
+        content: [{ type: 'tool_use', id: 'u1', name: 'noop', input: {} }],
+        stop_reason: 'tool_use',
+        usage: {
+          input_tokens: 1,
+          output_tokens: 1,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 0,
+        },
+      }),
+    });
+    // Iteration 2's first attempt: OAuth is now rejected (401) — triggers the
+    // internal fallback.
+    mockStream.mockReturnValueOnce(failStream(401));
+    // Iteration 2's fallback attempt: the metered key answers — this
+    // iteration's streamedCall returns route: 'api-key'.
+    mockStream.mockReturnValueOnce(fakeStream());
+
+    const result = await chatWithToolLoop({
+      systemPrompt: 'REVIEW',
+      turns: [{ role: 'user', content: 'x' }],
+      tools: [
+        { name: 'noop', description: 'noop', input_schema: { type: 'object', properties: {} } },
+      ],
+      executor: async () => 'ok',
+    });
+
+    // Two underlying calls in this one aggregate answered via genuinely
+    // different credentials — that disagreement must be reported, not
+    // collapsed to either route.
+    expect(result.usage.route).toBe('mixed');
   });
 });
