@@ -229,6 +229,11 @@ function shapeUsage(raw: RawResult['rawUsage'], direction: ModelClass): TokenUsa
     provider: PROVIDER,
     model: models[direction],
     direction,
+    // This adapter has exactly one credential mechanism (GEMINI_API_KEY /
+    // GOOGLE_API_KEY, or a per-call key) — there is no second route to
+    // distinguish, so this is a constant rather than a computed value. See
+    // CredentialRoute.
+    route: 'api-key',
     // Worst-case treatment: charge cached input at the standard rate.
     // Matches the Anthropic adapter's convention.
     inputTokens: raw.inputTokens,
@@ -450,6 +455,8 @@ export async function chatWithToolLoop(
     provider: PROVIDER,
     model: modelId,
     direction: modelClass,
+    // Single credential mechanism — see shapeUsage's comment above.
+    route: 'api-key',
     inputTokens: 0,
     outputTokens: 0,
     cacheCreationInputTokens: 0,

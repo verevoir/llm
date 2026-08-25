@@ -64,6 +64,7 @@ describe('samba — model-span emission', () => {
     expect(spans[0]).toMatchObject({
       scope: 'samba.chat',
       provider: 'samba',
+      route: 'api-key',
       inputTokens: 12,
       outputTokens: 8,
     });
@@ -85,6 +86,7 @@ describe('samba — model-span emission', () => {
     expect(spans[0]).toMatchObject({
       scope: 'samba.chatWithTools',
       provider: 'samba',
+      route: 'api-key',
       inputTokens: 10,
       outputTokens: 5,
     });
@@ -106,6 +108,7 @@ describe('samba — model-span emission', () => {
     expect(spans).toHaveLength(2); // one per underlying model call
     expect(spans.map((s) => s.scope)).toEqual(['samba.chatWithToolLoop', 'samba.chatWithToolLoop']);
     expect(spans.every((s) => s.provider === 'samba')).toBe(true);
+    expect(spans.every((s) => s.route === 'api-key')).toBe(true);
   });
 
   it('a throwing sink is fail-soft — the tool loop completes with an unaffected result', async () => {

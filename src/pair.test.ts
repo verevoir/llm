@@ -34,6 +34,7 @@ const usageStub: TokenUsage = {
   provider: 'mock',
   model: 'mock-advisor',
   direction: 'reasoning',
+  route: 'api-key',
   inputTokens: 100,
   outputTokens: 20,
   cacheCreationInputTokens: 0,

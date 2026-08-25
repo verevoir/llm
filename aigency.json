@@ -1,0 +1,50 @@
+{
+  "commands": [
+    {
+      "name": "install",
+      "kind": "bootstrap",
+      "command": ["npm", "ci"],
+      "description": "Install dependencies exactly as locked, matching .github/workflows/ci.yml's first step. This repository had no aigency.json before this file — added so gates can actually run rather than reporting 'tsc: command not found' against an empty node_modules.",
+      "timeoutMs": 600000
+    },
+    {
+      "name": "format",
+      "kind": "bootstrap",
+      "command": ["npm", "run", "format"],
+      "description": "Apply prettier. Bootstrap, not gate: it writes to the tree, and a gate whose verdict describes a tree it just changed is not a verdict. Ordered after install.",
+      "timeoutMs": 120000
+    },
+    {
+      "name": "typecheck",
+      "kind": "gate",
+      "command": ["npm", "run", "typecheck"],
+      "description": "tsc --noEmit, including tests. Mirrors ci.yml.",
+      "blocking": true,
+      "timeoutMs": 300000
+    },
+    {
+      "name": "test",
+      "kind": "gate",
+      "command": ["npm", "test"],
+      "description": "vitest run. Mirrors ci.yml.",
+      "blocking": true,
+      "timeoutMs": 300000
+    },
+    {
+      "name": "lint",
+      "kind": "gate",
+      "command": ["npm", "run", "lint"],
+      "description": "prettier --check . Mirrors ci.yml.",
+      "blocking": true,
+      "timeoutMs": 120000
+    },
+    {
+      "name": "build",
+      "kind": "gate",
+      "command": ["npm", "run", "build"],
+      "description": "tsc -p tsconfig.build.json — the published dist/ actually compiles. Mirrors ci.yml.",
+      "blocking": true,
+      "timeoutMs": 300000
+    }
+  ]
+}
