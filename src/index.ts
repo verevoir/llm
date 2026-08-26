@@ -8,9 +8,9 @@
  * bundle.
  */
 
-// ────────────────────────────────────────────────────────────────────
+// ───────────────────────────────────────────────────────
 // Core types
-// ────────────────────────────────────────────────────────────────────
+// ───────────────────────────────────────────────────────
 
 /**
  * Model-class semantic — what kind of work the call is doing.
@@ -126,6 +126,24 @@ export interface TokenUsage {
   direction: ModelClass;
   /** Which credential mechanism served this call — see {@link CredentialRoute}. */
   route: CredentialRoute;
+  /**
+   * The version of the SUBSTRATE that served this call, when the substrate
+   * is an external program whose version can drift independently of this
+   * package's own release — e.g. the installed `claude` CLI binary
+   * (`@verevoir/llm/claude-cli`). `undefined` for a direct API adapter
+   * (Anthropic, Google, OpenAI-compatible): there the wire protocol is
+   * this package's own responsibility, so nothing about "which version
+   * answered" is unknown or needs reporting the same way.
+   *
+   * Same field family as {@link route}, one level down: `route` answers
+   * WHICH credential mechanism served a call; this answers WHICH VERSION
+   * of that mechanism did. Recorded for the same reason `route` is — a
+   * call whose substrate version is not attributable cannot be compared
+   * across a version change. Concretely, this is what lets a controlled
+   * CLI upgrade be isolated as the one variable that changed between two
+   * otherwise-identical runs, rather than an unrecorded confound.
+   */
+  substrateVersion?: string;
   /** Standard input tokens. */
   inputTokens: number;
   /** Output tokens (completion + tool-use args). */
@@ -206,9 +224,9 @@ export interface ChatReply {
   stopReason: string;
 }
 
-// ────────────────────────────────────────────────────────────────────
+// ───────────────────────────────────────────────────────
 // Tool-calling
-// ────────────────────────────────────────────────────────────────────
+// ───────────────────────────────────────────────────────
 
 /** Definition of a tool the model can choose to invoke. */
 export interface ToolDef {
@@ -241,9 +259,9 @@ export interface ChatWithToolsResult {
   usage: TokenUsage;
 }
 
-// ────────────────────────────────────────────────────────────────────
+// ───────────────────────────────────────────────────────
 // Multi-turn tool loop
-// ────────────────────────────────────────────────────────────────────
+// ───────────────────────────────────────────────────────
 
 /**
  * Caller-supplied function that executes a single tool_use the model
@@ -292,9 +310,9 @@ export interface ChatWithToolLoopResult {
   usage: TokenUsage;
 }
 
-// ────────────────────────────────────────────────────────────────────
+// ───────────────────────────────────────────────────────
 // Accounting helpers
-// ────────────────────────────────────────────────────────────────────
+// ───────────────────────────────────────────────────────
 
 /**
  * Per-model rollup keyed by concrete model id. Produced by
@@ -448,9 +466,9 @@ export function modelLabel(id: string): string {
   return MODEL_LABELS[id] ?? catalogEntryFor(id)?.label ?? id;
 }
 
-// ────────────────────────────────────────────────────────────────────
+// ───────────────────────────────────────────────────────
 // Model identity — decisions key on provider/family, never on version
-// ────────────────────────────────────────────────────────────────────
+// ───────────────────────────────────────────────────────
 
 /**
  * A version-free model identity — `{ provider, family }`, e.g.
@@ -552,7 +570,7 @@ export function uncoveredModels(usage: PerModelUsage, rates: RatesTable = {}): s
   return Object.keys(usage).filter((model) => !rates[model] && !catalogEntryFor(model)?.rates);
 }
 
-// ── Provider base-URL override (STDIO-375) ──────────────────────────────────
+// ── Provider base-URL override (STDIO-375) ─────────────────────────────────────
 
 /**
  * Resolve a client base URL: the `<PROVIDER>_BASE_URL` env override when set
@@ -578,7 +596,7 @@ export function localEndpointKey(baseUrlEnv?: string): string | undefined {
   return baseUrlEnv && process.env[baseUrlEnv]?.trim() ? 'not-needed' : undefined;
 }
 
-// ── Provider connection registry + model→provider routing (STDIO-374) ───────
+// ── Provider connection registry + model→provider routing (STDIO-374) ─────────
 // The catalog above advertises which families each provider serves; this
 // registry records how to *connect* to a provider (its key + base-URL envs), so
 // routing can ask "is this provider actually configured?". Each adapter
