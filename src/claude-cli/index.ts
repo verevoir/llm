@@ -53,12 +53,14 @@
  *      live credential vectors (the second was missing until a review
  *      caught it). `ANTHROPIC_API_KEY_FILE` is stripped DEFENSIVELY, on
  *      no such evidence — an earlier version of this file claimed
- *      client.ts verified it too, which a later review found false: that
- *      env var appears nowhere in client.ts, nowhere else in this
- *      repository, and nowhere in the `@anthropic-ai/sdk` dependency as
- *      read at the time. It stays in the list anyway — a plausible
- *      billed-credential name is worth stripping whether or not this
- *      codebase happens to reference it, the same asymmetry that
+ *      client.ts verified it too, which a later review found false. What
+ *      this file has checked directly: that env var appears nowhere in
+ *      `client.ts` and nowhere else in this repository. Its absence from
+ *      the `@anthropic-ai/sdk` dependency is reported by that same
+ *      review, not independently re-checked here — relayed, not
+ *      confirmed. It stays in the list regardless of either fact — a
+ *      plausible billed-credential name is worth stripping whether or
+ *      not anything in reach references it, the same asymmetry that
  *      justifies the two precautionary strips below
  *      (`CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`), reported
  *      but not independently confirmed here, for enterprise routing the
@@ -204,12 +206,13 @@ const STRIPPED_ENV_VARS = [
   // treats this as a live billed-credential vector for the same provider.
   'ANTHROPIC_API_KEY',
   // Defensive, NOT verified against client.ts — an earlier version of this
-  // comment claimed it was, which a review found false: this env var appears
-  // nowhere in client.ts, nowhere else in this repository, and nowhere in
-  // the @anthropic-ai/sdk dependency as read at the time. Kept in the list
-  // anyway: a plausible billed-credential env-var name is worth stripping
-  // whether or not this codebase happens to reference it — the same
-  // asymmetry that justifies the two precautionary strips below.
+  // comment claimed it was, which a review found false. Checked directly:
+  // this env var appears nowhere in client.ts or anywhere else in this
+  // repository. Its absence from @anthropic-ai/sdk is reported by that same
+  // review, not re-verified here — relayed, not confirmed. Kept in the list
+  // regardless of either fact: a plausible billed-credential env-var name is
+  // worth stripping whether or not anything in reach references it — the
+  // same asymmetry that justifies the two precautionary strips below.
   'ANTHROPIC_API_KEY_FILE',
   // Added after a review found this one missing — client.ts's own comment on
   // it ("authToken: null so a stray ANTHROPIC_AUTH_TOKEN can't override an
