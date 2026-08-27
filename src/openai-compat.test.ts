@@ -94,6 +94,24 @@ describe('createOpenAICompatAdapter', () => {
     expect(spans[0]).toMatchObject({ scope: 'testco.chat', provider: 'testco' });
   });
 
+  // route was hardcoded as a constant in shapeUsage() when this factory
+  // gained the field, but nothing in this suite ever asserted it — a review
+  // found the whole PR's route field shipped with the coverage its own body
+  // claimed, but did not actually have, across every adapter built on this
+  // factory (deepseek, samba, mistral).
+  it('reports route "api-key" — the sole credential mechanism every adapter built on this factory has', async () => {
+    chatCreateMock.mockResolvedValueOnce({
+      choices: [{ message: { content: 'hi' }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 10, completion_tokens: 5 },
+    });
+    const result = await a.chat({
+      systemPrompt: 's',
+      turns: [{ role: 'user', content: 'go' }],
+      apiKey: 'k',
+    });
+    expect(result.usage.route).toBe('api-key');
+  });
+
   it('throws when the catalogue declares no modelClass anywhere', () => {
     expect(() =>
       createOpenAICompatAdapter({
