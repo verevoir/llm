@@ -28,9 +28,25 @@ SDK does not enter your bundle.
   OpenAI-compatible. `chat` + tool-calling.
 - `@verevoir/llm/mistral` — Mistral adapter (`MISTRAL_API_KEY`),
   OpenAI-compatible. `chat` + tool-calling.
+- `@verevoir/llm/claude-cli` — shells out to the real Claude Code CLI
+  (`claude -p`) as a subscription-only substrate, for a caller that must run on
+  a subscription credential rather than a billed API key (imitating Claude Code
+  to the raw Messages API is not a sanctioned route). Provider id `'claude-cli'`,
+  deliberately distinct from `'anthropic'`; never registered into the model
+  catalog or connection registry — `resolveModel`/`resolveModelByTerm` can never
+  silently substitute it, a caller wanting this substrate imports and calls it
+  directly. `chat()` only. No SDK dependency — it spawns a subprocess, and
+  that subprocess's environment is built from an allowlist — only `PATH`,
+  `HOME`, `TMPDIR`, and the CLI's own subscription-credential env var
+  (`CLAUDE_CODE_OAUTH_TOKEN`) ever reach it; nothing else in the caller's
+  environment, billed credential or not, is passed through. Replaced an
+  earlier denylist that had already missed one live credential vector
+  (`ANTHROPIC_AUTH_TOKEN`) in an earlier version — a denylist can only
+  exclude names someone thought of; the allowlist doesn't need to.
 
 Every provider in the matrix (Anthropic, Google, OpenAI, DeepSeek, SambaNova,
-Mistral) can now drive the tool loop.
+Mistral) can now drive the tool loop. `claude-cli` is a separate, deliberately
+non-interchangeable substrate and is not part of that matrix.
 
 ## Install
 
@@ -76,8 +92,13 @@ Provider-agnostic types `ToolDef`, `ToolUse`, `ToolExecutor`, `ContentBlock`
 ## Cost accounting
 
 Every call returns a `TokenUsage` typed
-`{ provider, model, direction, inputTokens, outputTokens, ... }` (with optional
-`cacheRead` / `cacheWrite` so prompt-cache savings price at their own rates). The
+`{ provider, model, direction, route, inputTokens, outputTokens, ... }` (with
+optional `substrateVersion` — which version of an external substrate, e.g. the
+`claude` CLI, served the call, `undefined` for a direct API adapter — and
+optional `cacheRead` / `cacheWrite` so prompt-cache savings price at their own
+rates). `route` (`CredentialRoute`, a core export: `'api-key'` |
+`'subscription-oauth'` | `'mixed'`) reports which credential mechanism actually
+served a call, positively, never left to be inferred from what's absent. The
 core export ships `sumUsages` / `parseUsage` to roll up across calls,
 `totalTokens`, `formatTokensCompact` for compact displays, `estimateCostUSD`, and
 `uncoveredModels` (loud-on-miss: which models a rates table doesn't cover) — so
