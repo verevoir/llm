@@ -43,33 +43,26 @@
  * claimed the stripped list left the CLI "nothing to fall back to" and that
  * there was "no other route this call could have taken"; neither survived
  * the review finding `ANTHROPIC_AUTH_TOKEN` unstripped).**
- *   1. Every billed-credential env var THIS CODEBASE CURRENTLY KNOWS ABOUT
- *      is stripped from the CHILD process's environment before it is
- *      spawned — not merely left unset by omission, but deleted from a
- *      COPY of the parent env (see `STRIPPED_ENV_VARS`, `childEnv`).
- *      `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` are stripped on
- *      CONFIRMED evidence: `anthropic/client.ts`, this package's own
- *      sibling adapter for the same provider, is read to treat both as
- *      live credential vectors (the second was missing until a review
- *      caught it). `ANTHROPIC_API_KEY_FILE` is stripped DEFENSIVELY, on
- *      no such evidence — an earlier version of this file claimed
- *      client.ts verified it too, which a later review found false. What
- *      this file has checked directly: that env var appears nowhere in
- *      `client.ts` and nowhere else in this repository. Its absence from
- *      the `@anthropic-ai/sdk` dependency is reported by that same
- *      review, not independently re-checked here — relayed, not
- *      confirmed. It stays in the list regardless of either fact — a
- *      plausible billed-credential name is worth stripping whether or
- *      not anything in reach references it, the same asymmetry that
- *      justifies the two precautionary strips below
- *      (`CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`), reported
- *      but not independently confirmed here, for enterprise routing the
- *      real CLI is said to support.
- *      **This list is not provably exhaustive** — it strips every
- *      billed-credential vector this codebase currently knows about, not
- *      every one the `claude` binary might ever read; an undocumented or
- *      future CLI-internal fallback this list does not yet name would
- *      not be caught by it.
+ *   1. The CHILD process's environment is built from an ALLOWLIST: only
+ *      `PATH`, `HOME`, `TMPDIR`, and the one named credential this file
+ *      declares are ever copied across to the spawned `claude` process
+ *      (see `ALLOWED_ENV_VARS`, `allowedEnv`) — nothing else the caller's
+ *      environment carries reaches the child, billed credential or not.
+ *      REPLACES an earlier DENYLIST that named and stripped five specific
+ *      vars (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
+ *      `ANTHROPIC_API_KEY_FILE`, `CLAUDE_CODE_USE_BEDROCK`,
+ *      `CLAUDE_CODE_USE_VERTEX`) from a copy of the parent env while
+ *      passing everything else through unchanged. That denylist's own
+ *      documentation admitted it was "not provably exhaustive" — it
+ *      could only strip billed-credential vectors this codebase already
+ *      knew to name, and a real miss (`ANTHROPIC_AUTH_TOKEN` itself was
+ *      absent from an earlier version, caught only by a later review)
+ *      meant a live credential could reach the child undetected. An
+ *      allowlist carries no equivalent gap: it does not need to name
+ *      every threat to be complete about what it permits — nothing
+ *      outside `ALLOWED_ENV_VARS` reaches the child, full stop,
+ *      regardless of what it is called or whether this file has ever
+ *      heard of it.
  *   2. `route` is reported as the CONSTANT `'subscription-oauth'`. This
  *      reflects the deliberate design — this adapter has no fallback
  *      ladder and exists specifically so a caller can avoid the metered
@@ -171,12 +164,15 @@
  * billed or notional — there is no route-equivalent field in it — so
  * asserting either would be a claim this adapter cannot back up. What
  * this adapter DOES know, independently and for certain: no billed
- * credential was available to spend, because the env vars this adapter
- * knows can carry one (`ANTHROPIC_API_KEY`, `ANTHROPIC_API_KEY_FILE`,
- * `ANTHROPIC_AUTH_TOKEN`) are stripped from the child's environment
- * before the CLI ever runs (see `childEnv()`) — so whatever this
- * number represents, it was not charged to the operator's billed key
- * via any credential this codebase has verified as live. Surfacing it
+ * credential was available to spend, because the child's environment is
+ * built from an allowlist (see `allowedEnv()`) — only `PATH`, `HOME`,
+ * `TMPDIR` and the one named credential this file declares ever reach
+ * it, so no billed-credential var (`ANTHROPIC_API_KEY`,
+ * `ANTHROPIC_API_KEY_FILE`, `ANTHROPIC_AUTH_TOKEN`, or anything else the
+ * caller's environment carries) was ever passed through in the first
+ * place — so whatever this number represents, it was not charged to the
+ * operator's billed key via any credential this codebase has verified
+ * as live. Surfacing it
  * onto `TokenUsage` as a settled billed-vs-notional figure would
  * misrepresent it; that dual-cost design (`decisions/023`, in
  * aigency-governance) is deliberate, separate, out-of-scope work.
