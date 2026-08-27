@@ -46,15 +46,23 @@
  *   1. Every billed-credential env var THIS CODEBASE CURRENTLY KNOWS ABOUT
  *      is stripped from the CHILD process's environment before it is
  *      spawned — not merely left unset by omission, but deleted from a
- *      COPY of the parent env (see `STRIPPED_ENV_VARS`, `childEnv`). This
- *      list was built by reading what `anthropic/client.ts`, this
- *      package's own sibling adapter for the same provider, already
- *      treats as a live credential vector (`ANTHROPIC_API_KEY`,
- *      `ANTHROPIC_API_KEY_FILE`, `ANTHROPIC_AUTH_TOKEN` — the last of
- *      these was missing until a review caught it), plus two
- *      precautionary strips for enterprise routing the real CLI is
- *      reported, but not independently confirmed here, to support
- *      (`CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`).
+ *      COPY of the parent env (see `STRIPPED_ENV_VARS`, `childEnv`).
+ *      `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` are stripped on
+ *      CONFIRMED evidence: `anthropic/client.ts`, this package's own
+ *      sibling adapter for the same provider, is read to treat both as
+ *      live credential vectors (the second was missing until a review
+ *      caught it). `ANTHROPIC_API_KEY_FILE` is stripped DEFENSIVELY, on
+ *      no such evidence — an earlier version of this file claimed
+ *      client.ts verified it too, which a later review found false: that
+ *      env var appears nowhere in client.ts, nowhere else in this
+ *      repository, and nowhere in the `@anthropic-ai/sdk` dependency as
+ *      read at the time. It stays in the list anyway — a plausible
+ *      billed-credential name is worth stripping whether or not this
+ *      codebase happens to reference it, the same asymmetry that
+ *      justifies the two precautionary strips below
+ *      (`CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`), reported
+ *      but not independently confirmed here, for enterprise routing the
+ *      real CLI is said to support.
  *      **This list is not provably exhaustive** — it strips every
  *      billed-credential vector this codebase currently knows about, not
  *      every one the `claude` binary might ever read; an undocumented or
@@ -193,8 +201,15 @@ export const PROVIDER = 'claude-cli';
  * knows about, not a proof of completeness. */
 const STRIPPED_ENV_VARS = [
   // Verified necessary: `anthropic/client.ts` in this same package already
-  // treats these as live billed-credential vectors for the same provider.
+  // treats this as a live billed-credential vector for the same provider.
   'ANTHROPIC_API_KEY',
+  // Defensive, NOT verified against client.ts — an earlier version of this
+  // comment claimed it was, which a review found false: this env var appears
+  // nowhere in client.ts, nowhere else in this repository, and nowhere in
+  // the @anthropic-ai/sdk dependency as read at the time. Kept in the list
+  // anyway: a plausible billed-credential env-var name is worth stripping
+  // whether or not this codebase happens to reference it — the same
+  // asymmetry that justifies the two precautionary strips below.
   'ANTHROPIC_API_KEY_FILE',
   // Added after a review found this one missing — client.ts's own comment on
   // it ("authToken: null so a stray ANTHROPIC_AUTH_TOKEN can't override an
@@ -296,6 +311,13 @@ interface ModelUsageEntry {
  * header for how this was established and what changed from the original
  * guess. Fields not confirmed present in every observed shape stay
  * optional so a shape lacking one still parses without throwing.
+ *
+ * `usage` below uses snake_case field names while `modelUsage`'s entries
+ * (`ModelUsageEntry`) use camelCase — a real inconsistency in the payload,
+ * not a naming slip in this file: the operator's relayed real invocation
+ * showed exactly this mix (snake_case `usage.input_tokens` alongside
+ * camelCase `modelUsage[key].inputTokens`), so both conventions are kept
+ * as observed rather than normalised to one.
  */
 interface ClaudeCliJsonResult {
   /** The reply text — a flat string. Confirmed; this is the only text
