@@ -96,39 +96,24 @@ jobs:
           code=$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: token ${GITHUB_TOKEN}" https://api.github.com/repos/verevoir/capabilities)
           echo "capabilities API access with this token -> HTTP $code"
           D="/home/runner/.antagonistic-review-mcp"
-          # Pin the reviewer MCP to an IMMUTABLE commit (not a moveable tag), then
-          # `npm ci` against its committed lockfile — integrity-checked, audited and
-          # reproducible, so the rubric-loading dependency is verifiable. The gate
-          # must not be modifiable by the thing it gates: built from `main`, any
-          # merge to capabilities would silently change every repo's reviewer with
-          # no review OF THAT CHANGE as a change.
+          # NOT pinned. First-party corpus pinning is retired by operator decision:
+          # a pin freezes the bar at generation time, so work lands against a stale
+          # corpus — a floating resolve means every review meets the CURRENT bar.
+          # This is the exact tradeoff that used to cost us: on 2026-08-05 the old
+          # pin sat 63 commits and two weeks behind, holding back `6dec33f` ("retry
+          # the corpus read on a transient blip — stop spurious 'rubric
+          # unavailable'"), and the fleet spent half an hour failing every lens
+          # closed against a defect that was already fixed. See STDIO-661.
           #
-          # BUMP THIS WHEN CAPABILITIES RELEASES. The pin is a control with an
-          # ongoing cost, not a set-once decision, and nothing here pays it
-          # automatically. Left alone it silently withholds fixes to the reviewer
-          # itself — on 2026-08-05 it sat 63 commits and two weeks behind, holding
-          # back `6dec33f` ("retry the corpus read on a transient blip — stop
-          # spurious 'rubric unavailable'"), and the fleet spent half an hour
-          # failing every lens closed against a defect that was already fixed.
-          # See STDIO-661.
-          CAPS_SHA="5e22ef67ef60ed8d84d27d3f18356d26971e29cb" # capabilities @ 2026-08-05, hosts scripts/checkout-corpus.sh
+          # `npm ci` still runs against the committed lockfile AT the resolved
+          # commit, so the build stays reproducible for this run even though the
+          # commit it resolves to is not fixed in this file.
           rm -rf "$D"
           git clone --filter=blob:none --no-checkout "https://x-access-token:${GITHUB_TOKEN}@github.com/verevoir/capabilities.git" "$D"
+          CAPS_SHA="$( cd "$D" && git rev-parse origin/HEAD )"
           ( cd "$D" && git checkout --quiet "$CAPS_SHA" && npm ci --no-fund )
-          # Staleness REPORT — the guard STDIO-661 was missing. It fails OPEN and
-          # never blocks: the age of the pin is maintenance debt, not a defect in
-          # the change under review, and a check that failed builds over it would
-          # be switched off within a week. What was missing was never enforcement,
-          # it was VISIBILITY — the pin sat 63 commits and two weeks behind in
-          # silence, withholding a fix written for the exact outage it then caused.
-          PIN_DATE="$( cd "$D" && git log -1 --format=%cs "$CAPS_SHA" )"
-          PIN_TS="$( cd "$D" && git log -1 --format=%ct "$CAPS_SHA" )"
-          PIN_AGE_DAYS=$(( ( $(date +%s) - PIN_TS ) / 86400 ))
-          PIN_BEHIND="$( cd "$D" && git rev-list --count "${CAPS_SHA}..origin/HEAD" 2>/dev/null || echo '?' )"
-          echo "reviewer pin: ${CAPS_SHA:0:12} ($PIN_DATE) — ${PIN_AGE_DAYS}d old, ${PIN_BEHIND} commits behind"
-          if [ "$PIN_AGE_DAYS" -gt 30 ]; then
-            echo "::warning title=Reviewer pin is ${PIN_AGE_DAYS} days old::${PIN_BEHIND} commits behind capabilities. A stale pin withholds fixes to the REVIEWER itself — see STDIO-661. Bump CAPS_SHA to the current release."
-          fi
+          CAPS_DATE="$( cd "$D" && git log -1 --format=%cs "$CAPS_SHA" )"
+          echo "reviewer built from capabilities@${CAPS_SHA:0:12} ($CAPS_DATE) — resolved at run time, not pinned"
           test -f "$D/dist/bin.js" && echo "reviewer MCP built at $D/dist/bin.js"
 
       - name: Check out the guardrails corpus (read it from disk, not the REST API)
@@ -200,9 +185,24 @@ jobs:
             - Call the verevoir `provision` tool with a short description of this change to obtain the
               foundational floor practices and the concern practices that apply. That set IS your rubric.
               Judge only against it, so the bar is always the current bar rather than a copy that has drifted.
+              The corpus this resolves to is NOT pinned to a commit in this repo — it floats to whatever
+              @verevoir/capabilities' default branch currently is — so treat the rubric as live, not fixed.
             - If `provision` cannot return real practices — it reports the corpus could not be read, or
-              returns no practice bodies — that is an automatic REJECT. Never APPROVE against an empty or
-              unloaded rubric: a rubric you could not load is a blocked change, not a pass.
+              returns no practice bodies — write verdict "COULD_NOT_RUN", never "REJECT": a rubric you
+              could not load blocks the change, but it is not a judgement ON the change.
+            - Read the FULL `provision` response before treating it as loaded. Two more shapes mean the same
+              thing as a rubric that failed to load, and get the same verdict:
+                - it names practices it could not load — a "(Provisioned but unreadable: <ids>.)" marker —
+                  alongside ones it did load. A frame carrying most of the bar plus unreadable entries is
+                  still a partial bar.
+                - it returns one-line SUMMARIES of the floor practices rather than their full bodies (the
+                  shape a call without `concerns` can return). A summary is not a practice — you cannot
+                  judge a violation against a blurb.
+              Either shape: write "COULD_NOT_RUN", not "REJECT" and not "APPROVE". An incomplete or
+              summarised rubric is a verdict that is not a verdict, and must never read as diligence.
+            - State in your verdict which bar you loaded — name the practices (or their ids) `provision`
+              actually returned in full. The corpus floats with no commit in this repo to point at, so a
+              verdict nobody can trace to a bar is uncheckable.
 
             THE PR ITSELF is in `$PR_TITLE` and `$PR_BODY`. Read them from there and nowhere
             else. On a `pull_request` run the checked-out HEAD is a MERGE COMMIT GitHub created,
@@ -218,8 +218,10 @@ jobs:
             1. Diff base..head — `git diff origin/${{ github.base_ref }}...HEAD` — and read the changed files.
             2. Provision the rubric, then review the change against it adversarially.
             3. Write your verdict to `.antagonistic-review/verdict.json` (create the directory) as:
-               { "verdict": "APPROVE" | "REJECT", "summary": "<one line>", "findings": ["<finding>", ...] }
+               { "verdict": "APPROVE" | "REJECT" | "COULD_NOT_RUN", "summary": "<one line, naming the bar you loaded>", "findings": ["<finding>", ...] }
                APPROVE only if you can find no rubric violation worth blocking on. When in doubt, REJECT.
+               COULD_NOT_RUN only for a rubric that did not load in full per the RUBRIC section above — never
+               for a real finding against the change under review.
 
             Do NOT merge, comment-approve, or alter any workflow or branch-protection setting. You only write the verdict.
 
@@ -234,6 +236,10 @@ jobs:
           verdict="$(jq -r '.verdict // empty' "$verdict_file")"
           echo "Summary: $(jq -r '.summary // ""' "$verdict_file")"
           jq -r '.findings[]? | "  - " + .' "$verdict_file"
+          if [ "$verdict" = "COULD_NOT_RUN" ]; then
+            echo "::error title=Review could not run::The rubric did not load in full (verdict: COULD_NOT_RUN) — this is NOT a rejection of the change; the review itself did not complete. This still BLOCKS merge. Re-run once provision returns a complete rubric."
+            exit 1
+          fi
           if [ "$verdict" != "APPROVE" ]; then
             echo "::error title=Change rejected::The adversarial reviewer did not approve (verdict: ${verdict:-none})."
             exit 1
