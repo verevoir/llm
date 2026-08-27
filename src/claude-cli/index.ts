@@ -187,6 +187,45 @@
  * a subsequent release"). A tool-calling loop over a subprocess boundary
  * is a materially larger design than this reviewer use case needs, and
  * `--tools ""` makes it moot for this adapter's actual purpose anyway.
+ *
+ * `ABORTSIGNAL` IS HONOURED, BOTH AT ENTRY AND MID-CALL — NOT JUST THE
+ * ENTRY CHECK ALONE. Every other `chat()` in this package (`anthropic`,
+ * `google`, `openai`, the OpenAI-compatible factory, `deepseek`) calls a
+ * local `throwIfAborted(options.abortSignal)` at entry, honouring the
+ * shared `ChatOptions.abortSignal` contract (see `index.ts`'s own doc
+ * comment — aborting on an exceeded budget is its canonical use case).
+ * This adapter does the same — but an entry-only check would satisfy the
+ * letter of that contract while leaving the real failure in place: this
+ * call spawns a subprocess that can run for the full duration of a
+ * `claude -p` invocation, and an entry check alone does nothing once
+ * that process is already running. So `runClaudeCli` also takes the
+ * signal directly: if it aborts while the child is still alive, the
+ * child is killed (`child.kill()`) and the call rejects immediately with
+ * the signal's own reason — the same reason `throwIfAborted` would have
+ * thrown, so a caller sees identical behaviour whether the abort landed
+ * before the spawn or during it. The one-shot `claude --version` spawn
+ * `resolveCliVersion()` makes is deliberately NOT wired to any signal: it
+ * is memoized once per process and shared by every caller, so aborting
+ * one caller's `chat()` call must not cancel a lookup every other caller
+ * is also waiting on.
+ *
+ * `ONPROGRESS` IS ACCEPTED, NEVER INVOKED — A DISCLOSED LIMITATION, NOT
+ * A SILENT ONE. `ChatOptions.onProgress` is part of the shared contract
+ * every adapter's options type carries, and `anthropic/index.ts`
+ * implements it by auto-injecting a `report_progress` tool the model can
+ * call mid-turn. That mechanism cannot exist here without contradicting
+ * this file's own design: `--tools ""` disables every tool for this
+ * adapter, deliberately (see "`--tools ""` IS A POSITIVE DECLARATION"
+ * above) — there is no tool a model could call to narrate progress
+ * through. Independently, `--output-format json` (confirmed against a
+ * real invocation, above) delivers ONE envelope at process exit, not an
+ * incremental stream, so there is no partial signal to narrate from even
+ * if a tool mechanism existed. Both of those are structural to the
+ * design this adapter ships today, not gaps left for a later release —
+ * so a caller supplying `onProgress` will never see it called, and
+ * nothing here throws for supplying it. That is stated here, plainly,
+ * rather than left for a reader to discover by noticing the callback
+ * never fires.
  */
 
 import { spawn } from 'node:child_process';
@@ -488,16 +527,74 @@ interface SpawnResult {
   exitCode: number | null;
 }
 
+/** What an aborted `AbortSignal` should be reported as: its own `reason`
+ * when that's an `Error`, a string-wrapped `reason` otherwise, or a
+ * generic `AbortError` when no reason was given. Shared by
+ * `throwIfAborted` (the entry check) and `runClaudeCli` (the mid-call
+ * kill-and-reject), so an abort reports identically regardless of when
+ * it happened. */
+function abortReason(signal: AbortSignal): unknown {
+  if (signal.reason instanceof Error) return signal.reason;
+  if (signal.reason !== undefined) return new Error(String(signal.reason));
+  return new DOMException('Aborted', 'AbortError');
+}
+
+/** Throw the AbortSignal's reason (or a generic AbortError) when the
+ * signal is aborted. No-op when no signal is provided or the signal has
+ * not been aborted. Matches every sibling adapter's own `throwIfAborted`
+ * (`anthropic/index.ts`, `google/index.ts`, `openai/index.ts`,
+ * `openai-compat.ts`, `deepseek/index.ts`) so an abort reports
+ * identically no matter which substrate served the call. */
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (!signal?.aborted) return;
+  throw abortReason(signal);
+}
+
 /** Runs the CLI once, writing `input` to its stdin and collecting stdout /
  * stderr / exit code. Separated from `chat()` so tests can mock exactly
  * this seam without reimplementing stream plumbing per test. Also used by
  * `resolveCliVersion()` for the (memoized, at most once per process)
- * `--version` invocation. */
-function runClaudeCli(args: string[], input: string): Promise<SpawnResult> {
+ * `--version` invocation — which never passes `signal` (see the file
+ * header's "ABORTSIGNAL IS HONOURED" section for why a shared, memoized
+ * lookup must not be cancellable by any one caller's abort).
+ *
+ * When `signal` aborts — whether before this function is even called, or
+ * while the spawned child is still running — the child is killed
+ * (`child.kill()`, when one has been spawned) and the returned promise
+ * rejects immediately with the signal's own reason (see `abortReason`),
+ * rather than either waiting for the process to exit on its own or
+ * reporting the abort as an ordinary spawn failure. */
+function runClaudeCli(args: string[], input: string, signal?: AbortSignal): Promise<SpawnResult> {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(abortReason(signal));
+      return;
+    }
+
     const child = spawn('claude', args, { env: childEnv() });
     let stdout = '';
     let stderr = '';
+    let settled = false;
+
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      // Terminate the still-running subprocess — an abort must not leave
+      // it running to completion in the background after the caller has
+      // already been told the call failed. This is the half an
+      // entry-only check cannot do.
+      child.kill();
+      reject(abortReason(signal!));
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener('abort', onAbort);
+      fn();
+    };
+
     child.stdout.on('data', (chunk: Buffer) => {
       stdout += chunk.toString();
     });
@@ -506,8 +603,8 @@ function runClaudeCli(args: string[], input: string): Promise<SpawnResult> {
     });
     // e.g. ENOENT — claude is not on PATH at all. A spawn-level failure,
     // distinct from a non-zero exit; both end up refusing (see chat()).
-    child.on('error', reject);
-    child.on('close', (exitCode) => resolve({ stdout, stderr, exitCode }));
+    child.on('error', (err) => finish(() => reject(err)));
+    child.on('close', (exitCode) => finish(() => resolve({ stdout, stderr, exitCode })));
     child.stdin.write(input);
     child.stdin.end();
   });
@@ -521,6 +618,7 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
   if (options.turns.length === 0) {
     throw new Error('claudeCli.chat() requires at least one turn');
   }
+  throwIfAborted(options.abortSignal);
   if (options.apiKey != null) {
     // Refused, not silently ignored — see the file header, point 4.
     throw new Error(
@@ -531,11 +629,21 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
 
   const args = buildArgs(options.systemPrompt);
   const input = joinTurns(options.turns);
+  // options.onProgress is accepted per the shared ChatOptions contract but
+  // never invoked — see the file header's "ONPROGRESS IS ACCEPTED, NEVER
+  // INVOKED" section for why this is a disclosed limitation, not a gap.
 
   let spawned: SpawnResult;
   try {
-    spawned = await runClaudeCli(args, input);
+    spawned = await runClaudeCli(args, input, options.abortSignal);
   } catch (err) {
+    if (options.abortSignal?.aborted) {
+      // Killed and rejected by runClaudeCli's abort wiring — rethrow the
+      // signal's own reason as-is (matching throwIfAborted's contract)
+      // rather than reporting an aborted call as an ordinary spawn
+      // failure.
+      throw err;
+    }
     // Spawn-level failure (e.g. claude not on PATH). No fallback — see the
     // file header's "REFUSE, NEVER SUBSTITUTE".
     throw new Error(
