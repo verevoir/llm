@@ -6,222 +6,82 @@
  * WHY THIS EXISTS, RATHER THAN A SECOND CREDENTIAL ON THE ANTHROPIC
  * ADAPTER. The Anthropic Messages API accepts a subscription OAuth token
  * only for requests that present themselves AS Claude Code (see
- * anthropic/index.ts's `oauthSystemIdentity()`). Imitating that client to
- * the raw API was ruled out as a route: the sanctioned way to use a
- * subscription credential is to run the thing the credential actually
- * belongs to — `claude -p`, Claude Code's own non-interactive mode — and
- * let IT decide how to authenticate itself, rather than this library
- * forging its identity.
+ * anthropic/index.ts's `oauthSystemIdentity()`); this adapter instead
+ * shells out to the real thing — `claude -p` — and lets it authenticate
+ * itself, rather than this library forging that identity.
  *
- * PROVIDER ID IS `'claude-cli'`, DELIBERATELY DISTINCT FROM `'anthropic'`.
- * `TokenUsage.provider` is the caller-visible signal for "which substrate
- * actually served this call" — the whole reason `CredentialRoute` /
- * `TokenUsage.route` exists. A caller comparing this substrate against the
- * Messages-API one needs the two to be unmistakably different labels, not
- * two paths sharing a provider id that differ only in an internal detail
- * nobody reads.
+ * PROVIDER ID IS `'claude-cli'`, DELIBERATELY DISTINCT FROM `'anthropic'`,
+ * so `TokenUsage.provider` unambiguously names which substrate served a
+ * call. NEVER REGISTERED into the shared model catalog / connection
+ * registry (no `registerModelCatalog`, no `registerProviderConnection`) —
+ * `resolveModel` / `resolveModelByTerm` must never be able to silently
+ * substitute this adapter for the real API one; a caller wanting this
+ * substrate imports and calls it directly, chosen deliberately, never
+ * resolved by policy.
  *
- * NEVER REGISTERED INTO THE SHARED MODEL CATALOG / CONNECTION REGISTRY —
- * no `registerModelCatalog`, no `registerProviderConnection`, on purpose.
- * Those exist so `resolveModel` / `resolveModelByTerm` can pick
- * transparently between interchangeable providers serving the same model
- * family — exactly the behaviour this adapter must NOT participate in. A
- * caller wanting this substrate imports and calls it directly, chosen
- * deliberately by whoever wires a panel together, never resolved by
- * policy. Registering this into the shared catalog would let
- * `resolveModelByTerm('sonnet')` transparently return either this adapter
- * or the real API adapter depending on which happens to be configured —
- * silently substituting one substrate for the other, which is the one
- * hazard this whole design exists to avoid.
+ * CREDENTIAL CONTRACT. `chat()` refuses rather than substitutes: the
+ * child process's environment is built from an ALLOWLIST — see
+ * {@link ALLOWED_ENV_VARS} for the exact names permitted through and its
+ * own doc-comment for why an allowlist replaced an earlier denylist.
+ * `route` on the returned `TokenUsage` is always the constant
+ * `'subscription-oauth'` — a declared design choice, not a proof that
+ * every billed-credential path is closed (its safety is only as strong as
+ * the allowlist's completeness). A non-zero exit throws a plain `Error`
+ * and is never retried against a different credential. `chat()` REFUSES a
+ * caller-supplied `apiKey` outright rather than silently ignoring it — BYOK
+ * has no meaning for a subprocess that authenticates as whatever is
+ * already logged in. Flags used: `-p --system-prompt <prompt> --tools ""
+ * --output-format json --no-session-persistence --safe-mode` (not
+ * `--bare`, whose own `--help` says OAuth/keychain are never read under
+ * it). For the full rationale, the rejected alternatives (`--bare`,
+ * `--json-schema`), and the correction history behind this contract, see
+ * CHANGELOG.md's 0.25.0 entry and this PR's body — not repeated here.
  *
- * REFUSE, NEVER SUBSTITUTE. "Purchased API credits are for GitHub Actions
- * only" is not negotiable, so multiple independent mechanisms enforce it —
- * one failing must not silently open the others. **None of the claims below
- * is an absolute guarantee; each names what is actually defended against and
- * what is relayed rather than independently verified — corrected after a
- * review found the first version of this section overstating both (it
- * claimed the stripped list left the CLI "nothing to fall back to" and that
- * there was "no other route this call could have taken"; neither survived
- * the review finding `ANTHROPIC_AUTH_TOKEN` unstripped).**
- *   1. The CHILD process's environment is built from an ALLOWLIST: only
- *      `PATH`, `HOME`, `TMPDIR`, and the one named credential this file
- *      declares are ever copied across to the spawned `claude` process
- *      (see `ALLOWED_ENV_VARS`, `allowedEnv`) — nothing else the caller's
- *      environment carries reaches the child, billed credential or not.
- *      REPLACES an earlier DENYLIST that named and stripped five specific
- *      vars (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
- *      `ANTHROPIC_API_KEY_FILE`, `CLAUDE_CODE_USE_BEDROCK`,
- *      `CLAUDE_CODE_USE_VERTEX`) from a copy of the parent env while
- *      passing everything else through unchanged. That denylist's own
- *      documentation admitted it was "not provably exhaustive" — it
- *      could only strip billed-credential vectors this codebase already
- *      knew to name, and a real miss (`ANTHROPIC_AUTH_TOKEN` itself was
- *      absent from an earlier version, caught only by a later review)
- *      meant a live credential could reach the child undetected. An
- *      allowlist carries no equivalent gap: it does not need to name
- *      every threat to be complete about what it permits — nothing
- *      outside `ALLOWED_ENV_VARS` reaches the child, full stop,
- *      regardless of what it is called or whether this file has ever
- *      heard of it.
- *   2. `route` is reported as the CONSTANT `'subscription-oauth'`. This
- *      reflects the deliberate design — this adapter has no fallback
- *      ladder and exists specifically so a caller can avoid the metered
- *      path — not a proof that (1) closes every path the CLI could take
- *      to reach a billed credential. Its safety is only as strong as
- *      (1)'s completeness, which is stated immediately above as not
- *      provable from this repository alone.
- *   3. A non-zero exit is thrown as a plain `Error`, never retried
- *      against a different credential. This adapter has exactly one
- *      credential path and no fallback ladder — unlike
- *      anthropic/index.ts's OAuth-then-API-key chain, which is the one
- *      precedent in this library that already does the silent
- *      substitution this design exists to avoid.
- *   4. `chat()` REFUSES a caller-supplied `apiKey` outright, rather than
- *      silently ignoring it — a caller passing one would reasonably
- *      believe it took effect. It never can: BYOK has no meaning for a
- *      subprocess that authenticates as whatever is already logged in.
+ * PAYLOAD CONTRACT, confirmed against a real invocation (history in
+ * CHANGELOG.md, not repeated here). The reply text is a FLAT STRING under
+ * `result` — not `content`, not `text`, not nested. `stop_reason` is a
+ * real top-level field and maps directly to `ChatReply.stopReason`.
+ * `usage` carries `input_tokens` / `output_tokens` /
+ * `cache_read_input_tokens` / `cache_creation_input_tokens`. There is NO
+ * version field anywhere in the payload — `resolveCliVersion()`'s
+ * memoized `claude --version` spawn (below) is the ONLY source of
+ * `substrateVersion`. `is_error: true` CAN APPEAR ALONGSIDE A ZERO EXIT
+ * CODE; `chat()` checks both signals and refuses on either. A SINGLE
+ * CALL CAN INVOKE MORE THAN ONE MODEL — `modelUsage` may name several;
+ * `determinePrimaryModel()` (below) reports only the entry matching the
+ * top-level `usage` block as `TokenUsage.model`, but every entry is
+ * named in a `console.warn` when more than one is present, so a second
+ * model having run is never silently dropped.
  *
- * `--bare` WAS CONSIDERED AND REJECTED. It strips hooks, LSP, plugin
- * sync, attribution, auto-memory and CLAUDE.md auto-discovery —
- * genuinely the determinism this adapter wants — but its own `--help` is
- * explicit that under `--bare`, "Anthropic auth is strictly
- * ANTHROPIC_API_KEY or apiKeyHelper via --settings (OAuth and keychain
- * are never read)." That means `--bare` either fails outright with no
- * key present, or spends the purchased key when one is set in the
- * environment — the exact violation this adapter exists to prevent,
- * arrived at via the flag that looks most correct for determinism.
- * `--safe-mode` is used instead: per its own `--help`, it disables the
- * same class of customisation (CLAUDE.md, skills, plugins, hooks, MCP
- * servers, custom commands/agents) while leaving "Auth, model selection,
- * built-in tools, and permissions" to work normally — determinism
- * without losing the subscription route. (The CLI's exact auth
- * behaviour under `--safe-mode` is still relayed, not independently
- * observed — see the PR body for what remains open.)
+ * `total_cost_usd` / per-model `modelUsage[].costUSD` ARE PRESENT IN THE
+ * PAYLOAD AND DELIBERATELY NOT SURFACED ONTO `TokenUsage` — not recorded
+ * elsewhere in this repository, so kept here rather than cut. The
+ * payload gives no signal for whether that figure is billed or notional,
+ * so asserting either would be an unbacked claim; what this adapter DOES
+ * know for certain is that no billed credential was available to spend,
+ * because {@link allowedEnv} never lets one reach the child. A settled
+ * dual-cost design (billed vs. notional) is deliberate, separate,
+ * out-of-scope work (`decisions/023`, aigency-governance).
  *
- * `--tools ""` IS A POSITIVE DECLARATION, NOT AN OMISSION. Passing no
- * `--tools` flag at all might mean "use the CLI's default tool set" —
- * exactly the un-auditable absence the `route` field elsewhere in this
- * library was built to stop reproducing (the same shape of gap
- * `blankEnvVar` / `attemptSignals` closes on the governance side of this
- * work). `--tools ""` is stated, in the CLI's own `--help`, to disable
- * all tools — an explicit, checkable assertion that this reviewer call
- * had zero tool access, not an assumption resting on whatever the CLI
- * happens to default to.
+ * `chat()` ONLY in this first cut — no `chatWithTools` /
+ * `chatWithToolLoop`, matching `google/index.ts`'s own staged-rollout
+ * precedent; `--tools ""` (always passed) makes a tool loop moot for
+ * this adapter's purpose anyway, so a turn carrying a `tool_use` /
+ * `tool_result` block is refused rather than silently flattened.
  *
- * `--json-schema` WAS CONSIDERED AND REJECTED. It could enforce the
- * `VERDICT:` / `FINDING:` reply contract structurally instead of parsing
- * text — tempting, since it would remove a whole class of parsing risk.
- * Rejected because the Messages-API path (anthropic/index.ts) has no
- * equivalent mechanism: adopting it here would mean the two substrates
- * no longer run the same contract, and a cross-substrate comparison —
- * the entire point of building a second substrate at all — would
- * silently compare two different things while appearing to compare one.
- * Text out, parsed the same way on both substrates, is the point.
+ * `abortSignal` IS HONOURED AT ENTRY AND MID-CALL, not just an entry
+ * check: aborting while the spawned child is still running kills it
+ * (`child.kill()`) and rejects immediately with the signal's own reason,
+ * rather than letting the subprocess finish in the background. The
+ * memoized `claude --version` lookup is deliberately NOT wired to any
+ * one call's signal, since every caller shares it.
  *
- * `--output-format json`'S SHAPE IS NOW CONFIRMED, AGAINST A REAL
- * INVOCATION — the operator ran `claude -p ... --output-format json` and
- * relayed the raw payload verbatim. Recorded here in detail because an
- * earlier version of this file guessed at the shape, and the guess was
- * wrong in specific, correctable ways:
- *   - The reply text is a FLAT STRING under `result` — not `content`,
- *     not `text`, not nested. This adapter now reads exactly that field.
- *   - `stop_reason` is a real top-level field (`"end_turn"` observed)
- *     and maps directly to `ChatReply.stopReason`.
- *   - `usage` carries the same four token-count field names this file
- *     already expected (`input_tokens`, `output_tokens`,
- *     `cache_read_input_tokens`, `cache_creation_input_tokens`) — that
- *     part of the original guess held up.
- *   - There is NO version field anywhere in the payload. The
- *     speculative `version` / `cli_version` payload check this file
- *     used to carry has been removed entirely — it was a guess and the
- *     guess was wrong. `resolveCliVersion()`'s memoized `claude
- *     --version` spawn (below) is now the ONLY source of
- *     `substrateVersion`, confirmed necessary rather than merely
- *     defensive.
- *   - `is_error: true` CAN APPEAR ALONGSIDE A ZERO EXIT CODE. `chat()`
- *     checks both signals: a non-zero exit still refuses outright
- *     (unchanged), and a zero exit whose parsed payload carries
- *     `is_error: true` now ALSO refuses — exit code alone was not a
- *     sufficient failure signal.
- *
- * A SINGLE CALL CAN INVOKE MORE THAN ONE MODEL. The observed payload's
- * `modelUsage` carried usage for BOTH `claude-haiku-4-5-20251001` (896
- * input tokens) and `claude-opus-5[1m]` (281 input tokens) for one
- * trivial prompt — the CLI evidently does some internal work (routing,
- * title generation, or similar) on a smaller model alongside whichever
- * model actually answers. `TokenUsage.model` is a single field and
- * cannot carry two models, so `determinePrimaryModel()` (below) reports
- * the entry whose token counts match the top-level `usage` block — the
- * model that produced the visible reply. The OTHER model is not
- * silently dropped: whenever `modelUsage` names more than one model,
- * every entry is named in a `console.warn`, with its own token counts
- * and cost, so a second model having run stays visible even though only
- * one can be the reported `model`.
- *
- * COST FIGURES ARE PRESENT (`total_cost_usd`, and per-model
- * `modelUsage[].costUSD`) AND DELIBERATELY NOT SURFACED ONTO
- * `TokenUsage`. The payload does not state whether that number is
- * billed or notional — there is no route-equivalent field in it — so
- * asserting either would be a claim this adapter cannot back up. What
- * this adapter DOES know, independently and for certain: no billed
- * credential was available to spend, because the child's environment is
- * built from an allowlist (see `allowedEnv()`) — only `PATH`, `HOME`,
- * `TMPDIR` and the one named credential this file declares ever reach
- * it, so no billed-credential var (`ANTHROPIC_API_KEY`,
- * `ANTHROPIC_API_KEY_FILE`, `ANTHROPIC_AUTH_TOKEN`, or anything else the
- * caller's environment carries) was ever passed through in the first
- * place — so whatever this number represents, it was not charged to the
- * operator's billed key via any credential this codebase has verified
- * as live. Surfacing it
- * onto `TokenUsage` as a settled billed-vs-notional figure would
- * misrepresent it; that dual-cost design (`decisions/023`, in
- * aigency-governance) is deliberate, separate, out-of-scope work.
- *
- * THIS IS `chat()` ONLY — no `chatWithTools` / `chatWithToolLoop`,
- * matching `google/index.ts`'s own staged-rollout precedent for a first
- * cut of an adapter (its header: "v0.4.0 ships chat() only... follow in
- * a subsequent release"). A tool-calling loop over a subprocess boundary
- * is a materially larger design than this reviewer use case needs, and
- * `--tools ""` makes it moot for this adapter's actual purpose anyway.
- *
- * `ABORTSIGNAL` IS HONOURED, BOTH AT ENTRY AND MID-CALL — NOT JUST THE
- * ENTRY CHECK ALONE. Every other `chat()` in this package (`anthropic`,
- * `google`, `openai`, the OpenAI-compatible factory, `deepseek`) calls a
- * local `throwIfAborted(options.abortSignal)` at entry, honouring the
- * shared `ChatOptions.abortSignal` contract (see `index.ts`'s own doc
- * comment — aborting on an exceeded budget is its canonical use case).
- * This adapter does the same — but an entry-only check would satisfy the
- * letter of that contract while leaving the real failure in place: this
- * call spawns a subprocess that can run for the full duration of a
- * `claude -p` invocation, and an entry check alone does nothing once
- * that process is already running. So `runClaudeCli` also takes the
- * signal directly: if it aborts while the child is still alive, the
- * child is killed (`child.kill()`) and the call rejects immediately with
- * the signal's own reason — the same reason `throwIfAborted` would have
- * thrown, so a caller sees identical behaviour whether the abort landed
- * before the spawn or during it. The one-shot `claude --version` spawn
- * `resolveCliVersion()` makes is deliberately NOT wired to any signal: it
- * is memoized once per process and shared by every caller, so aborting
- * one caller's `chat()` call must not cancel a lookup every other caller
- * is also waiting on.
- *
- * `ONPROGRESS` IS ACCEPTED, NEVER INVOKED — A DISCLOSED LIMITATION, NOT
- * A SILENT ONE. `ChatOptions.onProgress` is part of the shared contract
- * every adapter's options type carries, and `anthropic/index.ts`
- * implements it by auto-injecting a `report_progress` tool the model can
- * call mid-turn. That mechanism cannot exist here without contradicting
- * this file's own design: `--tools ""` disables every tool for this
- * adapter, deliberately (see "`--tools ""` IS A POSITIVE DECLARATION"
- * above) — there is no tool a model could call to narrate progress
- * through. Independently, `--output-format json` (confirmed against a
- * real invocation, above) delivers ONE envelope at process exit, not an
- * incremental stream, so there is no partial signal to narrate from even
- * if a tool mechanism existed. Both of those are structural to the
- * design this adapter ships today, not gaps left for a later release —
- * so a caller supplying `onProgress` will never see it called, and
- * nothing here throws for supplying it. That is stated here, plainly,
- * rather than left for a reader to discover by noticing the callback
- * never fires.
+ * `onProgress` IS ACCEPTED, NEVER INVOKED. `--tools ""` disables every
+ * tool a `report_progress` mechanism would need, and `--output-format
+ * json` delivers one envelope at process exit, not a stream — there is
+ * no partial signal to narrate from either way. A caller supplying
+ * `onProgress` will never see it called; nothing here throws for
+ * supplying it.
  */
 
 import { spawn } from 'node:child_process';
@@ -261,7 +121,7 @@ const BASE_ENV_NAMES = ['PATH', 'HOME', 'TMPDIR'] as const;
  * because this adapter isn't wrapping "any subprocess" that a caller
  * configures — it is built around exactly one credential mechanism: this
  * file already asserts `route` as the constant `'subscription-oauth'`
- * (see the file header, REFUSE-NEVER-SUBSTITUTE point 2), specifically so
+ * (see the file header's CREDENTIAL CONTRACT paragraph), specifically so
  * a caller can use a Claude subscription rather than a billed key.
  * `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) is the CLI's own
  * documented non-interactive mechanism for that credential — the same
@@ -379,15 +239,14 @@ function joinTurns(turns: ChatOptions['turns']): string {
 }
 
 /** Per-model usage entry inside `--output-format json`'s `modelUsage` map —
- * confirmed real, see the file header's "A SINGLE CALL CAN INVOKE MORE
- * THAN ONE MODEL". */
+ * confirmed real, see the file header's PAYLOAD CONTRACT paragraph. */
 interface ModelUsageEntry {
   inputTokens?: number;
   outputTokens?: number;
   cacheReadInputTokens?: number;
   cacheCreationInputTokens?: number;
   /** Present, and deliberately not surfaced onto TokenUsage — see the
-   * file header's "COST FIGURES ARE PRESENT" section. */
+   * file header's `total_cost_usd` / `costUSD` paragraph. */
   costUSD?: number;
   /** The canonical model id (e.g. `claude-opus-5`), distinct from the
    * `modelUsage` map's own key (e.g. `claude-opus-5[1m]`, which carries a
@@ -428,13 +287,13 @@ interface ClaudeCliJsonResult {
     cache_read_input_tokens?: number;
     cache_creation_input_tokens?: number;
   };
-  /** Per-model usage breakdown — see the file header's "A SINGLE CALL CAN
-   * INVOKE MORE THAN ONE MODEL". Keyed by the model id as the CLI names
+  /** Per-model usage breakdown — see the file header's PAYLOAD CONTRACT
+   * paragraph. Keyed by the model id as the CLI names
    * it internally (which may carry a suffix like `[1m]`); prefer each
    * entry's own `canonicalModel` field over the key. */
   modelUsage?: Record<string, ModelUsageEntry>;
   /** Present, and deliberately not surfaced onto TokenUsage — see the
-   * file header's "COST FIGURES ARE PRESENT" section. */
+   * file header's `total_cost_usd` / `costUSD` paragraph. */
   total_cost_usd?: number;
 }
 
@@ -466,8 +325,8 @@ interface PrimaryModelResult {
 
 /**
  * Decide which single model to report as {@link TokenUsage.model} when
- * `modelUsage` may name more than one — see the file header's "A SINGLE
- * CALL CAN INVOKE MORE THAN ONE MODEL". Matches the entry whose token
+ * `modelUsage` may name more than one — see the file header's PAYLOAD
+ * CONTRACT paragraph. Matches the entry whose token
  * counts equal the top-level `usage` block (the model that actually
  * produced the reply text); falls back to the first entry if no exact
  * match is found, since at least one real model id is still better than
@@ -552,8 +411,8 @@ function shapeUsage(
   model: string,
   substrateVersion: string | undefined
 ): TokenUsage {
-  // Constant, never computed — see the file header's "REFUSE, NEVER
-  // SUBSTITUTE" point 2 for why this is safe to assert rather than derive.
+  // Constant, never computed — see the file header's CREDENTIAL CONTRACT
+  // paragraph for why this is safe to assert rather than derive.
   const route: CredentialRoute = 'subscription-oauth';
   return {
     provider: PROVIDER,
@@ -635,8 +494,8 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
  * this seam without reimplementing stream plumbing per test. Also used by
  * `resolveCliVersion()` for the (memoized, at most once per process)
  * `--version` invocation — which never passes `signal` (see the file
- * header's "ABORTSIGNAL IS HONOURED" section for why a shared, memoized
- * lookup must not be cancellable by any one caller's abort).
+ * header's `abortSignal` paragraph for why a shared, memoized lookup
+ * must not be cancellable by any one caller's abort).
  *
  * When `signal` aborts — whether before this function is even called, or
  * while the spawned child is still running — the child is killed
@@ -702,7 +561,8 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
   }
   throwIfAborted(options.abortSignal);
   if (options.apiKey != null) {
-    // Refused, not silently ignored — see the file header, point 4.
+    // Refused, not silently ignored — see the file header's CREDENTIAL
+    // CONTRACT paragraph.
     throw new Error(
       "claudeCli.chat() does not accept apiKey — it always uses the CLI's own logged-in " +
         'subscription session, never a supplied credential.'
@@ -712,8 +572,8 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
   const args = buildArgs(options.systemPrompt);
   const input = joinTurns(options.turns);
   // options.onProgress is accepted per the shared ChatOptions contract but
-  // never invoked — see the file header's "ONPROGRESS IS ACCEPTED, NEVER
-  // INVOKED" section for why this is a disclosed limitation, not a gap.
+  // never invoked — see the file header's `onProgress` paragraph for why
+  // this is a disclosed limitation, not a gap.
 
   let spawned: SpawnResult;
   try {
@@ -727,7 +587,7 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
       throw err;
     }
     // Spawn-level failure (e.g. claude not on PATH). No fallback — see the
-    // file header's "REFUSE, NEVER SUBSTITUTE".
+    // file header's CREDENTIAL CONTRACT paragraph.
     throw new Error(
       `claudeCli.chat(): could not run the claude CLI — ${err instanceof Error ? err.message : String(err)}`
     );
