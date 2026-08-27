@@ -36,8 +36,13 @@ SDK does not enter your bundle.
   catalog or connection registry — `resolveModel`/`resolveModelByTerm` can never
   silently substitute it, a caller wanting this substrate imports and calls it
   directly. `chat()` only. No SDK dependency — it spawns a subprocess, and
-  billed-credential env vars are stripped from that subprocess's environment
-  before every invocation.
+  that subprocess's environment is built from an allowlist — only `PATH`,
+  `HOME`, `TMPDIR`, and the CLI's own subscription-credential env var
+  (`CLAUDE_CODE_OAUTH_TOKEN`) ever reach it; nothing else in the caller's
+  environment, billed credential or not, is passed through. Replaced an
+  earlier denylist that had already missed one live credential vector
+  (`ANTHROPIC_AUTH_TOKEN`) in an earlier version — a denylist can only
+  exclude names someone thought of; the allowlist doesn't need to.
 
 Every provider in the matrix (Anthropic, Google, OpenAI, DeepSeek, SambaNova,
 Mistral) can now drive the tool loop. `claude-cli` is a separate, deliberately
