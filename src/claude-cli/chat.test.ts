@@ -10,7 +10,14 @@ vi.mock('node:child_process', () => ({
 }));
 
 // Import AFTER vi.mock so the mocked spawn is the one captured.
-import { chat, PROVIDER, resetClaudeCliVersionCacheForTests } from './index.js';
+import {
+  ALLOWED_ENV_VARS,
+  allowedEnv,
+  chat,
+  CLAUDE_CLI_CREDENTIAL_ENV_VAR,
+  PROVIDER,
+  resetClaudeCliVersionCacheForTests,
+} from './index.js';
 import { setModelSpanSink, type ModelSpan, type TokenUsage } from '../index.js';
 
 /** A fake child process: stdout/stderr are EventEmitters (matching the
@@ -41,19 +48,36 @@ function fakeChild() {
   return { child, written };
 }
 
-/** Drive a fake child through a normal exit: emit stdout data, then close. */
+/** Drive a fake child through a normal exit: emit stdout data, then close.
+ * Always closes with a `null` signal — a real Node close event carries
+ * `(exitCode, signal)` with exactly one of the two non-null, and every
+ * ordinary exit in this suite is the exit-code half of that pair. */
 function succeed(child: ReturnType<typeof fakeChild>['child'], stdout: string, exitCode = 0) {
   queueMicrotask(() => {
     child.stdout.emit('data', Buffer.from(stdout));
-    child.emit('close', exitCode);
+    child.emit('close', exitCode, null);
   });
 }
 
 function fail(child: ReturnType<typeof fakeChild>['child'], stderr: string, exitCode = 1) {
   queueMicrotask(() => {
     child.stderr.emit('data', Buffer.from(stderr));
-    child.emit('close', exitCode);
+    child.emit('close', exitCode, null);
   });
+}
+
+/** Drive a fake child through a signal-terminated close — the shape
+ * `describeExit` (index.ts) exists to report distinguishably from a bare
+ * null exit code. Used directly by the exit-signal tests below rather
+ * than through `queueCall`/`queueFailingCall`, since neither of those
+ * shapes a signal-terminated close. */
+function queueClosingWith(exitCode: number | null, signal: NodeJS.Signals | null) {
+  const { child, written } = fakeChild();
+  mockSpawn.mockImplementationOnce(() => {
+    queueMicrotask(() => child.emit('close', exitCode, signal));
+    return child;
+  });
+  return { child, written };
 }
 
 /**
@@ -187,28 +211,82 @@ describe('claudeCli.chat', () => {
     expect(written.join('')).toBe('## user\nfirst\n\n## assistant\nreply');
   });
 
-  it('strips ANTHROPIC_API_KEY from the child environment even when set in the parent', async () => {
+  it('spawns claude with exactly the allowlisted environment, never a copy of the full parent env', async () => {
     process.env.ANTHROPIC_API_KEY = 'sk-should-never-reach-the-child';
     mockSuccessfulCall(JSON.stringify({ result: 'ok' }));
 
     await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] });
 
     const spawnOptions = mockSpawn.mock.calls[0][2] as { env: Record<string, string | undefined> };
+    expect(spawnOptions.env).toEqual(allowedEnv(process.env));
     expect(spawnOptions.env.ANTHROPIC_API_KEY).toBeUndefined();
   });
 
-  it('strips ANTHROPIC_AUTH_TOKEN and the Bedrock/Vertex routing toggles from the child environment — client.ts already treats the first as a live credential vector; the other two are a precautionary strip against CLI-reported enterprise routing this repository cannot independently verify', async () => {
-    process.env.ANTHROPIC_AUTH_TOKEN = 'sk-should-never-reach-the-child';
-    process.env.CLAUDE_CODE_USE_BEDROCK = '1';
-    process.env.CLAUDE_CODE_USE_VERTEX = '1';
-    mockSuccessfulCall(JSON.stringify({ result: 'ok' }));
+  describe('allowedEnv', () => {
+    // A realistic caller environment: the one credential this adapter
+    // reads, the base names every process needs, and a pile of things it
+    // must never see — the operator's own billed key, an unrelated cloud
+    // credential, an SSH agent socket, a CI token. None of
+    // PATH/HOME/TMPDIR/CLAUDE_CODE_OAUTH_TOKEN is what this block is
+    // pinning; UNDECLARED is — this is the mutation target for the
+    // denylist-to-allowlist fix: a version that merely names its
+    // permitted set but still spreads the source through underneath has
+    // every one of these still leaking.
+    const CALLER_ENV: NodeJS.ProcessEnv = {
+      PATH: '/usr/bin:/bin',
+      HOME: '/home/it',
+      TMPDIR: '/tmp',
+      CLAUDE_CODE_OAUTH_TOKEN: 'oauth-should-reach-the-child',
+      ANTHROPIC_API_KEY: 'sk-should-never-reach-the-child',
+      ANTHROPIC_API_KEY_FILE: '/path/should-never-reach-the-child',
+      ANTHROPIC_AUTH_TOKEN: 'sk-should-never-reach-the-child',
+      CLAUDE_CODE_USE_BEDROCK: '1',
+      CLAUDE_CODE_USE_VERTEX: '1',
+      AWS_SECRET_ACCESS_KEY: 'aws-should-never-reach-the-child',
+      SSH_AUTH_SOCK: '/tmp/ssh-agent.sock',
+      GITHUB_TOKEN: 'gh-should-never-reach-the-child',
+    };
 
-    await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] });
+    it('carries every ALLOWED_ENV_VARS name that is present in the source', () => {
+      const child = allowedEnv(CALLER_ENV);
+      for (const key of ALLOWED_ENV_VARS) {
+        expect(child[key]).toBe(CALLER_ENV[key]);
+      }
+    });
 
-    const spawnOptions = mockSpawn.mock.calls[0][2] as { env: Record<string, string | undefined> };
-    expect(spawnOptions.env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
-    expect(spawnOptions.env.CLAUDE_CODE_USE_BEDROCK).toBeUndefined();
-    expect(spawnOptions.env.CLAUDE_CODE_USE_VERTEX).toBeUndefined();
+    it('does not let an undeclared variable in the source reach the child, however sensitive — including every name the old denylist used to strip by name', () => {
+      const child = allowedEnv(CALLER_ENV);
+      expect(child.ANTHROPIC_API_KEY).toBeUndefined();
+      expect(child.ANTHROPIC_API_KEY_FILE).toBeUndefined();
+      expect(child.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
+      expect(child.CLAUDE_CODE_USE_BEDROCK).toBeUndefined();
+      expect(child.CLAUDE_CODE_USE_VERTEX).toBeUndefined();
+      expect(child.AWS_SECRET_ACCESS_KEY).toBeUndefined();
+      expect(child.SSH_AUTH_SOCK).toBeUndefined();
+      expect(child.GITHUB_TOKEN).toBeUndefined();
+      // Nothing beyond ALLOWED_ENV_VARS reached the child at all — not just
+      // the eight named above.
+      expect(Object.keys(child).sort()).toEqual([...ALLOWED_ENV_VARS].sort());
+    });
+
+    it('carries the subscription credential by name — CLAUDE_CODE_OAUTH_TOKEN specifically', () => {
+      expect(ALLOWED_ENV_VARS).toContain(CLAUDE_CLI_CREDENTIAL_ENV_VAR);
+      expect(allowedEnv(CALLER_ENV)[CLAUDE_CLI_CREDENTIAL_ENV_VAR]).toBe(
+        CALLER_ENV[CLAUDE_CLI_CREDENTIAL_ENV_VAR]
+      );
+    });
+
+    it('omits an allowed name the source simply does not have, rather than inventing it', () => {
+      const child = allowedEnv({ PATH: '/usr/bin' });
+      expect(child.HOME).toBeUndefined();
+      expect(child[CLAUDE_CLI_CREDENTIAL_ENV_VAR]).toBeUndefined();
+      expect(child.PATH).toBe('/usr/bin');
+    });
+
+    it('leaves the original object untouched — a copy, not a mutation', () => {
+      allowedEnv(CALLER_ENV);
+      expect(CALLER_ENV.ANTHROPIC_API_KEY).toBe('sk-should-never-reach-the-child');
+    });
   });
 
   it('reports route as the constant subscription-oauth', async () => {
@@ -287,6 +365,54 @@ describe('claudeCli.chat', () => {
     await expect(
       chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] })
     ).rejects.toThrow(/exited with code 1.*auth failed: no session/);
+  });
+
+  // THE MUTATION TARGET for the discarded-signal fix. Before it, `close`'s
+  // second argument was never read and `SpawnResult` had no `signal`
+  // field at all — so a SIGKILL-terminated run and a bare `exitCode: null`
+  // carrying no signal were reported IDENTICALLY, both as "exited with
+  // code null". This pins that the two are now told apart.
+  /** The error a call rejected with — restructured to avoid casting across
+   * the `ChatReply | Error` union `.catch()`'s callback return type
+   * produces (that cast is what typecheck rejected: `error: Error`
+   * annotated against a `.catch()` chain that resolves to the wider
+   * union). Awaiting inside a try/catch instead means `error` is typed
+   * from the `catch` clause itself, not asserted past the outer union.
+   * Throws if the call resolves rather than rejects, so a regression that
+   * stops throwing fails this test rather than reading `error` as
+   * `undefined`. */
+  async function rejectionOf(promise: Promise<unknown>): Promise<Error> {
+    try {
+      await promise;
+    } catch (e) {
+      return e as Error;
+    }
+    throw new Error('expected the call to reject, and it resolved');
+  }
+
+  describe('exit signal', () => {
+    it('reports a signal-terminated close distinguishably from a null exit carrying no signal', async () => {
+      queueClosingWith(null, 'SIGKILL');
+      await expect(
+        chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] })
+      ).rejects.toThrow(/killed by signal SIGKILL/);
+
+      queueClosingWith(null, null);
+      const error = await rejectionOf(
+        chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] })
+      );
+      expect(error.message).toContain('exited with code null');
+      expect(error.message).not.toMatch(/signal/i);
+    });
+
+    it('does not mention a signal when the process exited normally with a non-zero code', async () => {
+      queueFailingCall('boom', 1);
+      const error = await rejectionOf(
+        chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] })
+      );
+      expect(error.message).toContain('exited with code 1');
+      expect(error.message).not.toMatch(/signal/i);
+    });
   });
 
   it('throws, naming the spawn failure, when claude cannot be run at all (e.g. ENOENT)', async () => {
