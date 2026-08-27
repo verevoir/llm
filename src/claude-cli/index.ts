@@ -64,10 +64,13 @@
  * out-of-scope work (`decisions/023`, aigency-governance).
  *
  * `chat()` ONLY in this first cut — no `chatWithTools` /
- * `chatWithToolLoop`, matching `google/index.ts`'s own staged-rollout
- * precedent; `--tools ""` (always passed) makes a tool loop moot for
- * this adapter's purpose anyway, so a turn carrying a `tool_use` /
- * `tool_result` block is refused rather than silently flattened.
+ * `chatWithToolLoop`. `/google` shipped the same way at its own v0.4.0
+ * release (chat() only), then added chatWithTools/chatWithToolLoop in
+ * 0.13.0 — cited here as HISTORICAL precedent for a first cut, not as
+ * `/google`'s current state, which already has both. `--tools ""`
+ * (always passed) makes a tool loop moot for this adapter's purpose
+ * anyway, so a turn carrying a `tool_use` / `tool_result` block is
+ * refused rather than silently flattened.
  *
  * `abortSignal` IS HONOURED AT ENTRY AND MID-CALL, not just an entry
  * check: aborting while the spawned child is still running kills it
