@@ -15,16 +15,19 @@ import { setModelSpanSink, type ModelSpan, type TokenUsage } from '../index.js';
 
 /** A fake child process: stdout/stderr are EventEmitters (matching the
  * real Readable stream .on('data', ...) shape this adapter reads), stdin
- * is a stub write()/end(), and the child itself is an EventEmitter for
- * 'error'/'close'. */
+ * is a stub write()/end(), `kill` is a stub so abort tests can assert the
+ * subprocess was actually asked to terminate, and the child itself is an
+ * EventEmitter for 'error'/'close'. */
 function fakeChild() {
   const child = new EventEmitter() as EventEmitter & {
     stdout: EventEmitter;
     stderr: EventEmitter;
     stdin: { write: (s: string) => void; end: () => void };
+    kill: () => void;
   };
   child.stdout = new EventEmitter();
   child.stderr = new EventEmitter();
+  child.kill = vi.fn();
   const written: string[] = [];
   child.stdin = {
     write: (s: string) => {
@@ -321,7 +324,61 @@ describe('claudeCli.chat', () => {
     expect(mockSpawn).not.toHaveBeenCalled();
   });
 
-  // ── The real, observed --output-format json envelope ──────────────────
+  // ── abortSignal ───────────────────────────────────────────────────────
+  // Every other chat() in this package (anthropic, google, openai, the
+  // OpenAI-compatible factory, deepseek) calls throwIfAborted(options
+  // .abortSignal) at entry, honouring the shared ChatOptions.abortSignal
+  // contract (see index.ts's own doc comment — aborting on an exceeded
+  // budget is its canonical use case). This adapter previously never
+  // referenced options.abortSignal at all: an abort mid-call did nothing
+  // and the spawned `claude` process ran to completion regardless. Both
+  // halves of the fix are covered below — the entry check, AND the
+  // wiring that actually terminates a still-running child.
+
+  describe('abortSignal', () => {
+    it('throws the signal reason before spawning, when the signal is already aborted at entry', async () => {
+      const controller = new AbortController();
+      controller.abort(new Error('budget exceeded'));
+
+      await expect(
+        chat({
+          systemPrompt: 'sys',
+          turns: [{ role: 'user', content: 'q' }],
+          abortSignal: controller.signal,
+        })
+      ).rejects.toThrow('budget exceeded');
+      expect(mockSpawn).not.toHaveBeenCalled();
+    });
+
+    it('kills the spawned child and rejects with the signal reason when aborted while claude is still running', async () => {
+      const { child } = fakeChild();
+      mockSpawn.mockImplementationOnce(() => child);
+      // Deliberately never emits 'close' or 'error' — as far as this test
+      // is concerned, the process stays "running" for its entire duration.
+      // This is the exact case the finding named: an abort while the call
+      // has NOT naturally finished, as opposed to one that arrives after.
+
+      const controller = new AbortController();
+      // chat() is async but runs synchronously up to its first internal
+      // await (on runClaudeCli's own promise) — so by the time this call
+      // returns control here, spawn() has already been invoked and the
+      // abort listener already attached. No manual tick is needed before
+      // aborting; if the wiring under test were missing, this would hang
+      // rather than resolve, which is exactly the failure this test
+      // exists to catch.
+      const chatPromise = chat({
+        systemPrompt: 'sys',
+        turns: [{ role: 'user', content: 'q' }],
+        abortSignal: controller.signal,
+      });
+      controller.abort(new Error('aborted mid-call'));
+
+      await expect(chatPromise).rejects.toThrow('aborted mid-call');
+      expect(child.kill).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // ── The real, observed --output-format json envelope ───────────────────
   // Everything in this block is against the actual payload the operator
   // relayed from a real `claude -p ... --output-format json` run — see
   // index.ts's file header for the full reasoning behind each decision.
@@ -430,7 +487,7 @@ describe('claudeCli.chat', () => {
     });
   });
 
-  // ── substrateVersion ────────────────────────────────────────────────
+  // ── substrateVersion ────────────────────────────────────────────
   // The confirmed real payload never carries a version field (see index.ts's
   // file header) — this memoized `claude --version` spawn is the only
   // source of substrateVersion, not a fallback for a payload path that
