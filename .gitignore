@@ -5,3 +5,9 @@ dist/
 .env
 .env.local
 coverage/
+
+# Scratch files left by ad-hoc probing of what this belt/branch can write
+# (e.g. .probe-scratch.txt, added by commits 01c6ed2/646445a while testing
+# write capability on this branch). Untracked here so the pattern can't
+# walk back in the same way — see track-only-intended-files.
+.probe-*
