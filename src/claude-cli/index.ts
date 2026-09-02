@@ -85,9 +85,55 @@
  * no partial signal to narrate from either way. A caller supplying
  * `onProgress` will never see it called; nothing here throws for
  * supplying it.
+ *
+ * MODEL PINNING. `chat()` accepts `options.model` — an exact model id,
+ * passed straight through as `--model <id>` — so a caller that must
+ * compare this substrate against the direct API path (or across two
+ * calls, e.g. a governance review of the same commit through both
+ * transports) can force both to answer with the identical model rather
+ * than each one's own default/class resolution silently diverging. See
+ * `ChatOptions.model`'s own doc comment in the core for the full
+ * rationale. `--model` is documented in Claude Code's own `--help` as
+ * accepting either a class alias ("sonnet", "opus") or a full model id
+ * ("claude-sonnet-4-20250514") — that documentation is what this flag
+ * rests on; unlike the flags confirmed above against a real captured
+ * payload, this one has NOT independently been re-verified against a
+ * live invocation by this repository, and is stated here as relayed,
+ * not confirmed, in the same spirit as the Bedrock/Vertex strips this
+ * file used to carry. Omitting `options.model` leaves behaviour exactly
+ * as before — the local install's own default, unpinned.
+ *
+ * `options.maxTokens` IS ACCEPTED, NEVER USED — disclosed rather than
+ * silently ignored. There is no confirmed `claude -p` flag for an
+ * output-token ceiling (unlike `--model`, nothing in the CLI's own
+ * `--help` documents one), so this adapter has nothing to pass it to; a
+ * caller relying on `maxTokens` to avoid a truncated reply on this
+ * substrate has no lever here and should know that, not discover it by
+ * the field quietly doing nothing.
+ *
+ * ISOLATION FROM PROJECT/LOCAL CONFIGURATION, on top of `--safe-mode`'s
+ * own documented disabling of CLAUDE.md/skills/plugins/hooks/MCP
+ * servers/custom commands (see the CREDENTIAL CONTRACT paragraph
+ * above). Two more, deliberate: `--strict-mcp-config` is passed on
+ * every invocation, so even if `--safe-mode`'s MCP suppression turns
+ * out narrower in practice than its `--help` states, no MCP server from
+ * any configuration source reaches this call — only servers passed via
+ * an explicit `--mcp-config` flag would, and this adapter never passes
+ * that flag, so the effective set is always empty. And the spawn's
+ * `cwd` (see `runClaudeCli`) is set explicitly to the platform temp
+ * directory rather than inherited from whatever directory the calling
+ * process happens to be running in — a project's `CLAUDE.md` /
+ * `.mcp.json` live relative to cwd, and a governance review process's
+ * cwd is typically the very repository it is reviewing, which is
+ * precisely the content this call must not see. Both are defense-in-
+ * depth alongside `--safe-mode`, not a claim that `--safe-mode` alone
+ * was proven insufficient — this repository has not independently
+ * re-confirmed `--safe-mode`'s own documented MCP/CLAUDE.md suppression
+ * by direct observation, so it is not relied on alone.
  */
 
 import { spawn } from 'node:child_process';
+import { tmpdir } from 'node:os';
 import { fireUsageHook } from '../audit-hook.js';
 import type { ChatOptions, ChatReply, CredentialRoute, TokenUsage, TurnContent } from '../index.js';
 
@@ -187,19 +233,27 @@ export function allowedEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 }
 
 /** Flags applied to every invocation. See the file header for why each one
- * is here, and why `--bare` / `--json-schema` are not used instead. */
-function buildArgs(systemPrompt: string): string[] {
-  return [
+ * is here, and why `--bare` / `--json-schema` are not used instead.
+ * `--model` is appended only when `model` is supplied — see the file
+ * header's MODEL PINNING paragraph; omitting it leaves the CLI's own
+ * default model selection untouched. */
+function buildArgs(systemPrompt: string, model: string | undefined): string[] {
+  const args = [
     '-p',
     '--system-prompt',
     systemPrompt,
     '--tools',
     '',
+    '--strict-mcp-config',
     '--output-format',
     'json',
     '--no-session-persistence',
     '--safe-mode',
   ];
+  if (model) {
+    args.push('--model', model);
+  }
+  return args;
 }
 
 /**
@@ -513,7 +567,12 @@ function runClaudeCli(args: string[], input: string, signal?: AbortSignal): Prom
       return;
     }
 
-    const child = spawn('claude', args, { env: allowedEnv(process.env) });
+    // cwd is set explicitly to the platform temp directory, never
+    // inherited from the caller's own working directory — see the file
+    // header's ISOLATION paragraph: a project CLAUDE.md/.mcp.json live
+    // relative to cwd, and the caller's cwd is often the very repository
+    // this call must not see into.
+    const child = spawn('claude', args, { env: allowedEnv(process.env), cwd: tmpdir() });
     let stdout = '';
     let stderr = '';
     let settled = false;
@@ -572,11 +631,13 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
     );
   }
 
-  const args = buildArgs(options.systemPrompt);
+  const args = buildArgs(options.systemPrompt, options.model);
   const input = joinTurns(options.turns);
   // options.onProgress is accepted per the shared ChatOptions contract but
   // never invoked — see the file header's `onProgress` paragraph for why
-  // this is a disclosed limitation, not a gap.
+  // this is a disclosed limitation, not a gap. options.maxTokens is
+  // likewise accepted and never used — see the file header's MODEL
+  // PINNING / maxTokens paragraph.
 
   let spawned: SpawnResult;
   try {

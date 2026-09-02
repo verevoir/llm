@@ -187,7 +187,12 @@ async function streamedCall(
 // 16384 is the next escalation after 8192 hit the cap on a real
 // large-synthesis output. Anthropic Opus 4.7 supports 16k output
 // tokens; raising the cap doesn't increase cost unless the response
-// actually grows.
+// actually grows. This is the DEFAULT, not a ceiling on what a caller
+// can ask for — a caller with its own evidence of needing more (e.g.
+// aigency-governance's review panel, raised to 65536 after this exact
+// default truncated four of five lenses on one real diff) can override
+// it per call via ChatOptions.maxTokens, rather than every caller
+// silently inheriting whatever number lives here.
 const MAX_TOKENS = 16384;
 
 // The `report_progress` tool, auto-injected when the caller provides
@@ -265,6 +270,8 @@ function buildRequest({
   tools,
   cacheConversation = false,
   oauth = false,
+  model,
+  maxTokens,
 }: {
   modelClass: ModelClass;
   systemPrompt: string;
@@ -279,6 +286,13 @@ function buildRequest({
    * Anthropic accepts only for Claude-Code-shaped requests — so the Claude-Code
    * identity is prepended as the first system block. */
   oauth?: boolean;
+  /** Exact model id to send, overriding the catalog's `models[modelClass]`
+   * resolution — see {@link ChatOptions.model}'s own doc comment for why
+   * this exists and when to reach for it. `undefined` uses the catalog. */
+  model?: string;
+  /** Overrides {@link MAX_TOKENS} for this call — see
+   * {@link ChatOptions.maxTokens}. `undefined` uses the adapter default. */
+  maxTokens?: number;
 }): Record<string, unknown> {
   // Render order is tools → system → messages, so the breakpoint on
   // the (single) system block caches the tools + system prefix
@@ -288,8 +302,8 @@ function buildRequest({
   // cache breakpoint stays on the prompt block so identity + prompt cache together.
   const promptBlock = { type: 'text' as const, text: systemPrompt, cache_control: EPHEMERAL_CACHE };
   const base: Record<string, unknown> = {
-    model: models[modelClass],
-    max_tokens: MAX_TOKENS,
+    model: model ?? models[modelClass],
+    max_tokens: maxTokens ?? MAX_TOKENS,
     system: oauth
       ? [{ type: 'text' as const, text: oauthSystemIdentity() }, promptBlock]
       : [promptBlock],
@@ -458,11 +472,12 @@ function delay(ms: number): Promise<void> {
 function shapeUsage(
   raw: StreamedResult['rawUsage'],
   direction: ModelClass,
-  route: CredentialRoute
+  route: CredentialRoute,
+  modelId: string
 ): TokenUsage {
   return {
     provider: PROVIDER,
-    model: models[direction],
+    model: modelId,
     direction,
     route,
     ...raw,
@@ -504,6 +519,11 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
   }
   throwIfAborted(options.abortSignal);
   const modelClass: ModelClass = options.modelClass ?? 'reasoning';
+  // See ChatOptions.model's doc comment: an explicit id wins over the
+  // catalog's class resolution, so two transports pinned to the same
+  // `model` answer with the same model regardless of what each one's
+  // class table currently maps to.
+  const modelId = options.model ?? models[modelClass];
 
   // A model given the report_progress tool (auto-injected when
   // onProgress is set) may end a turn having called ONLY that tool,
@@ -535,6 +555,8 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
           // A continuation re-sends the growing history; cache its prefix.
           cacheConversation: attempt > 0,
           oauth,
+          model: options.model,
+          maxTokens: options.maxTokens,
         }),
       options.onProgress,
       options.onRetry
@@ -547,7 +569,7 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
     aggregate.cacheReadInputTokens += streamed.rawUsage.cacheReadInputTokens;
     await fireUsageHook(
       options.onUsage,
-      shapeUsage(streamed.rawUsage, modelClass, streamed.route),
+      shapeUsage(streamed.rawUsage, modelClass, streamed.route, modelId),
       'anthropic.chat'
     );
 
@@ -559,7 +581,7 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
       }
       return {
         content: streamed.text,
-        usage: shapeUsage(aggregate, modelClass, combineRoutes(routesSeen)),
+        usage: shapeUsage(aggregate, modelClass, combineRoutes(routesSeen), modelId),
         stopReason: streamed.stopReason,
       };
     }
@@ -616,6 +638,7 @@ export async function chatWithTools(options: ChatWithToolsOptions): Promise<Chat
   }
   throwIfAborted(options.abortSignal);
   const modelClass: ModelClass = options.modelClass ?? 'reasoning';
+  const modelId = options.model ?? models[modelClass];
   const augmentedTools = options.onProgress
     ? [...options.tools, REPORT_PROGRESS_TOOL]
     : options.tools;
@@ -629,6 +652,8 @@ export async function chatWithTools(options: ChatWithToolsOptions): Promise<Chat
         turns: options.turns,
         tools: augmentedTools,
         oauth,
+        model: options.model,
+        maxTokens: options.maxTokens,
       }),
     options.onProgress,
     options.onRetry
@@ -640,11 +665,11 @@ export async function chatWithTools(options: ChatWithToolsOptions): Promise<Chat
     streamed.stopReason !== 'tool_use'
   ) {
     console.warn(
-      `anthropic.chatWithTools: response stop_reason=${streamed.stopReason} (model=${models[modelClass]}, output_tokens=${streamed.rawUsage.outputTokens})`
+      `anthropic.chatWithTools: response stop_reason=${streamed.stopReason} (model=${modelId}, output_tokens=${streamed.rawUsage.outputTokens})`
     );
   }
 
-  const usage = shapeUsage(streamed.rawUsage, modelClass, streamed.route);
+  const usage = shapeUsage(streamed.rawUsage, modelClass, streamed.route, modelId);
   await fireUsageHook(options.onUsage, usage, 'anthropic.chatWithTools');
 
   return {
@@ -680,6 +705,7 @@ export async function chatWithToolLoop(
     throw new Error('anthropic.chatWithToolLoop() requires at least one tool');
   }
   const modelClass: ModelClass = options.modelClass ?? 'reasoning';
+  const modelId = options.model ?? models[modelClass];
   const augmentedTools = options.onProgress
     ? [...options.tools, REPORT_PROGRESS_TOOL]
     : options.tools;
@@ -726,6 +752,8 @@ export async function chatWithToolLoop(
           // from cache instead of reprocessing it.
           cacheConversation: true,
           oauth,
+          model: options.model,
+          maxTokens: options.maxTokens,
         }),
       options.onProgress,
       options.onRetry
@@ -734,7 +762,7 @@ export async function chatWithToolLoop(
     routesSeen.push(streamed.route);
 
     // Per-iteration usage hook + aggregate tally.
-    const iterUsage = shapeUsage(streamed.rawUsage, modelClass, streamed.route);
+    const iterUsage = shapeUsage(streamed.rawUsage, modelClass, streamed.route, modelId);
     aggregateUsage.inputTokens += iterUsage.inputTokens;
     aggregateUsage.outputTokens += iterUsage.outputTokens;
     aggregateUsage.cacheCreationInputTokens += iterUsage.cacheCreationInputTokens;
@@ -760,7 +788,7 @@ export async function chatWithToolLoop(
         toolUses: allToolUses,
         toolResults: allToolResults,
         iterations: iteration,
-        usage: shapeUsage(aggregateUsage, modelClass, combineRoutes(routesSeen)),
+        usage: shapeUsage(aggregateUsage, modelClass, combineRoutes(routesSeen), modelId),
       };
     }
 
@@ -828,12 +856,14 @@ export async function chatWithToolLoop(
           tools: [], // no tools → the model must answer in text
           cacheConversation: true,
           oauth,
+          model: options.model,
+          maxTokens: options.maxTokens,
         }),
       options.onProgress,
       options.onRetry
     );
     routesSeen.push(finalStreamed.route);
-    const finalUsage = shapeUsage(finalStreamed.rawUsage, modelClass, finalStreamed.route);
+    const finalUsage = shapeUsage(finalStreamed.rawUsage, modelClass, finalStreamed.route, modelId);
     aggregateUsage.inputTokens += finalUsage.inputTokens;
     aggregateUsage.outputTokens += finalUsage.outputTokens;
     aggregateUsage.cacheCreationInputTokens += finalUsage.cacheCreationInputTokens;
@@ -844,7 +874,7 @@ export async function chatWithToolLoop(
       toolUses: allToolUses,
       toolResults: allToolResults,
       iterations: iteration,
-      usage: shapeUsage(aggregateUsage, modelClass, combineRoutes(routesSeen)),
+      usage: shapeUsage(aggregateUsage, modelClass, combineRoutes(routesSeen), modelId),
     };
   } catch (err) {
     console.warn('anthropic.chatWithToolLoop: final synthesis call failed', err);
@@ -853,7 +883,7 @@ export async function chatWithToolLoop(
       toolUses: allToolUses,
       toolResults: allToolResults,
       iterations: iteration,
-      usage: shapeUsage(aggregateUsage, modelClass, combineRoutes(routesSeen)),
+      usage: shapeUsage(aggregateUsage, modelClass, combineRoutes(routesSeen), modelId),
     };
   }
 }

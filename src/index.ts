@@ -186,6 +186,63 @@ export interface ChatOptions {
   /** Defaults to `'reasoning'` — the conservative choice. */
   modelClass?: ModelClass;
   /**
+   * Optional per-call output-token ceiling override. Each adapter has an
+   * internal default appropriate to its own transport (the Anthropic
+   * adapter's is documented at its `MAX_TOKENS` constant, itself raised
+   * once already on direct evidence — a real diff that truncated four of
+   * five review lenses at the previous ceiling). `undefined` uses the
+   * adapter's own default, so an existing caller sees no change.
+   *
+   * Not every adapter has an equivalent lever: `@verevoir/llm/claude-cli`
+   * shells out to `claude -p`, which has no confirmed flag for an
+   * output-token ceiling (unlike `--model`, nothing in its own `--help`
+   * documents one) — that adapter accepts and silently ignores this
+   * field rather than throwing, so the shared `ChatOptions` shape stays
+   * uniform across adapters; its own file header discloses the gap
+   * rather than leaving a caller to discover it by the field quietly
+   * doing nothing.
+   */
+  maxTokens?: number;
+  /**
+   * Optional EXACT model id, bypassing `modelClass` resolution entirely.
+   *
+   * `modelClass` is deliberately class-based — a family-level semantic
+   * ("reasoning", "drafting", "extraction") that each adapter resolves to
+   * its own current id, so decisions key on provider/family and a
+   * version bump upgrades every caller in one place (see
+   * {@link ModelCatalogEntry}'s own doc comment). That is the right
+   * default for almost every caller, and stays the default here: setting
+   * only `modelClass` (or nothing) behaves exactly as before this field
+   * existed.
+   *
+   * `model` exists for the narrow, real exception: a caller for whom the
+   * SAME model answering across two different transports of the SAME
+   * provider is itself the thing being verified. Two substrates of one
+   * provider — a direct API call (`@verevoir/llm/anthropic`) and
+   * `claude -p` (`@verevoir/llm/claude-cli`) — can each resolve
+   * `modelClass` to a different concrete id: the API path takes whatever
+   * `models[modelClass]` currently is in its own catalog; the CLI path,
+   * having no model catalog of its own by design (see that adapter's own
+   * file header — it is deliberately never registered into the shared
+   * catalog), takes whatever the local `claude` install defaults to. A
+   * caller that judges the same commit twice, once through each
+   * transport, and treats disagreement between the two as a signal,
+   * needs BOTH calls to have used the identical model — not two models
+   * that merely share a class label. `model`, set identically on both
+   * calls, is that guarantee.
+   *
+   * When set, this WINS over `modelClass` for the id an adapter actually
+   * sends/reports — `modelClass` may still be read for other purposes
+   * (e.g. `TokenUsage.direction`, which stays a class semantic even when
+   * the id is pinned) but is never used to choose the id once `model` is
+   * present. Reaching for this as the DEFAULT way to select a model
+   * forfeits the catalog's forward-compatibility — a pinned id stays
+   * pinned until the caller updates it by hand, which is exactly what
+   * `modelClass` exists to avoid for everyone without this specific
+   * need.
+   */
+  model?: string;
+  /**
    * Optional hook invoked before each retry. Best-effort; the adapter
    * never lets a callback failure block the retry.
    */

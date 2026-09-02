@@ -146,6 +146,106 @@ describe('chat — progress-only tool turn', () => {
   });
 });
 
+describe('chat — model pinning (ChatOptions.model)', () => {
+  beforeEach(() => mockStream.mockReset());
+
+  it('sends the exact model id when options.model is set, bypassing modelClass resolution entirely', async () => {
+    mockStream.mockReturnValue(fakeStream([{ type: 'text', text: 'ok' }], 'end_turn'));
+
+    await chat({
+      systemPrompt: 's',
+      turns: [{ role: 'user', content: 'x' }],
+      apiKey: 'sk-test',
+      modelClass: 'extraction', // would resolve to the Haiku id if honoured
+      model: 'claude-pinned-judge-1',
+    });
+
+    const request = mockStream.mock.calls[0][0] as { model: string };
+    expect(request.model).toBe('claude-pinned-judge-1');
+  });
+
+  it('reports the pinned model id on TokenUsage.model, not the class-resolved one', async () => {
+    mockStream.mockReturnValue(fakeStream([{ type: 'text', text: 'ok' }], 'end_turn'));
+
+    const reply = await chat({
+      systemPrompt: 's',
+      turns: [{ role: 'user', content: 'x' }],
+      apiKey: 'sk-test',
+      modelClass: 'extraction',
+      model: 'claude-pinned-judge-1',
+    });
+
+    expect(reply.usage.model).toBe('claude-pinned-judge-1');
+  });
+
+  it('falls back to the catalog id resolved from modelClass when options.model is not set — unchanged default', async () => {
+    mockStream.mockReturnValue(fakeStream([{ type: 'text', text: 'ok' }], 'end_turn'));
+
+    const reply = await chat({
+      systemPrompt: 's',
+      turns: [{ role: 'user', content: 'x' }],
+      apiKey: 'sk-test',
+      modelClass: 'extraction',
+    });
+
+    const request = mockStream.mock.calls[0][0] as { model: string };
+    expect(request.model).toBe('claude-haiku-4-5-20251001');
+    expect(reply.usage.model).toBe('claude-haiku-4-5-20251001');
+  });
+
+  it('chatWithTools also sends the pinned id, not the class-resolved one', async () => {
+    mockStream.mockReturnValue(
+      fakeStream([{ type: 'tool_use', id: 'u1', name: 'noop', input: {} }], 'tool_use')
+    );
+
+    const result = await chatWithTools({
+      systemPrompt: 's',
+      turns: [{ role: 'user', content: 'x' }],
+      apiKey: 'sk-test',
+      modelClass: 'extraction',
+      model: 'claude-pinned-judge-1',
+      tools: [
+        { name: 'noop', description: 'noop', input_schema: { type: 'object', properties: {} } },
+      ],
+    });
+
+    const request = mockStream.mock.calls[0][0] as { model: string };
+    expect(request.model).toBe('claude-pinned-judge-1');
+    expect(result.usage.model).toBe('claude-pinned-judge-1');
+  });
+});
+
+describe('chat — maxTokens override (ChatOptions.maxTokens)', () => {
+  beforeEach(() => mockStream.mockReset());
+
+  it('sends the caller-supplied maxTokens instead of the adapter default', async () => {
+    mockStream.mockReturnValue(fakeStream([{ type: 'text', text: 'ok' }], 'end_turn'));
+
+    await chat({
+      systemPrompt: 's',
+      turns: [{ role: 'user', content: 'x' }],
+      apiKey: 'sk-test',
+      maxTokens: 65536,
+    });
+
+    const request = mockStream.mock.calls[0][0] as { max_tokens: number };
+    expect(request.max_tokens).toBe(65536);
+  });
+
+  it('defaults to 16384 when maxTokens is not supplied — unchanged default behaviour', async () => {
+    mockStream.mockReturnValue(fakeStream([{ type: 'text', text: 'ok' }], 'end_turn'));
+
+    await chat({
+      systemPrompt: 's',
+      turns: [{ role: 'user', content: 'x' }],
+      apiKey: 'sk-test',
+    });
+
+    const request = mockStream.mock.calls[0][0] as { max_tokens: number };
+    expect(request.max_tokens).toBe(16384);
+  });
+});
+
 describe('chat — model-span emission', () => {
   beforeEach(() => mockStream.mockReset());
   afterEach(() => setModelSpanSink(null));

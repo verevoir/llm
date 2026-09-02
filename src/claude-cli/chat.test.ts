@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'node:events';
+import { tmpdir } from 'node:os';
 
 // Mock node:child_process's spawn before importing the adapter. Each test
 // configures the fake child process's stdout/stderr/exit behaviour.
@@ -169,7 +170,7 @@ describe('claudeCli.chat', () => {
     else process.env.CLAUDE_CODE_USE_VERTEX = originalUseVertex;
   });
 
-  it('spawns "claude" with -p, --system-prompt, --tools "" (disabled), json output, no persistence, safe-mode', async () => {
+  it('spawns "claude" with -p, --system-prompt, --tools "" (disabled), strict MCP isolation, json output, no persistence, safe-mode', async () => {
     mockSuccessfulCall(JSON.stringify({ result: 'ok' }));
 
     await chat({ systemPrompt: 'you are a lens', turns: [{ role: 'user', content: 'diff here' }] });
@@ -182,11 +183,74 @@ describe('claudeCli.chat', () => {
       'you are a lens',
       '--tools',
       '',
+      '--strict-mcp-config',
       '--output-format',
       'json',
       '--no-session-persistence',
       '--safe-mode',
     ]);
+  });
+
+  describe('model pinning', () => {
+    it('does not pass --model when options.model is not set — unchanged, unpinned behaviour', async () => {
+      mockSuccessfulCall(JSON.stringify({ result: 'ok' }));
+
+      await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] });
+
+      const [, args] = mockSpawn.mock.calls[0];
+      expect(args).not.toContain('--model');
+    });
+
+    it('passes --model <id> verbatim when options.model is set', async () => {
+      mockSuccessfulCall(JSON.stringify({ result: 'ok' }));
+
+      await chat({
+        systemPrompt: 'sys',
+        turns: [{ role: 'user', content: 'q' }],
+        model: 'claude-sonnet-5',
+      });
+
+      const [, args] = mockSpawn.mock.calls[0];
+      const modelIndex = args.indexOf('--model');
+      expect(modelIndex).toBeGreaterThan(-1);
+      expect(args[modelIndex + 1]).toBe('claude-sonnet-5');
+    });
+  });
+
+  describe('isolation from project/local configuration', () => {
+    it('always passes --strict-mcp-config, so no MCP server outside an explicit --mcp-config can reach the call', async () => {
+      mockSuccessfulCall(JSON.stringify({ result: 'ok' }));
+
+      await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] });
+
+      const [, args] = mockSpawn.mock.calls[0];
+      expect(args).toContain('--strict-mcp-config');
+    });
+
+    it("spawns with cwd set to the platform temp directory, never the caller's own working directory", async () => {
+      mockSuccessfulCall(JSON.stringify({ result: 'ok' }));
+
+      await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] });
+
+      const spawnOptions = mockSpawn.mock.calls[0][2] as { cwd: string };
+      expect(spawnOptions.cwd).toBe(tmpdir());
+      // The load-bearing half: proving this differs from the test process's
+      // OWN cwd (this repository's root, during this suite's run — exactly
+      // the directory whose CLAUDE.md/.mcp.json this isolation exists to
+      // keep out) rules out a mutant that silently swaps tmpdir() for
+      // process.cwd(), which the first assertion alone could not catch if
+      // the two ever happened to coincide.
+      expect(spawnOptions.cwd).not.toBe(process.cwd());
+    });
+
+    it('sets cwd on the claude --version fallback spawn too, not only the main call', async () => {
+      mockSuccessfulCall(JSON.stringify({ result: 'ok' }));
+
+      await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] });
+
+      const versionSpawnOptions = mockSpawn.mock.calls[1][2] as { cwd: string };
+      expect(versionSpawnOptions.cwd).toBe(tmpdir());
+    });
   });
 
   it('writes the single turn content to stdin', async () => {
