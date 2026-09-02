@@ -341,6 +341,34 @@ describe('chatWithToolLoop', () => {
     expect(spans.map((s) => s.inputTokens)).toEqual([10, 20]); // per-iteration, not aggregate
   });
 
+  it('sends the pinned model id on every iteration, including the no-tools finalise call', async () => {
+    const toolUseNoop2 = (id: string) =>
+      fakeStream([{ type: 'tool_use', id, name: 'noop', input: {} }], 'tool_use');
+    mockStream
+      .mockReturnValueOnce(toolUseNoop2('u1'))
+      .mockReturnValueOnce(toolUseNoop2('u2'))
+      .mockReturnValueOnce(toolUseNoop2('u3'))
+      .mockReturnValueOnce(fakeStream([{ type: 'text', text: 'done' }], 'end_turn'));
+
+    const result = await chatWithToolLoop({
+      systemPrompt: 's',
+      turns: [{ role: 'user', content: 'go' }],
+      apiKey: 'sk-test',
+      modelClass: 'extraction',
+      model: 'claude-pinned-judge-1',
+      tools: [
+        { name: 'noop', description: 'noop', input_schema: { type: 'object', properties: {} } },
+      ],
+      executor: async () => 'ok',
+      maxIterations: 3,
+    });
+
+    for (const call of mockStream.mock.calls) {
+      expect((call[0] as { model: string }).model).toBe('claude-pinned-judge-1');
+    }
+    expect(result.usage.model).toBe('claude-pinned-judge-1');
+  });
+
   it('throws when no tools are provided (tool loop with no tools is a misuse)', async () => {
     await expect(
       chatWithToolLoop({
