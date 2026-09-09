@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.26.2] — 2026-09-09
+
+**`claude-cli`: recover the failure reason from stdout on a non-zero exit** (#43). `claude -p`'s commonest real failure — not logged in — exits 1 with **empty** `stderr`; the actual reason (`"Not logged in · Please run /login"`) lived only in `stdout`'s own `--output-format json` envelope, in `result`, typically alongside `is_error: true`. The non-zero-exit branch never read `stdout` at all, so this surfaced as the content-free `"claude -p exited with code 1"` and the real reason was silently dropped. A new `describeNonZeroExitReason()` parses `stdout` as the JSON envelope and prefers its `result` field; falls back to raw `stdout` when it doesn't parse as JSON or carries no `result`; appends `stderr` only when it says something the recovered text didn't already say. The separate spawn-level-failure message (`"claudeCli.chat(): could not run the claude CLI — …"`, thrown only when the `claude` process itself never starts) is untouched — confirmed byte-identical against `0.26.0` — since `aigency-harness` #99 prefix-matches it to split `unreachable` from `refused`.
+
+**Also carries the devDependency refresh** (#41): `vitest` → 4.1.11, `typescript` → 5.9.3, `@google/genai` → 2.21.0, `openai` → 6.49.0, `prettier` → 3.9.6, `@types/node` → 25.9.5 (all devDependencies; no runtime `dependencies` change). `npm audit` clean before and after.
+
+**Why this is `0.26.2`, not `0.26.1`:** `0.26.1` was already published to npm from a separate tree carrying only the dependency refresh, before the behaviour fix above had merged to `main` — so `0.26.1` on the registry does **not** contain this fix, even though `main`'s `package.json` briefly read `0.26.1` for the same reason (inherited, untouched, from the dependency-refresh branch this fix was built on top of, per the deliberate combined-release sequencing described in #43). `0.26.1` cannot be republished with different contents; this release is the first to carry both changes together under a version npm will accept.
+
 ## [0.26.0] — 2026-09-02
 
 **Three additive changes, driven by a real consumer (`aigency-governance`) trying to route its review panel through this package instead of a hand-rolled HTTP client, and finding each of the three genuinely missing rather than merely inconvenient.**
