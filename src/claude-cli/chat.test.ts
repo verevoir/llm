@@ -431,6 +431,98 @@ describe('claudeCli.chat', () => {
     ).rejects.toThrow(/exited with code 1.*auth failed: no session/);
   });
 
+  /** Same call-time-deferred scheduling as {@link queueFailingCall}, but for
+   * a non-zero exit that ALSO carries stdout — the shape this fix exists
+   * to recover from: `claude -p`'s own JSON envelope reaches stdout even
+   * when the process exits non-zero, and until this fix `chat()` never
+   * read it at all. */
+  function queueFailingCallWithStdout(stdout: string, stderr: string, exitCode = 1) {
+    const { child, written } = fakeChild();
+    mockSpawn.mockImplementationOnce(() => {
+      queueMicrotask(() => {
+        child.stdout.emit('data', Buffer.from(stdout));
+        if (stderr) child.stderr.emit('data', Buffer.from(stderr));
+        child.emit('close', exitCode, null);
+      });
+      return child;
+    });
+    return { child, written };
+  }
+
+  // THE ESCAPED DEFECT this block exists to regress. `claude -p`'s
+  // commonest real failure — not logged in — exits 1 with EMPTY stderr;
+  // the actual reason lives only in stdout's own `--output-format json`
+  // envelope, under `result`. Before this fix, the non-zero-exit branch
+  // never read stdout at all, so this surfaced as the content-free
+  // "claude -p exited with code 1" and the real reason was silently
+  // dropped. There was no test for either shape below before this fix —
+  // that absence is why the bug shipped.
+  describe('recovering the failure reason from stdout on a non-zero exit', () => {
+    it('recovers "Not logged in · Please run /login" from stdout\'s JSON envelope when stderr is empty', async () => {
+      queueFailingCallWithStdout(
+        JSON.stringify({ is_error: true, result: 'Not logged in · Please run /login' }),
+        '',
+        1
+      );
+
+      await expect(
+        chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] })
+      ).rejects.toThrow(/exited with code 1: Not logged in · Please run \/login/);
+    });
+
+    it('recovers any JSON "result" on stdout on a non-zero exit, not only the not-logged-in case', async () => {
+      queueFailingCallWithStdout(
+        JSON.stringify({
+          is_error: true,
+          subtype: 'error_permission',
+          result: 'permission denied by policy',
+        }),
+        '',
+        1
+      );
+
+      await expect(
+        chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] })
+      ).rejects.toThrow(/exited with code 1: permission denied by policy/);
+    });
+
+    it('falls back to raw stdout when stdout on a non-zero exit is not valid JSON', async () => {
+      queueFailingCallWithStdout('claude: fatal: disk full', '', 1);
+
+      await expect(
+        chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] })
+      ).rejects.toThrow(/exited with code 1: claude: fatal: disk full/);
+    });
+
+    it('appends stderr when it adds information the recovered stdout reason did not already carry', async () => {
+      queueFailingCallWithStdout(
+        JSON.stringify({ is_error: true, result: 'Not logged in · Please run /login' }),
+        'child process wrote to a closed stream',
+        1
+      );
+
+      const error = await rejectionOf(
+        chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] })
+      );
+      expect(error.message).toContain('Not logged in · Please run /login');
+      expect(error.message).toContain('child process wrote to a closed stream');
+    });
+
+    it('does not duplicate stderr into the message when it merely repeats text already recovered from stdout', async () => {
+      queueFailingCallWithStdout(
+        JSON.stringify({ is_error: true, result: 'Not logged in · Please run /login' }),
+        'Not logged in · Please run /login',
+        1
+      );
+
+      const error = await rejectionOf(
+        chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] })
+      );
+      const occurrences = error.message.split('Not logged in · Please run /login').length - 1;
+      expect(occurrences).toBe(1);
+    });
+  });
+
   // THE MUTATION TARGET for the discarded-signal fix. Before it, `close`'s
   // second argument was never read and `SpawnResult` had no `signal`
   // field at all — so a SIGKILL-terminated run and a bare `exitCode: null`

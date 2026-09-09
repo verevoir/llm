@@ -523,6 +523,51 @@ function describeExit(
   return `${command} exited with code ${String(invocation.exitCode)}`;
 }
 
+/**
+ * Recovers the REAL failure reason on a non-zero exit from `claude -p`'s
+ * own `--output-format json` envelope on stdout, rather than reporting
+ * only the bare exit code (and possibly stderr) as before this existed.
+ *
+ * THE ESCAPED DEFECT THIS EXISTS TO FIX. `claude -p`'s commonest real
+ * failure — not logged in — exits 1 with EMPTY stderr; the actual reason
+ * ("Not logged in · Please run /login") lives only in stdout's own JSON
+ * envelope, in `result`, typically alongside `is_error: true`. Before
+ * this function existed, the non-zero-exit branch never read stdout at
+ * all, so this surfaced as the content-free "claude -p exited with code
+ * 1" and the real reason was silently dropped.
+ *
+ * RECOVERY ORDER: stdout is parsed as the JSON envelope; its `result`
+ * field wins when present and non-empty. Otherwise this falls back to
+ * stdout's raw text (stdout that isn't valid JSON, or JSON with no
+ * usable `result`). `stderr` is appended ONLY when it says something the
+ * recovered text doesn't already say, so a `stderr` that merely repeats
+ * the same message is never duplicated into it.
+ *
+ * DELIBERATELY NOT USED ON THE SPAWN-FAILURE PATH (`could not run the
+ * claude CLI — …`, thrown from `chat()`'s own catch block above when the
+ * `claude` process never starts at all, e.g. ENOENT). That message's
+ * prefix is matched verbatim by `aigency-harness` #99 to split
+ * `unreachable` from `refused` — this function only ever runs once the
+ * process HAS exited with a code, a case that message is never attached
+ * to, so the two do not collide. That prefix is untouched by this change.
+ */
+function describeNonZeroExitReason(spawned: Pick<SpawnResult, 'stdout' | 'stderr'>): string {
+  const parsed = parseCliJson(spawned.stdout);
+  const fromResult = parsed && typeof parsed.result === 'string' ? parsed.result.trim() : '';
+  const rawStdout = spawned.stdout.trim();
+  const reason = fromResult !== '' ? fromResult : rawStdout;
+  const stderrTrimmed = spawned.stderr.trim();
+
+  if (reason === '') {
+    // Nothing recoverable from stdout at all — stderr is all there is,
+    // the same shape this adapter reported before this fix existed.
+    return stderrTrimmed ? `: ${stderrTrimmed}` : '';
+  }
+
+  const stderrAddsNewInfo = stderrTrimmed !== '' && !reason.includes(stderrTrimmed);
+  return `: ${reason}${stderrAddsNewInfo ? ` (stderr: ${stderrTrimmed})` : ''}`;
+}
+
 /** What an aborted `AbortSignal` should be reported as: its own `reason`
  * when that's an `Error`, a string-wrapped `reason` otherwise, or a
  * generic `AbortError` when no reason was given. Shared by
@@ -661,9 +706,13 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
     // No fallback here either — a non-zero exit refuses, it never retries
     // against a different credential path. describeExit tells a
     // signal-terminated close apart from a bare null exit code — see
-    // SpawnResult.
+    // SpawnResult. describeNonZeroExitReason recovers the REAL failure
+    // reason from stdout's own JSON envelope (its `result` field) rather
+    // than reporting only the bare exit code — see its own doc comment
+    // for why stdout, not just stderr, has to be read here, and for why
+    // the separate spawn-failure message above is untouched by this.
     throw new Error(
-      `${describeExit('claude -p', spawned)}${spawned.stderr ? `: ${spawned.stderr.trim()}` : ''}`
+      `${describeExit('claude -p', spawned)}${describeNonZeroExitReason(spawned)}`
     );
   }
 
