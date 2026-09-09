@@ -431,6 +431,95 @@ describe('claudeCli.chat', () => {
     ).rejects.toThrow(/exited with code 1.*auth failed: no session/);
   });
 
+  // THE MUTATION TARGET for the discarded-stdout fix. Before it, a
+  // non-zero exit only ever read `stderr` — `stdout` was never
+  // inspected, so the CLI's own JSON envelope (carrying the real reason
+  // in `result`, per index.ts's file header) was silently dropped and
+  // every such failure surfaced as the content-free "claude -p exited
+  // with code 1". Neither of these two shapes had a test before this
+  // fix; that absence is why the bug shipped.
+  describe('recovering the failure reason from stdout on a non-zero exit', () => {
+    /** Queues a failing close carrying BOTH stdout and stderr — neither
+     * `queueFailingCall` (stderr only) nor `queueCall` (zero exit) can
+     * express this combination. */
+    function queueFailingCallWithStdout(stdout: string, stderr: string, exitCode = 1) {
+      const { child } = fakeChild();
+      mockSpawn.mockImplementationOnce(() => {
+        queueMicrotask(() => {
+          if (stdout) child.stdout.emit('data', Buffer.from(stdout));
+          if (stderr) child.stderr.emit('data', Buffer.from(stderr));
+          child.emit('close', exitCode, null);
+        });
+        return child;
+      });
+      return { child };
+    }
+
+    it('recovers the reason from stdout\'s JSON "result" field on a non-zero exit, even though stderr is empty', async () => {
+      queueFailingCallWithStdout(
+        JSON.stringify({ is_error: true, result: 'something specific went wrong' }),
+        ''
+      );
+
+      await expect(
+        chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] })
+      ).rejects.toThrow(/exited with code 1.*something specific went wrong/);
+    });
+
+    it('recovers "Not logged in" from stdout when claude -p exits 1 with empty stderr — the commonest real failure this fix exists for', async () => {
+      queueFailingCallWithStdout(
+        JSON.stringify({
+          is_error: true,
+          subtype: 'error_not_logged_in',
+          result: 'Not logged in · Please run /login',
+        }),
+        ''
+      );
+
+      const error = await rejectionOf(
+        chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] })
+      );
+      expect(error.message).toMatch(/Not logged in/);
+      // Before the fix this message carried NOTHING but the exit code —
+      // pin that the recovered reason, not just "some longer string",
+      // made it through.
+      expect(error.message).not.toBe('claude -p exited with code 1');
+    });
+
+    it('falls back to raw stdout when it is not valid JSON, on a non-zero exit', async () => {
+      queueFailingCallWithStdout('not json at all, but still useful output', '');
+
+      await expect(
+        chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] })
+      ).rejects.toThrow(/not json at all, but still useful output/);
+    });
+
+    it('appends stderr alongside the recovered stdout reason when stderr says something new', async () => {
+      queueFailingCallWithStdout(
+        JSON.stringify({ result: 'model declined' }),
+        'additional diagnostic context'
+      );
+
+      const error = await rejectionOf(
+        chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] })
+      );
+      expect(error.message).toMatch(/model declined/);
+      expect(error.message).toMatch(/additional diagnostic context/);
+    });
+
+    it('does not duplicate stderr into the message when it repeats text already recovered from stdout', async () => {
+      queueFailingCallWithStdout(
+        JSON.stringify({ result: 'auth failed: no session' }),
+        'auth failed: no session'
+      );
+
+      const error = await rejectionOf(
+        chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] })
+      );
+      expect(error.message.match(/auth failed: no session/g)).toHaveLength(1);
+    });
+  });
+
   // THE MUTATION TARGET for the discarded-signal fix. Before it, `close`'s
   // second argument was never read and `SpawnResult` had no `signal`
   // field at all — so a SIGKILL-terminated run and a bare `exitCode: null`

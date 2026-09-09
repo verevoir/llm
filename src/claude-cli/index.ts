@@ -523,6 +523,44 @@ function describeExit(
   return `${command} exited with code ${String(invocation.exitCode)}`;
 }
 
+/**
+ * Recover WHY a non-zero exit happened, for the error `chat()` throws
+ * below. `claude -p`'s commonest real failure — no active subscription
+ * session — exits 1 with EMPTY stderr; the actual reason ("Not logged in
+ * · Please run /login") lives in stdout's own `--output-format json`
+ * envelope, in `result`, typically alongside `is_error: true`. Before
+ * this existed, the non-zero-exit branch never read `stdout` at all, so
+ * that reason was silently dropped and every such failure surfaced as
+ * the content-free "claude -p exited with code 1".
+ *
+ * Reads stdout FIRST — `parseCliJson`'s `result` field when stdout
+ * parses as the envelope and carries one, otherwise raw stdout verbatim
+ * (the CLI's stderr can be genuinely empty, but a non-zero exit almost
+ * always writes SOMETHING to stdout) — then appends `stderr` only when
+ * it contains information the recovered stdout text does not already
+ * contain, so a `stderr` blob that merely repeats `result` is never
+ * duplicated into the message. Returns `undefined` when neither stream
+ * has anything to say, leaving `describeExit`'s own text to stand alone.
+ */
+function describeNonZeroExitReason(
+  spawned: Pick<SpawnResult, 'stdout' | 'stderr'>
+): string | undefined {
+  const parsed = parseCliJson(spawned.stdout);
+  const stdoutTrimmed = spawned.stdout.trim();
+  const fromStdout =
+    parsed && typeof parsed.result === 'string' && parsed.result.trim() !== ''
+      ? parsed.result.trim()
+      : stdoutTrimmed !== ''
+        ? stdoutTrimmed
+        : undefined;
+  const stderrTrimmed = spawned.stderr.trim();
+  const stderrAddsSomething = stderrTrimmed !== '' && !(fromStdout ?? '').includes(stderrTrimmed);
+  if (fromStdout && stderrAddsSomething) return `${fromStdout} (stderr: ${stderrTrimmed})`;
+  if (fromStdout) return fromStdout;
+  if (stderrTrimmed) return stderrTrimmed;
+  return undefined;
+}
+
 /** What an aborted `AbortSignal` should be reported as: its own `reason`
  * when that's an `Error`, a string-wrapped `reason` otherwise, or a
  * generic `AbortError` when no reason was given. Shared by
@@ -661,10 +699,13 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
     // No fallback here either — a non-zero exit refuses, it never retries
     // against a different credential path. describeExit tells a
     // signal-terminated close apart from a bare null exit code — see
-    // SpawnResult.
-    throw new Error(
-      `${describeExit('claude -p', spawned)}${spawned.stderr ? `: ${spawned.stderr.trim()}` : ''}`
-    );
+    // SpawnResult. describeNonZeroExitReason recovers the real reason
+    // from stdout (see its own doc comment) — this is NOT the same
+    // message shape as the spawn-level-failure throw below, which
+    // `aigency-harness`#99 matches by exact prefix; that prefix is
+    // untouched by this branch.
+    const reason = describeNonZeroExitReason(spawned);
+    throw new Error(`${describeExit('claude -p', spawned)}${reason ? `: ${reason}` : ''}`);
   }
 
   const parsed = parseCliJson(spawned.stdout);

@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.26.1] — 2026-09-09
+
+**`claude-cli`: recover the failure reason from stdout on a non-zero exit — the commonest real failure (not logged in) was silently dropped.** `claude -p`'s own `--output-format json` envelope carries the real reason in `result` (often alongside `is_error: true`) even on a non-zero exit — but the exit-code branch only ever read `stderr`, and `claude -p`'s "not logged in" failure exits 1 with **empty** stderr, so every such failure surfaced only as the content-free `"claude -p exited with code 1"`. Fixed: stdout is now parsed as the JSON envelope and its `result` preferred; raw stdout is used when it doesn't parse or carries no `result`; `stderr` is appended only when it says something the recovered text didn't already say, so the two are never duplicated. **Deliberately untouched:** the distinct spawn-level-failure message (`"claudeCli.chat(): could not run the claude CLI — …"`, thrown only when the `claude` process itself never started) — `aigency-harness`#99 (`efe40cd`) matches that exact prefix to split `unreachable` from `refused`, and this fix never touches that code path or that string. No test previously existed for a non-zero exit carrying a JSON `result` on stdout, and none named around "not logged in" — both are added here, plus coverage for the raw-stdout fallback and the stderr-dedup rule.
+
 ## [0.26.0] — 2026-09-02
 
 **Three additive changes, driven by a real consumer (`aigency-governance`) trying to route its review panel through this package instead of a hand-rolled HTTP client, and finding each of the three genuinely missing rather than merely inconvenient.**
