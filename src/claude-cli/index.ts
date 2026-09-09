@@ -711,9 +711,7 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
     // than reporting only the bare exit code — see its own doc comment
     // for why stdout, not just stderr, has to be read here, and for why
     // the separate spawn-failure message above is untouched by this.
-    throw new Error(
-      `${describeExit('claude -p', spawned)}${describeNonZeroExitReason(spawned)}`
-    );
+    throw new Error(`${describeExit('claude -p', spawned)}${describeNonZeroExitReason(spawned)}`);
   }
 
   const parsed = parseCliJson(spawned.stdout);
