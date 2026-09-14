@@ -77,7 +77,7 @@ describe('claude-cli session lifecycle', () => {
   it('spawns claude with the stream-json flags and no --mcp-config when there are no tools', async () => {
     const { child, emitLine } = fakeChild();
     mockSpawn.mockImplementationOnce(() => {
-      queueMicrotask(() => emitLine({ type: 'result', result: 'ok' }));
+      setImmediate(() => emitLine({ type: 'result', result: 'ok' }));
       return child;
     });
     const session = createSession();
@@ -111,7 +111,7 @@ describe('claude-cli session lifecycle', () => {
   it('includes --mcp-config and --model when tools/model are supplied', async () => {
     const { child, emitLine } = fakeChild();
     mockSpawn.mockImplementationOnce(() => {
-      queueMicrotask(() => emitLine({ type: 'result', result: 'ok' }));
+      setImmediate(() => emitLine({ type: 'result', result: 'ok' }));
       return child;
     });
     const session = createSession();
@@ -135,12 +135,18 @@ describe('claude-cli session lifecycle', () => {
   it('writes the turn as a stream-json user message line', async () => {
     const { child, written, emitLine } = fakeChild();
     mockSpawn.mockImplementationOnce(() => {
-      queueMicrotask(() => emitLine({ type: 'result', result: 'ok' }));
+      setImmediate(() => emitLine({ type: 'result', result: 'ok' }));
       return child;
     });
     const session = createSession();
 
-    await runSessionTurn({ session, systemPrompt: 'sys', message: 'hello', tools: [], maxToolCalls: 0 });
+    await runSessionTurn({
+      session,
+      systemPrompt: 'sys',
+      message: 'hello',
+      tools: [],
+      maxToolCalls: 0,
+    });
 
     expect(JSON.parse(written[0])).toEqual({
       type: 'user',
@@ -153,7 +159,7 @@ describe('claude-cli session lifecycle', () => {
     mockSpawn.mockImplementationOnce(() => child);
     const session = createSession();
 
-    queueMicrotask(() => emitLine({ type: 'result', result: 'first' }));
+    setImmediate(() => emitLine({ type: 'result', result: 'first' }));
     const r1 = await runSessionTurn({
       session,
       systemPrompt: 'sys',
@@ -161,7 +167,7 @@ describe('claude-cli session lifecycle', () => {
       tools: [],
       maxToolCalls: 0,
     });
-    queueMicrotask(() => emitLine({ type: 'result', result: 'second' }));
+    setImmediate(() => emitLine({ type: 'result', result: 'second' }));
     const r2 = await runSessionTurn({
       session,
       systemPrompt: 'sys',
@@ -178,7 +184,7 @@ describe('claude-cli session lifecycle', () => {
   it('counts assistant stream events before the terminal result as the iteration proxy', async () => {
     const { child, emitLine } = fakeChild();
     mockSpawn.mockImplementationOnce(() => {
-      queueMicrotask(() => {
+      setImmediate(() => {
         emitLine({ type: 'assistant' });
         emitLine({ type: 'assistant' });
         emitLine({ type: 'result', result: 'done' });
@@ -202,7 +208,7 @@ describe('claude-cli session lifecycle', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const { child, emitRaw, emitLine } = fakeChild();
     mockSpawn.mockImplementationOnce(() => {
-      queueMicrotask(() => {
+      setImmediate(() => {
         emitRaw('not json at all\n');
         emitLine({ type: 'result', result: 'ok' });
       });
@@ -226,7 +232,7 @@ describe('claude-cli session lifecycle', () => {
   it('throws when the terminal envelope reports is_error: true', async () => {
     const { child, emitLine } = fakeChild();
     mockSpawn.mockImplementationOnce(() => {
-      queueMicrotask(() =>
+      setImmediate(() =>
         emitLine({ type: 'result', is_error: true, subtype: 'error_max_turns', result: 'nope' })
       );
       return child;
@@ -242,7 +248,7 @@ describe('claude-cli session lifecycle', () => {
     it('a handle that was never used spawns fresh — the same as one that died', async () => {
       const { child, emitLine } = fakeChild();
       mockSpawn.mockImplementationOnce(() => {
-        queueMicrotask(() => emitLine({ type: 'result', result: 'ok' }));
+        setImmediate(() => emitLine({ type: 'result', result: 'ok' }));
         return child;
       });
       const session = createSession(); // never used before this call
@@ -263,8 +269,14 @@ describe('claude-cli session lifecycle', () => {
       const first = fakeChild();
       mockSpawn.mockImplementationOnce(() => first.child);
       const session = createSession();
-      queueMicrotask(() => first.emitLine({ type: 'result', result: 'first' }));
-      await runSessionTurn({ session, systemPrompt: 'sys', message: 'a', tools: [], maxToolCalls: 0 });
+      setImmediate(() => first.emitLine({ type: 'result', result: 'first' }));
+      await runSessionTurn({
+        session,
+        systemPrompt: 'sys',
+        message: 'a',
+        tools: [],
+        maxToolCalls: 0,
+      });
 
       // The process dies between turns — a real crash, not a call this
       // adapter made.
@@ -272,7 +284,7 @@ describe('claude-cli session lifecycle', () => {
 
       const second = fakeChild();
       mockSpawn.mockImplementationOnce(() => {
-        queueMicrotask(() => second.emitLine({ type: 'result', result: 'second' }));
+        setImmediate(() => second.emitLine({ type: 'result', result: 'second' }));
         return second.child;
       });
 
@@ -300,7 +312,7 @@ describe('claude-cli session lifecycle', () => {
         tools: [],
         maxToolCalls: 0,
       });
-      queueMicrotask(() => child.emit('close', 1, null));
+      setImmediate(() => child.emit('close', 1, null));
 
       await expect(pending).rejects.toThrow(/mid-turn/);
     });
@@ -310,8 +322,14 @@ describe('claude-cli session lifecycle', () => {
     const { child, emitLine } = fakeChild();
     mockSpawn.mockImplementationOnce(() => child);
     const session = createSession();
-    queueMicrotask(() => emitLine({ type: 'result', result: 'first' }));
-    await runSessionTurn({ session, systemPrompt: 'sys A', message: 'a', tools: [], maxToolCalls: 0 });
+    setImmediate(() => emitLine({ type: 'result', result: 'first' }));
+    await runSessionTurn({
+      session,
+      systemPrompt: 'sys A',
+      message: 'a',
+      tools: [],
+      maxToolCalls: 0,
+    });
 
     await expect(
       runSessionTurn({ session, systemPrompt: 'sys B', message: 'b', tools: [], maxToolCalls: 0 })
@@ -344,11 +362,17 @@ describe('claude-cli session lifecycle', () => {
     it('kills the live process behind a handle', async () => {
       const { child, emitLine } = fakeChild();
       mockSpawn.mockImplementationOnce(() => {
-        queueMicrotask(() => emitLine({ type: 'result', result: 'ok' }));
+        setImmediate(() => emitLine({ type: 'result', result: 'ok' }));
         return child;
       });
       const session = createSession();
-      await runSessionTurn({ session, systemPrompt: 'sys', message: 'a', tools: [], maxToolCalls: 0 });
+      await runSessionTurn({
+        session,
+        systemPrompt: 'sys',
+        message: 'a',
+        tools: [],
+        maxToolCalls: 0,
+      });
 
       await closeSession(session);
 
@@ -368,7 +392,13 @@ describe('claude-cli session lifecycle', () => {
       const first = fakeChild();
       mockSpawn.mockImplementationOnce(() => first.child);
       const session = createSession();
-      const p1 = runSessionTurn({ session, systemPrompt: 'sys', message: 'a', tools: [], maxToolCalls: 0 });
+      const p1 = runSessionTurn({
+        session,
+        systemPrompt: 'sys',
+        message: 'a',
+        tools: [],
+        maxToolCalls: 0,
+      });
       await vi.advanceTimersByTimeAsync(0);
       first.emitLine({ type: 'result', result: 'first' });
       await p1;
@@ -378,7 +408,13 @@ describe('claude-cli session lifecycle', () => {
 
       const second = fakeChild();
       mockSpawn.mockImplementationOnce(() => second.child);
-      const p2 = runSessionTurn({ session, systemPrompt: 'sys', message: 'b', tools: [], maxToolCalls: 0 });
+      const p2 = runSessionTurn({
+        session,
+        systemPrompt: 'sys',
+        message: 'b',
+        tools: [],
+        maxToolCalls: 0,
+      });
       await vi.advanceTimersByTimeAsync(0);
       second.emitLine({ type: 'result', result: 'second' });
       const r2 = await p2;
@@ -387,7 +423,7 @@ describe('claude-cli session lifecycle', () => {
       expect(mockSpawn).toHaveBeenCalledTimes(2);
     });
 
-    it('does not evict a session while a turn is still in flight, even past the idle timeout — only the per-turn watchdog governs a turn\'s own length', async () => {
+    it("does not evict a session while a turn is still in flight, even past the idle timeout — only the per-turn watchdog governs a turn's own length", async () => {
       vi.useFakeTimers();
       const { child, emitLine } = fakeChild();
       mockSpawn.mockImplementationOnce(() => child);
@@ -440,7 +476,7 @@ describe('claude-cli session lifecycle', () => {
         const c = fakeChild();
         children.push(c);
         mockSpawn.mockImplementationOnce(() => {
-          queueMicrotask(() => c.emitLine({ type: 'result', result: `r${i}` }));
+          setImmediate(() => c.emitLine({ type: 'result', result: `r${i}` }));
           return c.child;
         });
         await runSessionTurn({

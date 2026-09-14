@@ -37,7 +37,10 @@ async function bridgePort(bridge: ToolBridge): Promise<number> {
 function sendToolCall(
   port: number,
   request: { id: string; name: string; arguments: Record<string, unknown> }
-): Promise<{ id: string; result: { content: { type: string; text: string }[]; isError: boolean } }> {
+): Promise<{
+  id: string;
+  result: { content: { type: string; text: string }[]; isError: boolean };
+}> {
   return new Promise((resolve, reject) => {
     const socket = createConnection({ port, host: '127.0.0.1' }, () => {
       socket.write(JSON.stringify(request) + '\n');

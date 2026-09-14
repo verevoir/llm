@@ -94,8 +94,12 @@ describe('claude-cli chat(session) / chatWithTools / chatWithToolLoop', () => {
     it('runs one turn on the held session and reports usage/route', async () => {
       const { child, emitLine } = fakeSessionChild();
       mockSpawn.mockImplementationOnce(() => {
-        queueMicrotask(() =>
-          emitLine({ type: 'result', result: 'hi there', usage: { input_tokens: 3, output_tokens: 2 } })
+        setImmediate(() =>
+          emitLine({
+            type: 'result',
+            result: 'hi there',
+            usage: { input_tokens: 3, output_tokens: 2 },
+          })
         );
         return child;
       });
@@ -146,7 +150,7 @@ describe('claude-cli chat(session) / chatWithTools / chatWithToolLoop', () => {
     it('closes its own throwaway session after the call when none was supplied', async () => {
       const { child, emitLine } = fakeSessionChild();
       mockSpawn.mockImplementationOnce(() => {
-        queueMicrotask(() => emitLine({ type: 'result', result: 'done' }));
+        setImmediate(() => emitLine({ type: 'result', result: 'done' }));
         return child;
       });
       queueVersionSpawn();
@@ -162,28 +166,37 @@ describe('claude-cli chat(session) / chatWithTools / chatWithToolLoop', () => {
     });
 
     it('reuses the process across two calls on an explicit session', async () => {
-      const { child, emitLine } = fakeSessionChild();
+      const { child, written, emitLine } = fakeSessionChild();
       mockSpawn.mockImplementationOnce(() => child);
       queueVersionSpawn();
       const session = createSession();
 
-      queueMicrotask(() => emitLine({ type: 'result', result: 'first' }));
-      await chatWithToolLoop({
+      const p1 = chatWithToolLoop({
         systemPrompt: 'sys',
         turns: [{ role: 'user', content: 'a' }],
         tools: [ECHO_TOOL],
         executor: async () => 'x',
         session,
       });
+      // written[0] only exists once session.pending has been set and the
+      // turn's line has actually reached stdin.write — the precise point
+      // after which it's safe to emit the reply, regardless of how long
+      // createToolBridge's real I/O (TCP listen, mkdtemp, writeFile) took
+      // to get there.
+      await vi.waitFor(() => expect(written.length).toBeGreaterThan(0));
+      emitLine({ type: 'result', result: 'first' });
+      await p1;
 
-      queueMicrotask(() => emitLine({ type: 'result', result: 'second' }));
-      const r2 = await chatWithToolLoop({
+      const p2 = chatWithToolLoop({
         systemPrompt: 'sys',
         turns: [{ role: 'user', content: 'b' }],
         tools: [ECHO_TOOL],
         executor: async () => 'x',
         session,
       });
+      await vi.waitFor(() => expect(written.length).toBeGreaterThan(1));
+      emitLine({ type: 'result', result: 'second' });
+      const r2 = await p2;
 
       expect(r2.text).toBe('second');
       expect(child.kill).not.toHaveBeenCalled(); // held open across both calls
@@ -192,7 +205,7 @@ describe('claude-cli chat(session) / chatWithTools / chatWithToolLoop', () => {
       await closeSession(session);
     });
 
-    it("drives a real tool call through the MCP bridge and reports it on the result", async () => {
+    it('drives a real tool call through the MCP bridge and reports it on the result', async () => {
       const { child, written, emitLine } = fakeSessionChild();
       mockSpawn.mockImplementationOnce(() => child);
       queueVersionSpawn();

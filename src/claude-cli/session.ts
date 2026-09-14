@@ -413,7 +413,10 @@ async function getOrCreateSession(
   const existing = HELD.get(handle.id);
   if (existing && !existing.closed) {
     const compatible =
-      sameNames(existing.toolNames, binding.tools.map((t) => t.name)) &&
+      sameNames(
+        existing.toolNames,
+        binding.tools.map((t) => t.name)
+      ) &&
       existing.systemPrompt === binding.systemPrompt &&
       existing.model === binding.model;
     if (compatible) {
@@ -578,6 +581,18 @@ export async function runSessionTurn(options: SessionTurnOptions): Promise<Sessi
         HELD.delete(session.id);
         reject(abortReasonLocal(options.signal!));
       };
+      // getOrCreateSession, above, crosses an async boundary (an await,
+      // even one that resolves in a single microtask tick) — a signal
+      // aborted DURING that gap fires its 'abort' event before this
+      // listener exists to hear it, and once fired that event never
+      // fires again. Re-checking `.aborted` here, synchronously, before
+      // subscribing is what catches that window; the entry-only
+      // throwIfAbortedLocal call above only catches an abort that had
+      // already happened before runSessionTurn was even called.
+      if (options.signal?.aborted) {
+        onAbort();
+        return;
+      }
       options.signal?.addEventListener('abort', onAbort, { once: true });
 
       session.pending = { resolve, reject, assistantEventCount: 0, watchdog };

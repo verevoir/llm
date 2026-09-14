@@ -910,7 +910,7 @@ export async function chatWithTools(
 ): Promise<ChatWithToolsResult> {
   throw new Error(
     'claudeCli.chatWithTools() is not supported on this transport — tool calls run through an ' +
-      "embedded MCP server that claude itself invokes as part of its own turn, so there is no " +
+      'embedded MCP server that claude itself invokes as part of its own turn, so there is no ' +
       'point where a tool_use exists without already having been executed for a caller to run ' +
       'separately. Use claudeCli.chatWithToolLoop() instead, with your executor supplied up front.'
   );
