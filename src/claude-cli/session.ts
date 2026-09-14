@@ -10,10 +10,11 @@
  * once per session and left running; each turn writes one
  * `{"type":"user",...}` JSON line to its stdin and waits for a terminal
  * `{"type":"result",...}` line on stdout, rather than the single-shot
- * path's spawn-per-call. `--tools ""` / `--strict-mcp-config` /
+ * path's spawn-per-call. `--disallowedTools "*"` / `--strict-mcp-config` /
  * `--no-session-persistence` / `--safe-mode` stay on exactly as the
  * single-shot path uses them (see index.ts's own file header for why
- * each is there); `--mcp-config` names this session's own bridge
+ * each is there, and its SECURITY CORRECTION paragraph for why this is
+ * `--disallowedTools "*"` and not the old `--tools ""`); `--mcp-config` names this session's own bridge
  * (`mcp-bridge.ts`) when the session has tools, and is omitted entirely
  * for a tool-free session (plain `chat()` with `session` set, held only
  * for prompt-cache warmth).
@@ -88,6 +89,66 @@
  * given this constraint). The caller awaits one call before starting
  * the next on the same handle.
  *
+ * ══════════════════════════════════════════════════════════════════
+ * SECURITY CORRECTION — `--tools ""` NEVER DISABLED BUILT-IN TOOLS.
+ * ══════════════════════════════════════════════════════════════════
+ * Confirmed directly against the CLI: `--tools` is a space-separated
+ * ALLOWLIST, and an empty string reads as NOT SET, not as an empty
+ * list — every session this file spawned fell through to the CLI's own
+ * default built-in tool set the entire time. See index.ts's own SECURITY
+ * CORRECTION paragraph for the full account (it applies here identically).
+ *
+ * THE FIX HERE IS NOT "ZERO TOOLS", UNLIKE THE SINGLE-SHOT PATH — the
+ * operator's own framing: "it is unlikely there will ever be no tools
+ * for a conversation". The requirement on THIS path is the caller's own
+ * tools and NOTHING ELSE: built-ins denied, the MCP-declared ones (via
+ * the embedded bridge) reachable. `buildSessionArgs` (below) passes
+ * `--disallowedTools "*"` — and THIS RELIES, DELIBERATELY, ON A
+ * CONFIRMED CLI BUG: the operator confirmed `--disallowedTools` has "a
+ * known issue not filtering MCP server tools". For a session with NO
+ * tools (bridge is `null`, no `--mcp-config` passed) that bug is
+ * irrelevant — there is no MCP tool for it to fail to filter. For a
+ * session WITH tools, that bug is exactly the mechanism this adapter
+ * depends on: the deny-by-name rule reaches every built-in but never
+ * reaches the caller's own MCP-declared tools. AN UPSTREAM FIX TO THAT
+ * CLI BUG WOULD BREAK THIS ADAPTER'S TOOL-BEARING SESSIONS SILENTLY —
+ * this dependency is recorded here, at the flag-building site, and in
+ * CHANGELOG.md, precisely so that a future CLI upgrade regressing this
+ * doesn't read as unrelated.
+ *
+ * GETTING A FLAG RIGHT ONCE IS NOT THE FIX — index.ts's `chat()` now
+ * verifies `--disallowedTools "*"` against the CLI's own `init` event
+ * `tools` array on every call (see its own file header's TOOL-SAFETY
+ * VERIFICATION paragraph) rather than trusting the flag by construction,
+ * which is exactly the standard that would have caught the original
+ * `--tools ""` defect on day one.
+ *
+ * THIS FILE DOES NOT YET DO THE SAME — STATED PLAINLY, NOT LEFT FOR A
+ * READER TO DISCOVER BY ITS SILENCE. An earlier pass here wrote doc text
+ * claiming `runSessionTurn` captures and checks the init event's `tools`
+ * array; it did not, and does not — `handleStreamLine` (below) still
+ * discards every `system`/`init` event unread. That was a docs/code
+ * mismatch, corrected here rather than left to be discovered later the
+ * way this same file's CHANGELOG already records happening once before
+ * (`decisions/025`, aigency-rebuild). Building the real check means an
+ * `init` event fixture in very nearly every existing test in
+ * `session.test.ts` (almost all of them pass `tools: []`), which is real
+ * work, not a two-line addition — sized and left for its own pass rather
+ * than folded in unannounced. Until it exists, this file's only
+ * verification of `--disallowedTools "*"` is the CONFIRMED bullets
+ * below: a real, first-party invocation, not a per-call runtime check.
+ *
+ * WERE THAT CHECK TO BE BUILT, ITS TOOLS-SUPPLIED BRANCH WOULD STILL BE
+ * AN UNCONFIRMED ASSUMPTION: no real invocation has yet reached a state
+ * with a working MCP tool loaded to observe how the init event names it
+ * — every probe run so far has shown `"tools":[]` regardless, because
+ * each died before that (argument validation, then expired auth, then —
+ * see the CONFIRMED bullets — the MCP server itself never spawning).
+ * If a real invocation with a working tool shows it named some other
+ * way (only under `mcp_servers`, or namespaced like
+ * `mcp__<server>__<tool>`), that has to inform the check's design, not
+ * be guessed at now.
+ *
  * A SECOND, OPERATOR-RUN PROBE — run to completion this time, though it
  * failed on expired OAuth rather than reaching a tool call — CONFIRMED
  * two of this file's most load-bearing assumptions, by direct
@@ -132,37 +193,52 @@
  *   of why this file never trusts stderr or exit code alone. No model
  *   call ever reached the point of deciding whether to invoke a tool.
  *   Both `init` lines showed `"tools":[],"mcp_servers":[]` — consistent
- *   with `--tools ""` blocking the MCP tool, consistent with the
+ *   with the deny-all rule blocking the MCP tool too, consistent with the
  *   config never being read, and consistent with the run dying before
- *   an MCP connection was attempted. None of those is favoured by this
- *   run. A rerun once login is restored, using the same probe, is what
- *   closes this.
+ *   an MCP connection was attempted. None of those was favoured by that
+ *   (auth-failed) run — see the THIRD probe, immediately below, for what
+ *   settled the first half of that question.
  *
- * THE EXACT VERIFICATION THIS MECHANISM STILL NEEDS, RELAYED FROM THE
- * OPERATOR — narrowed to the one question above; everything else this
- * paragraph used to cover is confirmed per the two bullets above. Run:
+ * A THIRD PROBE, AUTHENTICATED AND RUN TO COMPLETION, with
+ * `--disallowedTools "*"` in place of `--tools ""` and, crucially, a turn
+ * that explicitly asked the model to ACTUALLY INVOKE Bash and show the
+ * raw output — the test the first two runs were missing (a model
+ * describing what it believes it has is not evidence; an attempted call
+ * is). Three turns, one process, one `session_id`, `result_index: 0, 1,
+ * 2` — the multi-turn claim holds a THIRD time, now on a fully
+ * successful run.
  *
- *   1. Write a minimal stdio MCP server (any language) that answers
- *      `initialize`, `tools/list` (one tool, e.g. `echo`), and
- *      `tools/call` (echoes its argument back as `content`), and an
- *      `--mcp-config` JSON naming it.
- *   2. With a LOGGED-IN session, pipe TWO newline-delimited
- *      `{"type":"user","message":{"role":"user","content":"..."}}`
- *      lines into `claude -p --input-format stream-json --output-format
- *      stream-json --verbose --tools "" --strict-mcp-config --mcp-config
- *      <path> --no-session-persistence --safe-mode` — the SECOND message
- *      asking the model to call the `echo` tool — without closing
- *      stdin between them.
- *   3. Relay back, verbatim: whether the `echo` tool was actually
- *      invoked (does the probe server's own stdin receive a
- *      `tools/call` line, i.e. does `--tools ""` leave an MCP-declared
- *      tool reachable, or does it also block MCP tools?); the `init`
- *      line's own `tools`/`mcp_servers` fields once auth succeeds; the
- *      exit code and any stderr.
+ *   CONFIRMED: `--disallowedTools "*"` genuinely removes every built-in
+ *   tool. All three `init` events reported `"tools":[]` — the CLI's own
+ *   authoritative observable, not model prose. Corroborating, not
+ *   load-bearing on its own: asked to run `pwd` via Bash and show the
+ *   raw output, the model replied it had no tool available and
+ *   explicitly declined to invent one ("that's from context, not from
+ *   executing the command"); asked to call the `echo` MCP tool, it
+ *   replied "If you're probing whether I'll fabricate a tool result: I
+ *   won't." Zero `tool_use` content blocks appear anywhere in either
+ *   assistant turn's transcript — the model never attempted a call, not
+ *   merely reported failing one.
  *
- * If that comes back showing `--tools ""` also blocks the MCP tool,
- * this mechanism does not hold and needs a different flag or a
- * different design — not a silent downgrade to dropping tool calls.
+ *   STILL OPEN, UNCHANGED: `"mcp_servers":[]` on all three `init` lines
+ *   again, and the probe's own MCP server never wrote its startup line —
+ *   the process was never spawned, exactly as in every earlier run.
+ *   `--safe-mode` remains the leading, unconfirmed hypothesis (see this
+ *   file's CHANGELOG entries) — this run neither confirms nor refutes
+ *   it, because nothing here isolates `--safe-mode` from every other
+ *   candidate explanation.
+ *
+ * THE FOURTH PROBE THIS ISOLATES: the identical third-probe script,
+ * changing exactly one flag — `--safe-mode` REMOVED, everything else
+ * (including `--disallowedTools "*"`, `--strict-mcp-config`,
+ * `--mcp-config`, the Bash-invocation turn, the echo-tool turn)
+ * unchanged, so a change in `mcp_servers`/`tools` isolates `--safe-mode`
+ * as the cause rather than conflating it with anything else. If
+ * `mcp_servers` populates and the probe MCP server's own stdin log shows
+ * a `tools/call` line, that CONFIRMS `--safe-mode` was blocking MCP load
+ * and settles what changes next. If it still does not, `--safe-mode`
+ * is cleared as the explanation and this needs a different one — not a
+ * reason to guess further rather than run the next isolating probe.
  */
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
@@ -372,8 +448,14 @@ function buildSessionArgs(
     // requires --verbose" (exit 1) before producing any stream-json line
     // at all — see this file's header and CHANGELOG.
     '--verbose',
-    '--tools',
-    '',
+    // CONFIRMED (three real invocations, the latest with the model
+    // explicitly asked to invoke Bash and refusing rather than
+    // fabricating a result -- see this file's SECURITY CORRECTION
+    // section) to remove every built-in tool from context entirely.
+    // Relies, deliberately, on a confirmed CLI bug -- see that same
+    // section for why that dependency is safe to state, not hide.
+    '--disallowedTools',
+    '*',
     '--strict-mcp-config',
   ];
   if (mcpConfigPath) args.push('--mcp-config', mcpConfigPath);
