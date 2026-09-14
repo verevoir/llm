@@ -521,6 +521,75 @@ describe('claude-cli session lifecycle', () => {
     });
   });
 
+  describe('the confirmed real envelope shape', () => {
+    // Taken, field-for-field, from a real operator-run invocation (see
+    // session.ts's file header) that failed on expired OAuth. Confirms
+    // two things at once: unmodeled fields don't break parsing, and
+    // is_error — never subtype, which reads "success" right alongside
+    // it — is what this file treats as the failure signal.
+    const REAL_AUTH_FAILURE_ENVELOPE = {
+      duration_api_ms: 0,
+      stop_reason: 'stop_sequence',
+      session_id: '71523995-3e20-4996-9149-7f41a76fa5a5',
+      total_cost_usd: 0,
+      usage: {
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+      },
+      modelUsage: {},
+      permission_denials: [],
+      terminal_reason: 'api_error',
+      subagent_stats: { spawned: 0 },
+      is_error: true,
+      num_turns: 1,
+      subtype: 'success',
+      api_error_status: null,
+      result: 'Failed to authenticate: OAuth session expired and could not be refreshed',
+      type: 'result',
+      duration_ms: 430,
+      uuid: 'c321f6ed-ffa8-41b1-bae5-baa548d3940d',
+      queued_turn_count: 0,
+      result_index: 0,
+    };
+
+    it('throws on is_error:true even though subtype reads "success" — subtype is never the failure signal', async () => {
+      const { child, emitLine } = fakeChild();
+      mockSpawn.mockImplementationOnce(() => {
+        setImmediate(() => emitLine(REAL_AUTH_FAILURE_ENVELOPE));
+        return child;
+      });
+      const session = createSession();
+
+      await expect(
+        runSessionTurn({ session, systemPrompt: 'sys', message: 'a', tools: [], maxToolCalls: 0 })
+      ).rejects.toThrow(/is_error: true.*Failed to authenticate/);
+    });
+
+    it('does not choke on the unmodeled fields a real envelope carries alongside the ones this file reads', async () => {
+      const { child, emitLine } = fakeChild();
+      mockSpawn.mockImplementationOnce(() => {
+        setImmediate(() =>
+          emitLine({ ...REAL_AUTH_FAILURE_ENVELOPE, is_error: false, result: 'ok' })
+        );
+        return child;
+      });
+      const session = createSession();
+
+      const r = await runSessionTurn({
+        session,
+        systemPrompt: 'sys',
+        message: 'a',
+        tools: [],
+        maxToolCalls: 0,
+      });
+
+      expect(r.text).toBe('ok');
+      expect(r.stopReason).toBe('stop_sequence');
+    });
+  });
+
   describe('the per-turn watchdog', () => {
     it('kills the process and refuses rather than hanging when no terminal result event ever arrives', async () => {
       vi.useFakeTimers();

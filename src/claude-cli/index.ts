@@ -118,21 +118,25 @@
  * honesty over interface uniformity — see this function's own doc
  * comment.
  *
- * RELAYED, NOT CONFIRMED — same standard this file already holds
- * `--model` to. Whether `--input-format stream-json`/`--output-format
- * stream-json` keeps one process alive across multiple turns, whether a
- * turn's terminal event is genuinely `{"type":"result",...}` carrying
- * the same inner shape as the confirmed single-shot envelope, and
- * whether an MCP tool named via `--mcp-config` stays callable under
- * `--tools ""` are ALL asserted from Claude Code's own published docs
- * and MCP's own published stdio transport spec, not independently
- * observed by this repository. `session.ts`'s own header names the exact
- * invocation this needs verified. Every terminal parse in that path
- * throws a specific, legible error rather than hanging or silently
- * dropping a tool call if the real shape doesn't match — per this file's
- * own "declares it rather than pretending" standard — including a
- * per-turn watchdog timeout that kills a held process and refuses rather
- * than waiting forever for an event that never arrives.
+ * TWO OF THREE ONCE-RELAYED ASSUMPTIONS ARE NOW CONFIRMED, the third
+ * still genuinely open — see `session.ts`'s own file header for the full
+ * account of a real, operator-run invocation (which failed on expired
+ * OAuth, not on the mechanism itself). CONFIRMED: `--input-format
+ * stream-json`/`--output-format stream-json` keeps ONE process alive
+ * across MULTIPLE turns (two result lines, one session_id, no exit
+ * between them). CONFIRMED: a turn's terminal event genuinely is
+ * `{"type":"result",...}` carrying the same inner shape as the
+ * confirmed single-shot envelope (result/is_error/subtype/stop_reason/
+ * usage/modelUsage all present). STILL OPEN: whether an MCP tool named
+ * via `--mcp-config` stays callable under `--tools ""` — the run that
+ * confirmed the two points above failed before a model call ever
+ * decided whether to invoke one, so this is not settled either way.
+ * Every terminal parse in that path throws a specific, legible error
+ * rather than hanging or silently dropping a tool call if the real
+ * shape doesn't match — per this file's own "declares it rather than
+ * pretending" standard — including a per-turn watchdog timeout that
+ * kills a held process and refuses rather than waiting forever for an
+ * event that never arrives.
  *
  * `abortSignal` IS HONOURED AT ENTRY AND MID-CALL, not just an entry
  * check: aborting while the spawned child is still running kills it

@@ -88,44 +88,81 @@
  * given this constraint). The caller awaits one call before starting
  * the next on the same handle.
  *
- * THE EXACT VERIFICATION THIS MECHANISM NEEDS, RELAYED FROM THE
- * OPERATOR. Everything below is asserted from Claude Code's own
- * documented `--input-format`/`--output-format stream-json` and
- * `--mcp-config` flags plus MCP's own published stdio transport spec —
- * NOT independently observed by this repository the way the single-shot
- * `-p --output-format json` envelope was (CHANGELOG 0.25.0). Run:
+ * A SECOND, OPERATOR-RUN PROBE — run to completion this time, though it
+ * failed on expired OAuth rather than reaching a tool call — CONFIRMED
+ * two of this file's most load-bearing assumptions, by direct
+ * observation rather than documentation:
+ *
+ *   CONFIRMED: one process serves MULTIPLE turns. Two
+ *   `{"type":"result",...}` lines appeared on the same stdout stream,
+ *   sharing one `session_id`, distinguished only by `result_index: 0`
+ *   then `result_index: 1` — a single `claude` invocation, one exit
+ *   code for the whole run, no process exit between the two turns.
+ *
+ *   CONFIRMED: the terminal `result` line's shape matches
+ *   {@link ClaudeCliStreamResultEnvelope} field-for-field — `type`,
+ *   `result`, `is_error`, `subtype`, `stop_reason`, `usage`,
+ *   `modelUsage` were all present, alongside several unmodeled fields
+ *   (`duration_ms`, `num_turns`, `terminal_reason`, `session_id`,
+ *   `result_index`, `permission_denials`, …) that this file correctly
+ *   ignores rather than choking on. Also observed, not previously
+ *   documented: a `{"type":"system","subtype":"init"}` line preceded
+ *   EACH turn's own result, not just once at session start — harmless
+ *   (any event type this file doesn't explicitly handle is ignored),
+ *   but worth knowing before assuming "init" is once-per-process.
+ *
+ *   A SHARP EDGE THIS RUN SURFACED, ALREADY HANDLED CORRECTLY — not a
+ *   defect, but a trap for a future change: the observed envelope had
+ *   `"subtype":"success"` sitting ALONGSIDE `"is_error":true`.
+ *   `subtype` evidently describes how the request/response CYCLE
+ *   ended (normally, vs. e.g. `error_max_turns`), not whether the
+ *   CONTENT is an error — this file's own error check (in
+ *   `runSessionTurn`, below) already reads `is_error`, never
+ *   `subtype`, so this was handled correctly before this run and needs
+ *   no code change. Recorded because the two fields read as
+ *   self-contradictory to a human at a glance (this file's own thrown
+ *   message reads "is_error: true (subtype=success)") — a future
+ *   "fix" for that apparent contradiction must not become reading
+ *   `subtype` as the success signal instead of `is_error`.
+ *
+ *   STILL GENUINELY OPEN, not to be read either way from this run: the
+ *   failure was authentication ("Failed to authenticate: OAuth session
+ *   expired and could not be refreshed") — arriving IN-BAND on
+ *   stdout's own `result` field, with stderr EMPTY, a live illustration
+ *   of why this file never trusts stderr or exit code alone. No model
+ *   call ever reached the point of deciding whether to invoke a tool.
+ *   Both `init` lines showed `"tools":[],"mcp_servers":[]` — consistent
+ *   with `--tools ""` blocking the MCP tool, consistent with the
+ *   config never being read, and consistent with the run dying before
+ *   an MCP connection was attempted. None of those is favoured by this
+ *   run. A rerun once login is restored, using the same probe, is what
+ *   closes this.
+ *
+ * THE EXACT VERIFICATION THIS MECHANISM STILL NEEDS, RELAYED FROM THE
+ * OPERATOR — narrowed to the one question above; everything else this
+ * paragraph used to cover is confirmed per the two bullets above. Run:
  *
  *   1. Write a minimal stdio MCP server (any language) that answers
  *      `initialize`, `tools/list` (one tool, e.g. `echo`), and
  *      `tools/call` (echoes its argument back as `content`), and an
  *      `--mcp-config` JSON naming it.
- *   2. Pipe TWO newline-delimited `{"type":"user","message":{"role":"user","content":"..."}}`
+ *   2. With a LOGGED-IN session, pipe TWO newline-delimited
+ *      `{"type":"user","message":{"role":"user","content":"..."}}`
  *      lines into `claude -p --input-format stream-json --output-format
  *      stream-json --verbose --tools "" --strict-mcp-config --mcp-config
  *      <path> --no-session-persistence --safe-mode` — the SECOND message
  *      asking the model to call the `echo` tool — without closing
- *      stdin between them. (`--verbose` is CONFIRMED REQUIRED here, not
- *      relayed: a first probe run omitting it failed immediately with
- *      `Error: When using --print, --output-format=stream-json requires
- *      --verbose`, exit code 1, before any stream-json line was ever
- *      produced — see CHANGELOG. `buildSessionArgs` below already
- *      includes it; this is what confirmed it was necessary.)
- *   3. Relay back, verbatim: every stdout line for BOTH turns (does a
- *      `{"type":"result",...}` line appear once per turn, on the SAME
- *      process, confirming one process serves multiple turns — not one
- *      exit after the first?); whether the `echo` tool was actually
+ *      stdin between them.
+ *   3. Relay back, verbatim: whether the `echo` tool was actually
  *      invoked (does the probe server's own stdin receive a
  *      `tools/call` line, i.e. does `--tools ""` leave an MCP-declared
- *      tool reachable, or does it also block MCP tools?); the exit code
- *      and any stderr; and the exact JSON shape of the terminal
- *      `result` line (does it carry `result`/`is_error`/`stop_reason`/
- *      `usage`/`modelUsage`, the same fields the confirmed single-shot
- *      envelope carries?).
+ *      tool reachable, or does it also block MCP tools?); the `init`
+ *      line's own `tools`/`mcp_servers` fields once auth succeeds; the
+ *      exit code and any stderr.
  *
- * If that comes back showing `--tools ""` also blocks the MCP tool, or
- * that the process exits after one line regardless of `--input-format`,
- * this mechanism does not hold and needs a different flag or a different
- * design — not a silent downgrade to dropping tool calls.
+ * If that comes back showing `--tools ""` also blocks the MCP tool,
+ * this mechanism does not hold and needs a different flag or a
+ * different design — not a silent downgrade to dropping tool calls.
  */
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
@@ -184,15 +221,19 @@ interface HeldSession {
   pending: PendingTurn | null;
 }
 
-/** `--output-format json`'s confirmed envelope shape (index.ts's
- * `ClaudeCliJsonResult`), assumed — RELAYED, NOT CONFIRMED, see this
- * file's own header — to be the same inner shape carried by a
- * stream-json turn's terminal `{"type":"result",...}` line. Declared
- * separately from index.ts's own (private) copy rather than imported:
- * the two parse different FRAMINGS (one JSON document at process exit
- * vs. one line among many in a live stream) even if the inner fields
- * turn out identical, so they are free to diverge without one file's
- * fix silently becoming the other's regression. */
+/** The stream-json turn's terminal `{"type":"result",...}` line —
+ * CONFIRMED by a real invocation (see the file header's "CONFIRMED"
+ * bullets) to carry this same inner shape as `--output-format json`'s
+ * envelope (index.ts's `ClaudeCliJsonResult`). Declared separately from
+ * index.ts's own (private) copy rather than imported: the two parse
+ * different FRAMINGS (one JSON document at process exit vs. one line
+ * among many in a live stream) even if the inner fields are identical,
+ * so they are free to diverge without one file's fix silently becoming
+ * the other's regression. NOTE: `subtype` describes how the
+ * request/response CYCLE ended, not whether the CONTENT is an error —
+ * a real observed envelope carried `subtype: "success"` alongside
+ * `is_error: true`. Only `is_error` (below, in `runSessionTurn`) is
+ * ever read as the failure signal; `subtype` is diagnostic text only. */
 interface ClaudeCliStreamResultEnvelope {
   type?: string;
   result?: string;
@@ -638,6 +679,11 @@ export async function runSessionTurn(options: SessionTurnOptions): Promise<Sessi
   }
 
   const parsed = envelope.raw;
+  // CONFIRMED failure signal is `is_error`, never `subtype` — a real
+  // observed envelope carried `subtype: "success"` (the CYCLE completed
+  // normally) alongside `is_error: true` (the CONTENT is a failure, e.g.
+  // an auth error). `subtype` is included in the message purely as
+  // diagnostic text; do not read it as a second success/failure signal.
   if (parsed.is_error) {
     throw new Error(
       `claude-cli: session ${session.id} reported is_error: true (subtype=${parsed.subtype ?? 'unknown'})` +
