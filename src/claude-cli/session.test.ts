@@ -100,12 +100,36 @@ describe('claude-cli session lifecycle', () => {
       'stream-json',
       '--output-format',
       'stream-json',
+      '--verbose',
       '--tools',
       '',
       '--strict-mcp-config',
       '--no-session-persistence',
       '--safe-mode',
     ]);
+  });
+
+  it('always includes --verbose alongside --output-format stream-json — confirmed required by a real invocation, not relayed', async () => {
+    const { child, emitLine } = fakeChild();
+    mockSpawn.mockImplementationOnce(() => {
+      setImmediate(() => emitLine({ type: 'result', result: 'ok' }));
+      return child;
+    });
+    const session = createSession();
+
+    await runSessionTurn({
+      session,
+      systemPrompt: 'sys',
+      message: 'hi',
+      tools: [],
+      maxToolCalls: 0,
+    });
+
+    const [, args] = mockSpawn.mock.calls[0];
+    const outputFormatIndex = args.indexOf('--output-format');
+    expect(outputFormatIndex).toBeGreaterThanOrEqual(0);
+    expect(args[outputFormatIndex + 1]).toBe('stream-json');
+    expect(args).toContain('--verbose');
   });
 
   it('includes --mcp-config and --model when tools/model are supplied', async () => {
@@ -128,6 +152,7 @@ describe('claude-cli session lifecycle', () => {
 
     const [, args] = mockSpawn.mock.calls[0];
     expect(args).toContain('--mcp-config');
+    expect(args).toContain('--verbose');
     const modelIndex = args.indexOf('--model');
     expect(args[modelIndex + 1]).toBe('claude-sonnet-5');
   });

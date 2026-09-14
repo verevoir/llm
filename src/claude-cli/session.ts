@@ -101,10 +101,15 @@
  *      `--mcp-config` JSON naming it.
  *   2. Pipe TWO newline-delimited `{"type":"user","message":{"role":"user","content":"..."}}`
  *      lines into `claude -p --input-format stream-json --output-format
- *      stream-json --tools "" --strict-mcp-config --mcp-config <path>
- *      --no-session-persistence --safe-mode` — the SECOND message
+ *      stream-json --verbose --tools "" --strict-mcp-config --mcp-config
+ *      <path> --no-session-persistence --safe-mode` — the SECOND message
  *      asking the model to call the `echo` tool — without closing
- *      stdin between them.
+ *      stdin between them. (`--verbose` is CONFIRMED REQUIRED here, not
+ *      relayed: a first probe run omitting it failed immediately with
+ *      `Error: When using --print, --output-format=stream-json requires
+ *      --verbose`, exit code 1, before any stream-json line was ever
+ *      produced — see CHANGELOG. `buildSessionArgs` below already
+ *      includes it; this is what confirmed it was necessary.)
  *   3. Relay back, verbatim: every stdout line for BOTH turns (does a
  *      `{"type":"result",...}` line appear once per turn, on the SAME
  *      process, confirming one process serves multiple turns — not one
@@ -320,6 +325,12 @@ function buildSessionArgs(
     'stream-json',
     '--output-format',
     'stream-json',
+    // CONFIRMED necessary by a real invocation, not relayed from docs:
+    // `-p --output-format stream-json` without this fails immediately
+    // with "Error: When using --print, --output-format=stream-json
+    // requires --verbose" (exit 1) before producing any stream-json line
+    // at all — see this file's header and CHANGELOG.
+    '--verbose',
     '--tools',
     '',
     '--strict-mcp-config',
