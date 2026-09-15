@@ -8,9 +8,11 @@
 
 **The silent-failure consequence.** A caller that falls back to `chat()` for OpenAI or DeepSeek when no tool-calling entry point exists gets tools silently never offered, with no error: `callResponsesCreate` and `callChatCompletionsCreate` (their `chat()` implementations) build no `tools` field in the request body at all — verified by reading both directly. This is the identical shape to the defect `aigency-harness` PR #111 found and fixed on its own Anthropic `ModelPort` adapter (which used to call plain `chat()` regardless of what tools a caller passed). It is a pattern this package can reproduce for any caller who assumes parity across routes, not a one-off.
 
-## Gemini tool-call id collision
+## Gemini tool-call id collision — fixed (verevoir/llm#48)
 
-`chatWithTools`/`chatWithToolLoop`'s `toolUses` mapping falls back `id: f.id ?? f.name` when Gemini's own response omits an id (`src/google/index.ts`). Two parallel calls to the **same tool name** within one turn then share that fallback id. Correlating a `tool_use` to its `tool_result` by id is safe on every route except this one.
+`chatWithTools`/`chatWithToolLoop`'s `toolUses` mapping used to fall back `id: f.id ?? f.name` when Gemini's own response omitted an id (`src/google/index.ts`). Two parallel calls to the **same tool name** within one turn then shared that fallback id — correlating a `tool_use` to its `tool_result` by id was safe on every route except this one.
+
+`f.id` being read at all was correct: Gemini's own `FunctionCall.id` type declaration says it is genuinely optional — "If populated, the client [executes] the function_call and return[s] the response with the matching id" — some calls carry it, some don't. The defect was only in the fallback value. Fixed in #48: the fallback is now derived from the call's name plus its position within that turn's `functionCalls` array (`name#index`) — stable within the turn, distinct between parallel calls to the same tool, and not required to be unique beyond that turn since tool uses and results are only ever correlated within one iteration.
 
 ## `onProgress` is Anthropic-only
 
