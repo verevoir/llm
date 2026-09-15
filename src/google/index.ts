@@ -360,6 +360,30 @@ interface GeminiToolResult {
   finishReason: string;
 }
 
+/**
+ * Fallback id for a Gemini functionCall that arrived without one
+ * (`FunctionCall.id` is genuinely optional on the wire — some calls carry
+ * it, some don't). Derived from the call's name, its position within *that
+ * call's* functionCalls array, and a `scope` — the enclosing loop
+ * iteration for `chatWithToolLoop` (which only ever increases across the
+ * loop's lifetime), or `0` for `chatWithTools`' single, non-looping call.
+ *
+ * Stable: recomputed identically from the same response, for both the
+ * ToolUse a caller sees and the ToolResult recorded against it. Distinct
+ * within one call: two parallel calls to the *same* tool name in one
+ * response get different indices — the collision the previous fallback
+ * (`f.name` alone) had. Distinct ACROSS a tool loop's iterations too: a
+ * fixed index alone is not enough for that, because
+ * `ChatWithToolLoopResult.toolUses`/`toolResults` are a flat, whole-loop
+ * aggregate (see their doc comments in `src/index.ts` — "across every
+ * iteration of the loop"), not a per-iteration structure, so two same-named
+ * calls at the same position in two different iterations would otherwise
+ * collide in exactly the array a caller correlates by id.
+ */
+function fallbackToolCallId(name: string, scope: number, indexInCall: number): string {
+  return `${name}#${scope}-${indexInCall}`;
+}
+
 async function callGenerateWithTools(
   client: GoogleGenAI,
   modelId: string,
@@ -425,7 +449,12 @@ export async function chatWithTools(options: ChatWithToolsOptions): Promise<Chat
   const usage = shapeUsage(r.rawUsage, modelClass);
   await fireUsageHook(options.onUsage, usage, 'google.chatWithTools');
   return {
-    toolUses: r.functionCalls.map((f) => ({ id: f.id ?? f.name, name: f.name, input: f.args })),
+    // chatWithTools is a single, non-looping call — scope 0.
+    toolUses: r.functionCalls.map((f, i) => ({
+      id: f.id ?? fallbackToolCallId(f.name, 0, i),
+      name: f.name,
+      input: f.args,
+    })),
     text: r.text,
     stopReason: r.finishReason,
     usage,
@@ -483,8 +512,8 @@ export async function chatWithToolLoop(
       try {
         await options.onIteration({
           iteration,
-          toolUses: r.functionCalls.map((f) => ({
-            id: f.id ?? f.name,
+          toolUses: r.functionCalls.map((f, i) => ({
+            id: f.id ?? fallbackToolCallId(f.name, iteration, i),
             name: f.name,
             input: f.args,
           })),
@@ -507,8 +536,12 @@ export async function chatWithToolLoop(
     // user turn of functionResponse parts.
     if (r.modelContent) contents.push(r.modelContent);
     const responseParts: unknown[] = [];
-    for (const fc of r.functionCalls) {
-      const use: ToolUse = { id: fc.id ?? fc.name, name: fc.name, input: fc.args };
+    for (const [i, fc] of r.functionCalls.entries()) {
+      const use: ToolUse = {
+        id: fc.id ?? fallbackToolCallId(fc.name, iteration, i),
+        name: fc.name,
+        input: fc.args,
+      };
       allToolUses.push(use);
       let content: string;
       let isError = false;
