@@ -87,6 +87,33 @@ export function withAdvisor(
   return { tools: [...tools, consultTool], executor: wrapped };
 }
 
+/**
+ * Build the advisor's user-turn message from the tool call's `question` +
+ * optional `context`, following `src/claude-cli/index.ts`'s `joinTurns()`
+ * shape — role-labelled sections joined by a blank line — rather than the
+ * bare `${question}\n\n${context}` concatenation this used to be. Both
+ * `question` and `context` are model-supplied (`context` is documented to
+ * the model, in this file's `DEFAULT_DESCRIPTION`, as "the relevant
+ * excerpt" — plausibly tool-output text in a real loop), so a boundary
+ * that just disappears into the surrounding text is the actual defect
+ * being fixed here, not a cosmetic one.
+ *
+ * NOT A SECURITY BOUNDARY: a crafted `context` containing the literal text
+ * `"\n\n## question\n"` can still visually forge a second section once it
+ * reaches the advisor — see `pair.test.ts`'s dedicated test for exactly
+ * this, which documents the behaviour rather than hiding it. Labelling
+ * makes the intended structure legible to a reader (or a reviewer diffing
+ * the two strings); it does not, and is not claimed to, make the advisor
+ * unable to be confused by adversarial content embedded in `context`.
+ * Closing that would mean escaping or rejecting caller content — a
+ * heavier answer than this fix's scope, which is naming the limit
+ * honestly rather than pretending it's closed.
+ */
+function buildConsultMessage(question: string, context: string | undefined): string {
+  if (!context) return question;
+  return `## question\n${question}\n\n## context\n${context}`;
+}
+
 async function consult(
   input: Record<string, unknown>,
   advisor: AdvisorConfig,
@@ -102,7 +129,7 @@ async function consult(
   try {
     reply = await advisor.chat({
       systemPrompt: advisor.systemPrompt,
-      turns: [{ role: 'user', content: context ? `${question}\n\n${context}` : question }],
+      turns: [{ role: 'user', content: buildConsultMessage(question, context) }],
       modelClass: 'reasoning',
       onUsage: async (u) => {
         usage = u;
