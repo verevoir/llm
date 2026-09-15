@@ -5,10 +5,21 @@
  * post-Chat-Completions canonical surface). Importing this subpath
  * requires `openai` as a peer dependency on the consumer.
  *
- * v0.5.0 ships `chat()` only — single-shot text generation. The
- * materialiser-style paths (review-repo, doc-piece, conversation-doc)
- * use just this. `chatWithTools()` and `chatWithToolLoop()` follow in
- * a subsequent release.
+ * Ships `chat()`, `chatWithTools()` and `chatWithToolLoop()`. The tool-calling
+ * pair is a bespoke implementation on the Responses API's own `tools` /
+ * `function_call` / `function_call_output` shape — NOT the shared
+ * `createOpenAICompatAdapter` factory `/deepseek`, `/samba` and `/mistral` are
+ * built from, because that factory speaks OpenAI's older Chat Completions API
+ * (`chat.completions.create`) and this adapter deliberately speaks the newer
+ * Responses API instead (see the `chat()` doc comment above this one, carried
+ * from 0.5.0). The two APIs' tool shapes are not interchangeable: Chat
+ * Completions nests a function under `{type:'function', function:{name,...}}`
+ * and reads `tool_calls` off the response; Responses declares a flat
+ * `{type:'function', name,...}` and reads `function_call` items off
+ * `response.output`, correlated by `call_id` rather than Chat Completions'
+ * `id`. Semantics (real tool-call ids, cap-hit finalise-without-tools) match
+ * the factory and every other adapter regardless of the wire-shape
+ * difference — see the tool-calling section below for where that's done.
  */
 
 import OpenAI from 'openai';
@@ -17,8 +28,14 @@ import {
   type ChatOptions,
   type ChatReply,
   type ChatRetryInfo,
+  type ChatWithToolLoopOptions,
+  type ChatWithToolLoopResult,
+  type ChatWithToolsOptions,
+  type ChatWithToolsResult,
   type ModelClass,
   type RatesTable,
+  type ToolDef,
+  type ToolUse,
   type TokenUsage,
   registerModelLabels,
   registerProviderConnection,
@@ -115,6 +132,19 @@ interface RawResult {
   status: string;
 }
 
+/** Turn our provider-agnostic `Turn[]` into Responses-API `input` items —
+ * `{role, content}`, 'assistant' / 'user' passed through unchanged. Shared by
+ * `chat()` and the tool-calling entry points below so the mapping stays in
+ * one place. */
+function turnsToItems(
+  turns: ChatOptions['turns']
+): { role: 'user' | 'assistant'; content: string }[] {
+  return turns.map((t) => ({
+    role: t.role as 'user' | 'assistant',
+    content: t.content as string,
+  }));
+}
+
 async function callResponsesCreate(
   client: OpenAI,
   modelId: string,
@@ -123,10 +153,7 @@ async function callResponsesCreate(
 ): Promise<RawResult> {
   // The Responses API takes `instructions` (system) + `input` (the
   // conversation). 'assistant' / 'user' roles pass through unchanged.
-  const input = turns.map((t) => ({
-    role: t.role as 'user' | 'assistant',
-    content: t.content as string,
-  }));
+  const input = turnsToItems(turns);
 
   const response = await client.responses.create({
     model: modelId,
@@ -252,9 +279,9 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
  * + systemPrompt, get `{ content, usage, stopReason }` back. Retry
  * on transient errors with caller-visible narration via `onRetry`.
  *
- * Not yet supported in this adapter (planned follow-up): live progress
- * narration via `onProgress`, tool calling. Aligns with the staged
- * rollout of `/google` — chat() first, tools follow.
+ * `onProgress` is not read here — still Anthropic-only across this whole
+ * package; see the `report_progress` auto-injection in `/anthropic` and the
+ * package-level note that no other route reads this field.
  */
 export async function chat(options: ChatOptions): Promise<ChatReply> {
   if (options.turns.length === 0) {
@@ -288,4 +315,265 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
     usage,
     stopReason: raw.status,
   };
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Tool calling — Responses API shape (STDIO-342 parity for /openai)
+// ────────────────────────────────────────────────────────────────────
+//
+// The Responses API declares a function tool FLAT — `{type:'function', name,
+// description, parameters}` — unlike Chat Completions' `{type:'function',
+// function:{name,...}}` nesting the factory uses. A tool call arrives as a
+// `function_call` item on `response.output` (not a `tool_calls` array on a
+// message), carrying its own `call_id` — the value that must be echoed back
+// on the matching `function_call_output` item. That `call_id` is this
+// adapter's ToolUse.id: the provider's own correlation key, never a
+// name-derived fallback (see Gemini's `id: f.id ?? f.name`, which collides
+// when two parallel calls to the same tool name land in one turn — #47).
+//
+// Conversation state is managed by this adapter, not `previous_response_id` —
+// each call resends the full `input` array, the same stateless-history
+// convention `chat()` and every other adapter already follow, rather than
+// leaning on OpenAI's server-side conversation storage.
+
+/** One function-call item read off `response.output`. */
+interface OpenAIFunctionCall {
+  type: 'function_call';
+  id?: string;
+  call_id: string;
+  name: string;
+  arguments: string;
+}
+
+function isFunctionCallItem(item: unknown): item is OpenAIFunctionCall {
+  return (
+    !!item &&
+    typeof item === 'object' &&
+    (item as { type?: unknown }).type === 'function_call' &&
+    typeof (item as { call_id?: unknown }).call_id === 'string' &&
+    typeof (item as { name?: unknown }).name === 'string'
+  );
+}
+
+function toResponsesTools(tools: ToolDef[]) {
+  return tools.map((t) => ({
+    type: 'function' as const,
+    name: t.name,
+    description: t.description,
+    parameters: t.input_schema,
+  }));
+}
+
+function parseToolUse(fc: OpenAIFunctionCall): ToolUse {
+  let input: Record<string, unknown> = {};
+  try {
+    input = fc.arguments ? (JSON.parse(fc.arguments) as Record<string, unknown>) : {};
+  } catch {
+    input = { _raw: fc.arguments };
+  }
+  return { id: fc.call_id, name: fc.name, input };
+}
+
+interface ResponsesToolResult {
+  text: string;
+  rawCalls: OpenAIFunctionCall[];
+  /** The full `response.output` array, verbatim — pushed onto the next
+   * call's `input` so the model's own function_call items line up against
+   * the `function_call_output` items that follow them. */
+  outputItems: unknown[];
+  raw: RawResult['rawUsage'];
+  status: string;
+}
+
+// One tool-enabled Responses call: assistant text + the function calls it
+// emitted + usage. `tools` omitted (not sent as `[]`) on a no-tools finalise
+// call, matching the factory's + Gemini's convention for the same case.
+async function createWithTools(
+  client: OpenAI,
+  modelId: string,
+  systemPrompt: string,
+  items: unknown[],
+  tools: ReturnType<typeof toResponsesTools>
+): Promise<ResponsesToolResult> {
+  const response = await client.responses.create({
+    model: modelId,
+    instructions: systemPrompt,
+    input: items as never,
+    tools: tools.length > 0 ? (tools as never) : undefined,
+  });
+  const outputItems = (response.output ?? []) as unknown[];
+  const u = response.usage;
+  return {
+    text: response.output_text ?? '',
+    rawCalls: outputItems.filter(isFunctionCallItem),
+    outputItems,
+    raw: {
+      inputTokens: u?.input_tokens ?? 0,
+      outputTokens: u?.output_tokens ?? 0,
+      cachedInputTokens: u?.input_tokens_details?.cached_tokens ?? 0,
+    },
+    status: response.status ?? '',
+  };
+}
+
+/** Single-shot tool-calling: surface the model's function calls for the
+ * caller to execute (no automated loop). Mirrors the Anthropic adapter's
+ * chatWithTools and the OpenAI-compatible factory's chatWithTools. */
+export async function chatWithTools(options: ChatWithToolsOptions): Promise<ChatWithToolsResult> {
+  if (options.turns.length === 0) {
+    throw new Error('openai.chatWithTools() requires at least one turn');
+  }
+  if (options.tools.length === 0) {
+    throw new Error('openai.chatWithTools() requires at least one tool');
+  }
+  throwIfAborted(options.abortSignal);
+  const modelClass: ModelClass = options.modelClass ?? 'reasoning';
+  const client = getClient(options.apiKey ?? null);
+  const modelId = models[modelClass];
+  const tools = toResponsesTools(options.tools);
+
+  const r = await callWithRetries(
+    () =>
+      createWithTools(client, modelId, options.systemPrompt, turnsToItems(options.turns), tools),
+    options.onRetry
+  );
+  const usage = shapeUsage(r.raw, modelClass);
+  await fireUsageHook(options.onUsage, usage, 'openai.chatWithTools');
+  return {
+    toolUses: r.rawCalls.map(parseToolUse),
+    text: r.text,
+    stopReason: r.status,
+    usage,
+  };
+}
+
+/** Multi-turn tool loop: model → execute tools → feed function_call_output
+ * items back, until the model returns a call-free reply (or maxIterations).
+ * Mirrors the Anthropic adapter's chatWithToolLoop, in Responses-API shape.
+ * On cap-hit, one final no-tools call forces a written answer synthesised
+ * from the history — matching Anthropic, Gemini, and the OpenAI-compatible
+ * factory — rather than returning nothing. */
+export async function chatWithToolLoop(
+  options: ChatWithToolLoopOptions
+): Promise<ChatWithToolLoopResult> {
+  if (options.turns.length === 0) {
+    throw new Error('openai.chatWithToolLoop() requires at least one turn');
+  }
+  if (options.tools.length === 0) {
+    throw new Error('openai.chatWithToolLoop() requires at least one tool');
+  }
+  const modelClass: ModelClass = options.modelClass ?? 'reasoning';
+  const client = getClient(options.apiKey ?? null);
+  const modelId = models[modelClass];
+  const tools = toResponsesTools(options.tools);
+  const maxIterations = Math.max(1, options.maxIterations ?? 5);
+
+  const items: unknown[] = turnsToItems(options.turns);
+  const allToolUses: ToolUse[] = [];
+  const allToolResults: ChatWithToolLoopResult['toolResults'] = [];
+  const aggregate: TokenUsage = {
+    provider: PROVIDER,
+    model: modelId,
+    direction: modelClass,
+    // Single credential mechanism — see shapeUsage's comment above.
+    route: 'api-key',
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheCreationInputTokens: 0,
+    cacheReadInputTokens: 0,
+  };
+
+  let iteration = 0;
+  while (iteration < maxIterations) {
+    iteration += 1;
+    throwIfAborted(options.abortSignal);
+    const r = await callWithRetries(
+      () => createWithTools(client, modelId, options.systemPrompt, items, tools),
+      options.onRetry
+    );
+    aggregate.inputTokens += r.raw.inputTokens;
+    aggregate.outputTokens += r.raw.outputTokens;
+    aggregate.cacheReadInputTokens += r.raw.cachedInputTokens;
+    await fireUsageHook(options.onUsage, shapeUsage(r.raw, modelClass), 'openai.chatWithToolLoop');
+    if (options.onIteration) {
+      try {
+        await options.onIteration({
+          iteration,
+          toolUses: r.rawCalls.map(parseToolUse),
+          stopReason: r.status,
+        });
+      } catch (err) {
+        console.warn('openai.chatWithToolLoop: onIteration threw', err);
+      }
+    }
+    if (r.rawCalls.length === 0) {
+      return {
+        text: r.text,
+        toolUses: allToolUses,
+        toolResults: allToolResults,
+        iterations: iteration,
+        usage: aggregate,
+      };
+    }
+    // Append the model's output items verbatim (the function_call items plus
+    // any message/reasoning items alongside them) so the follow-up
+    // function_call_output items line up against the call_ids the model
+    // actually emitted this turn — mirrors the factory pushing the assistant
+    // tool_calls turn verbatim before its tool results.
+    items.push(...r.outputItems);
+    for (const fc of r.rawCalls) {
+      const use = parseToolUse(fc);
+      allToolUses.push(use);
+      let content: string;
+      let isError = false;
+      try {
+        content = await options.executor(use);
+      } catch (err) {
+        content = err instanceof Error ? err.message : String(err);
+        isError = true;
+      }
+      // TOOL OUTPUT RE-ENTERS MODEL CONTEXT HERE: `content` — the executor's
+      // return value, which may carry untrusted data the tool itself fetched
+      // (a file, a search result, another service's response) — is pushed
+      // verbatim into `items` and sent back to the model on the next
+      // iteration's `input`. No sanitisation happens at this layer; noted for
+      // the prompt-injection sweep, not defended against here.
+      items.push({ type: 'function_call_output', call_id: fc.call_id, output: content });
+      allToolResults.push({ toolUseId: use.id, content, isError });
+    }
+  }
+  // Iteration cap hit while the model was still calling tools. One FINAL
+  // no-tools call forces a written answer synthesised from the history,
+  // instead of returning nothing. Degrade to empty text if it fails.
+  throwIfAborted(options.abortSignal);
+  try {
+    const fin = await callWithRetries(
+      () => createWithTools(client, modelId, options.systemPrompt, items, toResponsesTools([])),
+      options.onRetry
+    );
+    aggregate.inputTokens += fin.raw.inputTokens;
+    aggregate.outputTokens += fin.raw.outputTokens;
+    aggregate.cacheReadInputTokens += fin.raw.cachedInputTokens;
+    await fireUsageHook(
+      options.onUsage,
+      shapeUsage(fin.raw, modelClass),
+      'openai.chatWithToolLoop'
+    );
+    return {
+      text: fin.text,
+      toolUses: allToolUses,
+      toolResults: allToolResults,
+      iterations: iteration,
+      usage: aggregate,
+    };
+  } catch (err) {
+    console.warn('openai.chatWithToolLoop: final synthesis call failed', err);
+    return {
+      text: '',
+      toolUses: allToolUses,
+      toolResults: allToolResults,
+      iterations: iteration,
+      usage: aggregate,
+    };
+  }
 }
