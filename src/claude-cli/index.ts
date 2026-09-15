@@ -17,41 +17,116 @@
  * `resolveModel` / `resolveModelByTerm` must never be able to silently
  * substitute this adapter for the real API one; a caller wanting this
  * substrate imports and calls it directly, chosen deliberately, never
- * resolved by policy.
+ * resolved by policy. `PROVIDER` and the env allowlist live in `env.ts`
+ * (re-exported here, unchanged) — pulled out so `session.ts` (below) can
+ * build the identical child environment without a module cycle back into
+ * this file.
  *
- * CREDENTIAL CONTRACT. `chat()` refuses rather than substitutes: the
- * child process's environment is built from an ALLOWLIST — see
- * {@link ALLOWED_ENV_VARS} for the exact names permitted through and its
- * own doc-comment for why an allowlist replaced an earlier denylist.
- * `route` on the returned `TokenUsage` is always the constant
- * `'subscription-oauth'` — a declared design choice, not a proof that
- * every billed-credential path is closed (its safety is only as strong as
- * the allowlist's completeness). A non-zero exit throws a plain `Error`
- * and is never retried against a different credential. `chat()` REFUSES a
- * caller-supplied `apiKey` outright rather than silently ignoring it — BYOK
- * has no meaning for a subprocess that authenticates as whatever is
- * already logged in. Flags used: `-p --system-prompt <prompt> --tools ""
- * --output-format json --no-session-persistence --safe-mode` (not
- * `--bare`, whose own `--help` says OAuth/keychain are never read under
- * it). For the full rationale, the rejected alternatives (`--bare`,
- * `--json-schema`), and the correction history behind this contract, see
- * CHANGELOG.md's 0.25.0 entry and this PR's body — not repeated here.
+ * ══════════════════════════════════════════════════════════════════════
+ * SECURITY CORRECTION (0.26.3) — READ THIS BEFORE TOUCHING THE FLAG LIST.
+ * ══════════════════════════════════════════════════════════════════════
+ * Every published version from 0.25.0 through 0.26.2 passed `--tools ""`
+ * and this file's own header claimed that "disabl[ed] tool use
+ * substrate-wide". That was never true. Confirmed directly against the
+ * CLI (the operator ran it and relayed the answer, the same discipline
+ * every other confirmed fact in this file rests on): `--tools` takes a
+ * SPACE-SEPARATED ALLOWLIST of tool names; an empty string is read as
+ * NOT SET, not as an empty allowlist, so the flag silently did nothing
+ * and every call fell through to the CLI's own default built-in tool
+ * set the entire time this adapter has been published. This is the
+ * exact property the "no-bypass" architecture depends on — the reason a
+ * model must go through the caller's own tool belt rather than reading
+ * files directly — and the published package never had it. THIS WAS
+ * PRESENT ON BOTH TRANSPORTS: the single-shot path below, and the
+ * session-holding path's own `buildSessionArgs` in `session.ts` — both
+ * are fixed by the same change, and `session.ts`'s own file header
+ * records that path's correction (plus its own third-probe confirmation)
+ * separately.
  *
- * PAYLOAD CONTRACT, confirmed against a real invocation (history in
- * CHANGELOG.md, not repeated here). The reply text is a FLAT STRING under
- * `result` — not `content`, not `text`, not nested. `stop_reason` is a
- * real top-level field and maps directly to `ChatReply.stopReason`.
- * `usage` carries `input_tokens` / `output_tokens` /
- * `cache_read_input_tokens` / `cache_creation_input_tokens`. There is NO
- * version field anywhere in the payload — `resolveCliVersion()`'s
- * memoized `claude --version` spawn (below) is the ONLY source of
- * `substrateVersion`. `is_error: true` CAN APPEAR ALONGSIDE A ZERO EXIT
- * CODE; `chat()` checks both signals and refuses on either. A SINGLE
- * CALL CAN INVOKE MORE THAN ONE MODEL — `modelUsage` may name several;
- * `determinePrimaryModel()` (below) reports only the entry matching the
- * top-level `usage` block as `TokenUsage.model`, but every entry is
- * named in a `console.warn` when more than one is present, so a second
- * model having run is never silently dropped.
+ * THE FIX: `--disallowedTools "*"`. Confirmed (not relayed) to remove a
+ * tool from context ENTIRELY when named bare (as opposed to a scoped
+ * rule like `Bash(rm *)`, which leaves the tool advertised and denies
+ * only matching calls) — "absent", the same failure shape this codebase
+ * uses everywhere else, not "refused". `EndConversation` is documented
+ * as deliberately exempt from deny rules while any other tool remains;
+ * expect to see it survive and do not read that as the fix failing.
+ *
+ * `--allowedTools` WAS CONSIDERED AND REJECTED — it is CONFIRMED
+ * ADDITIVE on top of the CLI's own default safe-list ("these run
+ * without prompting"), not a restriction, and removes nothing. Using it
+ * expecting an allowlist would have been a second, identically-shaped
+ * silent fail-open. Grepped: not used anywhere in this codebase.
+ *
+ * GETTING A FLAG RIGHT ONCE IS NOT THE FIX — this is also why `chat()`
+ * now speaks `stream-json` on BOTH stdin and stdout (see TOOL-SAFETY
+ * VERIFICATION below) rather than trusting `--disallowedTools "*"` by
+ * construction the way `--tools ""` was trusted. The CLI's own
+ * `{"type":"system","subtype":"init",...}` event carries a `tools`
+ * array — the only authoritative, checkable answer to what a run
+ * actually has. A flag is an intention; the init event is the
+ * observable. `chat()` asserts against it on every call, and refuses
+ * rather than proceeding on a mismatch — the exact mechanism that would
+ * have caught the `--tools ""` defect on day one instead of it shipping
+ * silently for three minor versions. THE SESSION-HOLDING TRANSPORT DOES
+ * NOT YET DO THE SAME — see `session.ts`'s own file header for exactly
+ * what it relies on instead (a confirmed-real-invocation record, not a
+ * per-call runtime check) and what building the equivalent check there
+ * would cost.
+ *
+ * DELIBERATELY NOT TOUCHED HERE: whether `--safe-mode` actually
+ * suppresses MCP-server loading is a SEPARATE, still-unconfirmed
+ * question (see the ISOLATION paragraph below) — conflating that fix
+ * with this one is exactly how the `--tools ""` defect nearly escaped a
+ * second time layered under a different, harder-to-isolate change. This
+ * single-shot path never passes `--mcp-config` at all (see ISOLATION),
+ * so the question does not even arise for it; the session-holding path
+ * does, and `session.ts`'s own header carries the full, still-open
+ * account.
+ *
+ * TOOL-SAFETY VERIFICATION — THE MECHANISM, FOR THE SINGLE-SHOT PATH.
+ * `chat()` (no `session` passed) builds its stdin as ONE
+ * `{"type":"user","message":{"role":"user","content":"..."}}` line (the
+ * flattened turn text, unchanged) under `--input-format stream-json
+ * --output-format stream-json --verbose` (the last is CONFIRMED
+ * required by a real invocation: `-p --output-format stream-json`
+ * without it fails immediately with "Error: When using --print,
+ * --output-format=stream-json requires --verbose", exit 1, before
+ * producing any stream-json line at all). On a successful exit, the
+ * stdout stream is split into JSON-per-line events; the
+ * `{"type":"system","subtype":"init"}` event's `tools` array MUST be
+ * empty, matching `--disallowedTools "*"`'s promise of zero built-in
+ * tools reachable. A NON-EMPTY array, or NO init event found in the
+ * stream at all (parsing failed, the shape changed, anything this
+ * adapter cannot make sense of), THROWS rather than returning a reply
+ * that may have used capabilities this call never declared — refusing
+ * to proceed on an unverifiable safety property, not merely an
+ * incorrect one.
+ *
+ * PAYLOAD CONTRACT for the terminal `{"type":"result",...}` event,
+ * confirmed against real invocations (history in CHANGELOG.md, not
+ * repeated here). Field-for-field IDENTICAL to the previous
+ * `--output-format json` envelope this file used to parse directly —
+ * only the FRAMING changed (one line among several in a stream, not the
+ * sole stdout payload). The reply text is a FLAT STRING under `result`
+ * — not `content`, not `text`, not nested. `stop_reason` is a real
+ * top-level field and maps directly to `ChatReply.stopReason`. `usage`
+ * carries `input_tokens` / `output_tokens` / `cache_read_input_tokens` /
+ * `cache_creation_input_tokens`. There is NO version field anywhere in
+ * the payload — `resolveCliVersion()`'s memoized `claude --version`
+ * spawn (below) is the ONLY source of `substrateVersion`. `is_error:
+ * true` CAN APPEAR ALONGSIDE A ZERO EXIT CODE, and — confirmed by a real
+ * invocation — CAN APPEAR ALONGSIDE `subtype: "success"`: `subtype`
+ * describes how the request/response cycle ended, not whether the
+ * content is a failure, so `chat()` reads only `is_error`, never
+ * `subtype`, as the failure signal. A SINGLE CALL CAN INVOKE MORE THAN
+ * ONE MODEL — `modelUsage` may name several; `determinePrimaryModel()`
+ * (below) reports only the entry matching the top-level `usage` block as
+ * `TokenUsage.model`, but every entry is named in a `console.warn` when
+ * more than one is present, so a second model having run is never
+ * silently dropped. This same envelope shape, and this same
+ * `determinePrimaryModel`/`shapeUsage` pair, are shared by the
+ * session-holding path's own `runSessionTurn` (session.ts) — the two
+ * transports report usage identically.
  *
  * `total_cost_usd` / per-model `modelUsage[].costUSD` ARE PRESENT IN THE
  * PAYLOAD AND DELIBERATELY NOT SURFACED ONTO `TokenUsage` — not recorded
@@ -64,24 +139,29 @@
  * out-of-scope work (`decisions/023`, aigency-governance).
  *
  * SINGLE-SHOT `chat()` (no `session` passed) still refuses a turn
- * carrying a `tool_use` / `tool_result` block rather than silently
- * flattening it — that path has no tool loop of its own, and `--tools
- * ""` makes one moot for it. Tool calling lives on the SESSION-HOLDING
- * TRANSPORT below.
+ * carrying a `tool_use` / `tool_result` block as INPUT rather than
+ * silently flattening it — that has nothing to do with whether this
+ * adapter can call tools (the session-holding path below can); a
+ * caller-supplied turn simply never carries one, on either transport —
+ * a model's own tool activity flows out through `toolUses`/`toolResults`
+ * on the result, never back in as content. `chatWithTools`/
+ * `chatWithToolLoop` do not exist on the single-shot path at all — tool
+ * calling lives entirely on the SESSION-HOLDING TRANSPORT below.
  *
  * SESSION-HOLDING TRANSPORT (`chatWithToolLoop`, and `chat` given a
  * `session`) — implemented in `session.ts` + `mcp-bridge.ts`, alongside
  * this file; this paragraph is the summary, not the full account.
  *
  * WHY A SECOND TRANSPORT, RATHER THAN WIDENING THE SINGLE-SHOT ONE.
- * `-p --output-format json` spawns one process per call and exits —
- * fine for a stateless review lens, structurally unable to carry a tool
- * exchange (turn N asks for a tool, turn N+1 supplies the result — two
- * different processes can't correlate that) or to warm a prompt cache
- * across turns (nothing survives between spawns to read a cache from).
- * A HELD session is the one mechanism that unlocks both — tools and
- * caching arrive together or not at all on this route, because the same
- * live process is what each of them needs.
+ * `-p --output-format json` (now `stream-json`, see above) spawns one
+ * process per call and exits — fine for a stateless review lens,
+ * structurally unable to carry a tool exchange (turn N asks for a tool,
+ * turn N+1 supplies the result — two different processes can't
+ * correlate that) or to warm a prompt cache across turns (nothing
+ * survives between spawns to read a cache from). A HELD session is the
+ * one mechanism that unlocks both — tools and caching arrive together
+ * or not at all on this route, because the same live process is what
+ * each of them needs.
  *
  * THE HANDLE. `createSession()` returns an opaque `ClaudeCliSessionHandle`
  * the CALLER holds — this package has no concept of a conversation, so a
@@ -98,17 +178,22 @@
  * stream-json` is kept running for the session's whole life — one
  * user-turn JSON line in, a terminal `{"type":"result",...}` line out
  * per turn — rather than the single-shot path's spawn-per-call. Tools
- * are exposed to it WITHOUT lifting `--tools ""` (kept, per this file's
- * own constraint: the tools offered must be exactly the caller's, never
- * Claude Code's own) — instead an embedded, per-session MCP stdio
- * server (`mcp-bridge.ts`) is named via an explicit `--mcp-config`
- * (`--strict-mcp-config` stays on, so it is the ONLY server reachable).
- * That server forwards every `tools/call` over a loopback TCP hop back
- * into THIS process, where the caller's own `ToolExecutor` actually
- * runs — so `claude`'s own agentic loop calls tools autonomously during
- * one turn, and `chatWithToolLoop` on this transport makes exactly ONE
- * turn request per call rather than manually feeding tool_use/tool_result
- * blocks back and forth the way the API adapters do.
+ * are exposed to it WITHOUT lifting the built-in-tool denial
+ * (`--disallowedTools "*"` — kept, per this file's own constraint: the
+ * tools offered must be exactly the caller's, never Claude Code's own)
+ * — instead an embedded, per-session MCP stdio server (`mcp-bridge.ts`)
+ * is named via an explicit `--mcp-config` (`--strict-mcp-config` stays
+ * on, so it is the ONLY server reachable). That server forwards every
+ * `tools/call` over a loopback TCP hop back into THIS process, where the
+ * caller's own `ToolExecutor` actually runs — so `claude`'s own agentic
+ * loop calls tools autonomously during one turn, and `chatWithToolLoop`
+ * on this transport makes exactly ONE turn request per call rather than
+ * manually feeding tool_use/tool_result blocks back and forth the way
+ * the API adapters do. `session.ts`'s own file header records, plainly,
+ * that this DELIBERATELY DEPENDS ON a confirmed CLI bug —
+ * `--disallowedTools` not reliably filtering MCP-server tools — so an
+ * upstream fix to that bug would break this path's tool-bearing
+ * sessions silently; that dependency is recorded there, not hidden.
  *
  * WHY `chatWithTools` (single-shot, return-before-execution) REFUSES ON
  * THIS TRANSPORT rather than faking the contract: because tools run
@@ -118,22 +203,27 @@
  * honesty over interface uniformity — see this function's own doc
  * comment.
  *
- * TWO OF THREE ONCE-RELAYED ASSUMPTIONS ARE NOW CONFIRMED, the third
- * still genuinely open — see `session.ts`'s own file header for the full
- * account of a real, operator-run invocation (which failed on expired
- * OAuth, not on the mechanism itself). CONFIRMED: `--input-format
+ * THREE ONCE-RELAYED ASSUMPTIONS FOR THIS TRANSPORT, TWO NOW CONFIRMED —
+ * see `session.ts`'s own file header for the full probe history (three
+ * real, operator-run invocations). CONFIRMED: `--input-format
  * stream-json`/`--output-format stream-json` keeps ONE process alive
- * across MULTIPLE turns (two result lines, one session_id, no exit
- * between them). CONFIRMED: a turn's terminal event genuinely is
+ * across MULTIPLE turns (three separate confirmations now, including a
+ * fully successful run — two/three result lines, one session_id, no
+ * exit between them). CONFIRMED: a turn's terminal event genuinely is
  * `{"type":"result",...}` carrying the same inner shape as the
- * confirmed single-shot envelope (result/is_error/subtype/stop_reason/
- * usage/modelUsage all present). STILL OPEN: whether an MCP tool named
- * via `--mcp-config` stays callable under `--tools ""` — the run that
- * confirmed the two points above failed before a model call ever
- * decided whether to invoke one, so this is not settled either way.
- * Every terminal parse in that path throws a specific, legible error
- * rather than hanging or silently dropping a tool call if the real
- * shape doesn't match — per this file's own "declares it rather than
+ * confirmed single-shot envelope, AND `--disallowedTools "*"` genuinely
+ * removes every built-in tool on this transport too (the CLI's own
+ * `init` event reported `"tools":[]`, corroborated by the model
+ * explicitly declining to fabricate a Bash result when asked to invoke
+ * one). STILL OPEN: whether an MCP tool named via `--mcp-config` stays
+ * reachable given `--disallowedTools "*"` together with `--safe-mode` —
+ * every probe run so far has shown `mcp_servers` empty before an MCP
+ * connection is ever established; `--safe-mode` is the leading,
+ * unconfirmed hypothesis for why (see `session.ts`'s own file header for
+ * the full account and the isolating probe this points to next). Every
+ * terminal parse on this path throws a specific, legible error rather
+ * than hanging or silently dropping a tool call if the real shape
+ * doesn't match — per this file's own "declares it rather than
  * pretending" standard — including a per-turn watchdog timeout that
  * kills a held process and refuses rather than waiting forever for an
  * event that never arrives.
@@ -145,12 +235,12 @@
  * memoized `claude --version` lookup is deliberately NOT wired to any
  * one call's signal, since every caller shares it.
  *
- * `onProgress` IS ACCEPTED, NEVER INVOKED. `--tools ""` disables every
- * tool a `report_progress` mechanism would need, and `--output-format
- * json` delivers one envelope at process exit, not a stream — there is
- * no partial signal to narrate from either way. A caller supplying
- * `onProgress` will never see it called; nothing here throws for
- * supplying it.
+ * `onProgress` IS ACCEPTED, NEVER INVOKED. `--disallowedTools "*"`
+ * disables every built-in tool a `report_progress` mechanism would
+ * need, and the terminal `result` event still delivers the full reply
+ * only once, not incrementally — there is no partial signal to narrate
+ * from either way. A caller supplying `onProgress` will never see it
+ * called; nothing here throws for supplying it.
  *
  * MODEL PINNING. `chat()` accepts `options.model` — an exact model id,
  * passed straight through as `--model <id>` — so a caller that must
@@ -179,23 +269,28 @@
  *
  * ISOLATION FROM PROJECT/LOCAL CONFIGURATION, on top of `--safe-mode`'s
  * own documented disabling of CLAUDE.md/skills/plugins/hooks/MCP
- * servers/custom commands (see the CREDENTIAL CONTRACT paragraph
- * above). Two more, deliberate: `--strict-mcp-config` is passed on
- * every invocation, so even if `--safe-mode`'s MCP suppression turns
- * out narrower in practice than its `--help` states, no MCP server from
- * any configuration source reaches this call — only servers passed via
- * an explicit `--mcp-config` flag would, and this adapter never passes
- * that flag, so the effective set is always empty. And the spawn's
- * `cwd` (see `runClaudeCli`) is set explicitly to the platform temp
- * directory rather than inherited from whatever directory the calling
- * process happens to be running in — a project's `CLAUDE.md` /
- * `.mcp.json` live relative to cwd, and a governance review process's
- * cwd is typically the very repository it is reviewing, which is
- * precisely the content this call must not see. Both are defense-in-
- * depth alongside `--safe-mode`, not a claim that `--safe-mode` alone
- * was proven insufficient — this repository has not independently
- * re-confirmed `--safe-mode`'s own documented MCP/CLAUDE.md suppression
- * by direct observation, so it is not relied on alone.
+ * servers/custom commands (passed unconditionally by both transports).
+ * Two more, deliberate: `--strict-mcp-config` is passed on every
+ * invocation, so even if `--safe-mode`'s MCP suppression turns out
+ * narrower in practice than its `--help` states, no MCP server from any
+ * configuration source reaches a call — on the single-shot path, which
+ * never passes `--mcp-config` at all, the effective set is always
+ * empty; on the session-holding path, only the session's own bridge,
+ * named explicitly, is reachable. And the spawn's `cwd` (see
+ * `runClaudeCli` and `session.ts`'s own session spawn) is set explicitly
+ * to the platform temp directory rather than inherited from whatever
+ * directory the calling process happens to be running in — a project's
+ * `CLAUDE.md` / `.mcp.json` live relative to cwd, and a governance
+ * review process's cwd is typically the very repository it is
+ * reviewing, which is precisely the content this call must not see.
+ * Both are defense-in-depth alongside `--safe-mode`, not a claim that
+ * `--safe-mode` alone was proven insufficient — this repository has not
+ * independently re-confirmed `--safe-mode`'s own documented MCP/
+ * CLAUDE.md suppression by direct observation, so it is not relied on
+ * alone, and whether it actually holds remains a SEPARATE, open
+ * question this change does not touch (see the SECURITY CORRECTION
+ * paragraph above, and `session.ts`'s own header for the fuller
+ * account).
  */
 
 import { spawn } from 'node:child_process';
@@ -243,10 +338,6 @@ export {
   type ClaudeCliSessionHandle,
   type PermissionDenial,
 };
-
-// ALLOWED_ENV_VARS / CLAUDE_CLI_CREDENTIAL_ENV_VAR / allowedEnv now live in
-// env.ts, re-exported above — see that module's own doc comments for the
-// full allowlist-vs-denylist rationale this block used to carry.
 
 /**
  * {@link ChatOptions}, plus an optional held session — see the file
@@ -309,8 +400,11 @@ export interface ClaudeCliChatWithToolLoopResult extends ChatWithToolLoopResult 
   permissionDenials: PermissionDenial[];
 }
 
-/** Flags applied to every invocation. See the file header for why each one
- * is here, and why `--bare` / `--json-schema` are not used instead.
+/** Flags applied to every invocation. See the file header's SECURITY
+ * CORRECTION and TOOL-SAFETY VERIFICATION paragraphs for why this is
+ * `--disallowedTools "*"` plus the stream-json input/output pair, not
+ * `--tools ""` plus `--output-format json` as before 0.26.3 — and why
+ * `--bare` / `--json-schema` / `--allowedTools` are not used instead.
  * `--model` is appended only when `model` is supplied — see the file
  * header's MODEL PINNING paragraph; omitting it leaves the CLI's own
  * default model selection untouched. */
@@ -319,11 +413,23 @@ function buildArgs(systemPrompt: string, model: string | undefined): string[] {
     '-p',
     '--system-prompt',
     systemPrompt,
-    '--tools',
-    '',
-    '--strict-mcp-config',
+    '--input-format',
+    'stream-json',
     '--output-format',
-    'json',
+    'stream-json',
+    // CONFIRMED required by a real invocation, not relayed: `-p
+    // --output-format stream-json` without this fails immediately with
+    // "Error: When using --print, --output-format=stream-json requires
+    // --verbose" (exit 1) before producing any stream-json line at all.
+    '--verbose',
+    // CONFIRMED to remove every built-in tool from context entirely when
+    // named bare, unlike --tools "" — see the file header's SECURITY
+    // CORRECTION paragraph. This adapter never passes --mcp-config, so
+    // there is no MCP tool for --disallowedTools's own documented
+    // MCP-filtering quirk to matter for on this path.
+    '--disallowedTools',
+    '*',
+    '--strict-mcp-config',
     '--no-session-persistence',
     '--safe-mode',
   ];
@@ -334,12 +440,17 @@ function buildArgs(systemPrompt: string, model: string | undefined): string[] {
 }
 
 /**
- * Flatten a turn's content to plain text for the CLI's stdin. Per
- * {@link TurnContent}'s own contract ("adapters that don't support a given
- * block kind should surface a typed error rather than silently dropping
- * content"): a `tool_use` / `tool_result` block is meaningless here — this
- * adapter has no tool loop (`--tools ""` disables tools entirely) — so a
- * turn carrying one is refused rather than silently flattened away.
+ * Flatten a turn's content to plain text — used for a single stdin
+ * message on both transports: the single-shot path's `joinTurns` below,
+ * and the session-holding path's per-turn message text (`session.ts`'s
+ * `runSessionTurn`, called from `chatOnSession`/`chatWithToolLoop`).
+ * `tool_use` / `tool_result` blocks are never valid as CALLER-SUPPLIED
+ * turn content on either transport — a model's own tool activity flows
+ * OUT through `toolUses`/`toolResults` on a result, never back IN as
+ * content a caller hands this adapter — so a turn carrying one is
+ * refused rather than silently flattened away, per {@link TurnContent}'s
+ * own contract ("adapters that don't support a given block kind should
+ * surface a typed error rather than silently dropping content").
  */
 function contentToText(content: TurnContent): string {
   if (typeof content === 'string') return content;
@@ -350,9 +461,9 @@ function contentToText(content: TurnContent): string {
       continue;
     }
     throw new Error(
-      `claudeCli: turn content block of type "${block.type}" is not supported — this adapter ` +
-        'has no tool loop (--tools "" disables tools entirely), so a tool_use/tool_result ' +
-        'block would be silently dropped rather than acted on. Use plain text turns.'
+      `claudeCli: turn content block of type "${block.type}" is not supported as caller-supplied ` +
+        "input — a model's own tool activity is reported back via toolUses/toolResults, never " +
+        'accepted as turn content. Use plain text turns.'
     );
   }
   return parts.join('\n');
@@ -360,10 +471,11 @@ function contentToText(content: TurnContent): string {
 
 /**
  * Multiple turns are joined as a labelled transcript — not equivalent to a
- * real multi-turn CLI session (there is none; see the file header, this
- * adapter is `chat()`-only, single-shot). Documented rather than silently
- * mishandled. The one real caller this adapter is built for (a governance
- * review lens) always supplies exactly one turn.
+ * real multi-turn CLI session on the single-shot path (there is none, on
+ * that path; see the file header, `chat()` without `session` is
+ * single-shot). Documented rather than silently mishandled. The one real
+ * caller this path is built for (a governance review lens) always
+ * supplies exactly one turn.
  */
 function joinTurns(turns: ChatOptions['turns']): string {
   if (turns.length === 1) {
@@ -372,8 +484,18 @@ function joinTurns(turns: ChatOptions['turns']): string {
   return turns.map((t) => `## ${t.role}\n${contentToText(t.content)}`).join('\n\n');
 }
 
-/** Per-model usage entry inside `--output-format json`'s `modelUsage` map —
- * confirmed real, see the file header's PAYLOAD CONTRACT paragraph. */
+/** Wraps the flattened turn text as ONE `stream-json` input line — the
+ * shape a real invocation confirmed works for a single-shot exchange
+ * (see the file header's TOOL-SAFETY VERIFICATION paragraph). Still
+ * exactly one message, still exactly one reply; only the wire framing
+ * changed from a raw text blob to this envelope. */
+function buildStreamInputLine(content: string): string {
+  return JSON.stringify({ type: 'user', message: { role: 'user', content } }) + '\n';
+}
+
+/** Per-model usage entry inside the terminal `result` event's `modelUsage`
+ * map — confirmed real, see the file header's PAYLOAD CONTRACT
+ * paragraph. */
 interface ModelUsageEntry {
   inputTokens?: number;
   outputTokens?: number;
@@ -389,10 +511,12 @@ interface ModelUsageEntry {
 }
 
 /**
- * `--output-format json`'s real, confirmed envelope shape — see the file
- * header for how this was established and what changed from the original
- * guess. Fields not confirmed present in every observed shape stay
- * optional so a shape lacking one still parses without throwing.
+ * The terminal `{"type":"result",...}` stream-json event's shape —
+ * confirmed real, field-for-field identical to the previous
+ * `--output-format json` envelope (see the file header's PAYLOAD
+ * CONTRACT paragraph for how this was established). Fields not
+ * confirmed present in every observed shape stay optional so a shape
+ * lacking one still parses without throwing.
  *
  * `usage` below uses snake_case field names while `modelUsage`'s entries
  * (`ModelUsageEntry`) use camelCase — a real inconsistency in the payload,
@@ -401,17 +525,21 @@ interface ModelUsageEntry {
  * camelCase `modelUsage[key].inputTokens`), so both conventions are kept
  * as observed rather than normalised to one.
  */
-interface ClaudeCliJsonResult {
+interface ClaudeCliResultEvent {
+  type?: string;
   /** The reply text — a flat string. Confirmed; this is the only text
    * field this adapter reads. */
   result?: string;
   /** True when the CLI itself reports a failure, independent of the
-   * process exit code — see the file header's "`is_error: true` CAN
-   * APPEAR ALONGSIDE A ZERO EXIT CODE". */
+   * process exit code AND independent of `subtype` — see the file
+   * header's PAYLOAD CONTRACT paragraph: a real envelope carried
+   * `subtype: "success"` alongside `is_error: true`. Only `is_error` is
+   * ever read as the failure signal below. */
   is_error?: boolean;
   /** Diagnostic context for an `is_error: true` payload, e.g.
-   * `"error_max_turns"`. Included in this adapter's thrown error message
-   * when present. */
+   * `"error_max_turns"` — included in this adapter's thrown error
+   * message when present, but NEVER read as a second success/failure
+   * signal. */
   subtype?: string;
   /** Maps directly to {@link ChatReply.stopReason}. */
   stop_reason?: string;
@@ -431,15 +559,81 @@ interface ClaudeCliJsonResult {
   total_cost_usd?: number;
 }
 
-/** Parses `--output-format json`'s stdout. Returns `null` on anything that
- * isn't valid JSON (e.g. a genuinely unrecognised shape, or a future CLI
- * version changing it) — the caller falls back to raw text in that case,
- * per the file header. */
-function parseCliJson(stdout: string): ClaudeCliJsonResult | null {
-  try {
-    return JSON.parse(stdout) as ClaudeCliJsonResult;
-  } catch {
-    return null;
+/** The `{"type":"system","subtype":"init",...}` stream-json event's shape
+ * — specifically the ONE field this adapter reads from it: `tools`, the
+ * only authoritative, checkable answer to what built-in tools a run
+ * actually has. See the file header's TOOL-SAFETY VERIFICATION
+ * paragraph. Every other field the CLI puts on this event (model,
+ * permissionMode, slash_commands, session_id, …) is real but irrelevant
+ * to this adapter and deliberately not modelled. */
+interface ClaudeCliInitEvent {
+  type?: string;
+  subtype?: string;
+  tools?: string[];
+}
+
+/** Parses `claude`'s `stream-json` stdout into one JSON object per
+ * non-empty line. A line that is not valid JSON is silently skipped
+ * here, not treated as fatal on its own — if the events this adapter
+ * actually needs (the init event, the result event) are never found
+ * among what DID parse, the caller-side checks below refuse explicitly
+ * rather than guessing from a partial or malformed stream. */
+function parseStreamEvents(stdout: string): Array<Record<string, unknown>> {
+  const events: Array<Record<string, unknown>> = [];
+  for (const rawLine of stdout.split('\n')) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    try {
+      const parsed: unknown = JSON.parse(line);
+      if (parsed !== null && typeof parsed === 'object') {
+        events.push(parsed as Record<string, unknown>);
+      }
+    } catch {
+      // Not a JSON line — ignored; see this function's own doc comment.
+    }
+  }
+  return events;
+}
+
+function findResultEvent(events: Array<Record<string, unknown>>): ClaudeCliResultEvent | null {
+  const found = events.find((e) => e.type === 'result');
+  return found ? (found as ClaudeCliResultEvent) : null;
+}
+
+function findInitEvent(events: Array<Record<string, unknown>>): ClaudeCliInitEvent | null {
+  const found = events.find((e) => e.type === 'system' && e.subtype === 'init');
+  return found ? (found as ClaudeCliInitEvent) : null;
+}
+
+/**
+ * THE VERIFICATION ITSELF — see the file header's TOOL-SAFETY
+ * VERIFICATION paragraph for the full reasoning. Checks the CLI's own
+ * `init` event's `tools` array — never trusts `--disallowedTools "*"`
+ * by construction the way `--tools ""` used to be trusted. Throws,
+ * naming exactly what was found, on either failure mode: a non-empty
+ * array (the flag did not do what it was supposed to), or no init event
+ * at all (the property cannot be verified, so this refuses rather than
+ * silently proceeding as if it had been).
+ */
+function assertNoBuiltinToolsReachable(events: Array<Record<string, unknown>>): void {
+  const init = findInitEvent(events);
+  if (!init) {
+    throw new Error(
+      'claudeCli.chat(): could not verify the promised zero-built-in-tools property — no ' +
+        '{"type":"system","subtype":"init"} event was found in the stream-json output to check ' +
+        'its own "tools" array against. Refusing rather than silently proceeding as if ' +
+        '--disallowedTools "*" had been honoured unseen.'
+    );
+  }
+  const tools = Array.isArray(init.tools) ? init.tools : [];
+  if (tools.length > 0) {
+    throw new Error(
+      'claudeCli.chat(): expected zero built-in tools reachable (per --disallowedTools "*"), ' +
+        `but the CLI's own init event reported ${tools.length}: ${tools.join(', ')}. Refusing to ` +
+        'return a reply that may have used tools this call never declared — this is the exact ' +
+        'class of defect --tools "" silently had in every 0.25.0-0.26.2 release (see the file ' +
+        "header's SECURITY CORRECTION paragraph)."
+    );
   }
 }
 
@@ -467,8 +661,8 @@ interface PrimaryModelResult {
  * `'unknown'` in that case.
  */
 function determinePrimaryModel(
-  usage: ClaudeCliJsonResult['usage'],
-  modelUsage: ClaudeCliJsonResult['modelUsage']
+  usage: ClaudeCliResultEvent['usage'],
+  modelUsage: ClaudeCliResultEvent['modelUsage']
 ): PrimaryModelResult {
   const entries = Object.entries(modelUsage ?? {});
   if (entries.length === 0) {
@@ -541,11 +735,11 @@ export function resetClaudeCliVersionCacheForTests(): void {
 }
 
 function shapeUsage(
-  usage: ClaudeCliJsonResult['usage'],
+  usage: ClaudeCliResultEvent['usage'],
   model: string,
   substrateVersion: string | undefined
 ): TokenUsage {
-  // Constant, never computed — see the file header's CREDENTIAL CONTRACT
+  // Constant, never computed — see the file header's PAYLOAD CONTRACT
   // paragraph for why this is safe to assert rather than derive.
   const route: CredentialRoute = 'subscription-oauth';
   return {
@@ -601,24 +795,22 @@ function describeExit(
 }
 
 /**
- * Recovers the REAL failure reason on a non-zero exit from `claude -p`'s
- * own `--output-format json` envelope on stdout, rather than reporting
- * only the bare exit code (and possibly stderr) as before this existed.
+ * Recovers the REAL failure reason on a non-zero exit from the terminal
+ * `{"type":"result",...}` stream-json event on stdout, rather than
+ * reporting only the bare exit code (and possibly stderr).
  *
  * THE ESCAPED DEFECT THIS EXISTS TO FIX. `claude -p`'s commonest real
  * failure — not logged in — exits 1 with EMPTY stderr; the actual reason
- * ("Not logged in · Please run /login") lives only in stdout's own JSON
- * envelope, in `result`, typically alongside `is_error: true`. Before
- * this function existed, the non-zero-exit branch never read stdout at
- * all, so this surfaced as the content-free "claude -p exited with code
- * 1" and the real reason was silently dropped.
+ * ("Not logged in · Please run /login") lives only in stdout's own
+ * result event, in `result`, typically alongside `is_error: true`.
  *
- * RECOVERY ORDER: stdout is parsed as the JSON envelope; its `result`
- * field wins when present and non-empty. Otherwise this falls back to
- * stdout's raw text (stdout that isn't valid JSON, or JSON with no
- * usable `result`). `stderr` is appended ONLY when it says something the
- * recovered text doesn't already say, so a `stderr` that merely repeats
- * the same message is never duplicated into it.
+ * RECOVERY ORDER: stdout is parsed as stream-json events; the result
+ * event's `result` field wins when present and non-empty. Otherwise this
+ * falls back to stdout's raw text (stdout that isn't valid JSON at all,
+ * or carries no result event with a usable `result`). `stderr` is
+ * appended ONLY when it says something the recovered text doesn't
+ * already say, so a `stderr` that merely repeats the same message is
+ * never duplicated into it.
  *
  * DELIBERATELY NOT USED ON THE SPAWN-FAILURE PATH (`could not run the
  * claude CLI — …`, thrown from `chat()`'s own catch block above when the
@@ -629,8 +821,10 @@ function describeExit(
  * to, so the two do not collide. That prefix is untouched by this change.
  */
 function describeNonZeroExitReason(spawned: Pick<SpawnResult, 'stdout' | 'stderr'>): string {
-  const parsed = parseCliJson(spawned.stdout);
-  const fromResult = parsed && typeof parsed.result === 'string' ? parsed.result.trim() : '';
+  const events = parseStreamEvents(spawned.stdout);
+  const resultEvent = findResultEvent(events);
+  const fromResult =
+    resultEvent && typeof resultEvent.result === 'string' ? resultEvent.result.trim() : '';
   const rawStdout = spawned.stdout.trim();
   const reason = fromResult !== '' ? fromResult : rawStdout;
   const stderrTrimmed = spawned.stderr.trim();
@@ -751,8 +945,8 @@ export async function chat(options: ClaudeCliChatOptions): Promise<ChatReply> {
   }
   throwIfAborted(options.abortSignal);
   if (options.apiKey != null) {
-    // Refused, not silently ignored — see the file header's CREDENTIAL
-    // CONTRACT paragraph.
+    // Refused, not silently ignored — see the file header's SECURITY
+    // CORRECTION paragraph.
     throw new Error(
       "claudeCli.chat() does not accept apiKey — it always uses the CLI's own logged-in " +
         'subscription session, never a supplied credential.'
@@ -760,7 +954,7 @@ export async function chat(options: ClaudeCliChatOptions): Promise<ChatReply> {
   }
 
   const args = buildArgs(options.systemPrompt, options.model);
-  const input = joinTurns(options.turns);
+  const input = buildStreamInputLine(joinTurns(options.turns));
   // options.onProgress is accepted per the shared ChatOptions contract but
   // never invoked — see the file header's `onProgress` paragraph for why
   // this is a disclosed limitation, not a gap. options.maxTokens is
@@ -779,7 +973,7 @@ export async function chat(options: ClaudeCliChatOptions): Promise<ChatReply> {
       throw err;
     }
     // Spawn-level failure (e.g. claude not on PATH). No fallback — see the
-    // file header's CREDENTIAL CONTRACT paragraph.
+    // file header's SECURITY CORRECTION paragraph.
     throw new Error(
       `claudeCli.chat(): could not run the claude CLI — ${err instanceof Error ? err.message : String(err)}`
     );
@@ -790,19 +984,30 @@ export async function chat(options: ClaudeCliChatOptions): Promise<ChatReply> {
     // against a different credential path. describeExit tells a
     // signal-terminated close apart from a bare null exit code — see
     // SpawnResult. describeNonZeroExitReason recovers the REAL failure
-    // reason from stdout's own JSON envelope (its `result` field) rather
-    // than reporting only the bare exit code — see its own doc comment
-    // for why stdout, not just stderr, has to be read here, and for why
-    // the separate spawn-failure message above is untouched by this.
+    // reason from stdout's own result event rather than reporting only
+    // the bare exit code — see its own doc comment for why stdout, not
+    // just stderr, has to be read here, and for why the separate
+    // spawn-failure message above is untouched by this.
     throw new Error(`${describeExit('claude -p', spawned)}${describeNonZeroExitReason(spawned)}`);
   }
 
-  const parsed = parseCliJson(spawned.stdout);
+  const events = parseStreamEvents(spawned.stdout);
+
+  // THE TOOL-SAFETY VERIFICATION — see the file header. Runs before
+  // anything else on a successful exit, unconditionally: the promise
+  // this call makes about tool reachability is checked against the
+  // CLI's own observable, not assumed from the flag alone.
+  assertNoBuiltinToolsReachable(events);
+
+  const parsed = findResultEvent(events);
 
   if (parsed?.is_error) {
     // Confirmed real: the CLI can exit 0 while its own payload says
     // is_error: true — see the file header. Exit code alone is not a
-    // sufficient failure signal for this adapter.
+    // sufficient failure signal for this adapter. subtype is included
+    // for diagnostic context only, never read as a second signal — a
+    // confirmed real envelope carried subtype: "success" alongside
+    // is_error: true.
     throw new Error(
       `claude -p reported is_error: true (subtype=${parsed.subtype ?? 'unknown'})` +
         (parsed.result ? ` — ${parsed.result}` : '')
@@ -815,10 +1020,10 @@ export async function chat(options: ClaudeCliChatOptions): Promise<ChatReply> {
   } else {
     text = spawned.stdout;
     console.warn(
-      'claudeCli.chat(): --output-format json did not carry a string "result" field — ' +
-        'treating stdout as raw text. The real envelope has been observed and "result" is ' +
-        'the confirmed field (see the file header); this fallback is for a shape that does ' +
-        'not match it, e.g. non-JSON stdout or a future CLI change.'
+      'claudeCli.chat(): the stream-json output did not carry a {"type":"result",...} event ' +
+        'with a string "result" field — treating the raw stdout as text. The real envelope has ' +
+        'been observed and this shape is confirmed (see the file header); this fallback is for ' +
+        'a shape that does not match it, e.g. a malformed stream or a future CLI change.'
     );
   }
 
@@ -938,9 +1143,10 @@ export async function chatWithTools(
  * Multi-turn tool-using chat — the shape this transport CAN honestly
  * support. See the file header's SESSION-HOLDING TRANSPORT section for
  * the mechanism (an embedded MCP bridge + a kept-alive `claude`
- * process); `--tools ""` stays on, per this file's own constraint — the
- * only tools reachable are the ones named in `options.tools`, offered
- * via an explicit `--mcp-config` naming solely this call's own bridge.
+ * process); `--disallowedTools "*"` stays on, per this file's own
+ * constraint — the only tools reachable are the ones named in
+ * `options.tools`, offered via an explicit `--mcp-config` naming solely
+ * this call's own bridge.
  *
  * Unlike the API adapters, this function makes exactly ONE model-turn
  * request per call — `claude`'s own agentic loop calls tools
