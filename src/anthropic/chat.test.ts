@@ -16,7 +16,12 @@ vi.mock('@anthropic-ai/sdk', () => ({
 }));
 
 import { chat, chatWithTools } from './index.js';
-import { setModelSpanSink, type ModelSpan } from '../index.js';
+import {
+  setModelSpanSink,
+  type ModelSpan,
+  LLM_TIMEOUT_CODE,
+  LLM_CALL_TIMEOUT_MS,
+} from '../index.js';
 
 interface FakeUsage {
   input_tokens: number;
@@ -305,5 +310,112 @@ describe('chat — model-span emission', () => {
       inputTokens: 10,
       outputTokens: 5,
     });
+  });
+});
+
+describe('chat — the timeout contract (bespoke: teardown confirmed, not just shape)', () => {
+  beforeEach(() => {
+    mockStream.mockReset();
+    mockClientCtor.mockReset();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("neutralises the vendor SDK's own maxRetries/timeout at construction, so only our watchdog can ever fire", async () => {
+    mockStream.mockReturnValue(fakeStream([{ type: 'text', text: 'ok' }], 'end_turn'));
+
+    await chat({ systemPrompt: 's', turns: [{ role: 'user', content: 'x' }], apiKey: 'sk-test' });
+
+    const opts = mockClientCtor.mock.calls[0][0] as Record<string, unknown>;
+    expect(opts.maxRetries).toBe(0);
+    expect(typeof opts.timeout).toBe('number');
+    expect(opts.timeout as number).toBeGreaterThan(LLM_CALL_TIMEOUT_MS);
+  });
+
+  it('BEHAVIOURAL: rejects with the LLM_TIMEOUT_CODE shape when the underlying call hangs past LLM_CALL_TIMEOUT_MS, AND the live SDK call was actually invoked with a signal that is genuinely aborted at the moment of rejection', async () => {
+    vi.useFakeTimers();
+    let capturedSignal: AbortSignal | undefined;
+    mockStream.mockImplementation((_req: unknown, opts: { signal: AbortSignal }) => {
+      capturedSignal = opts.signal;
+      return {
+        on: () => {},
+        // Never settles ON ITS OWN — simulates a genuinely hung request —
+        // but DOES reject once `signal` aborts, exactly as the real SDK's
+        // stream does when its own abort signal fires. Without this the
+        // mock would hang forever regardless of whether the watchdog's
+        // signal was ever threaded in at all, which would make this test
+        // pass even on a broken wiring — the vacuous-test failure mode
+        // this test exists to avoid.
+        finalMessage: () =>
+          new Promise<never>((_, reject) => {
+            opts.signal.addEventListener(
+              'abort',
+              () => reject(opts.signal.reason ?? new Error('aborted')),
+              { once: true }
+            );
+          }),
+      };
+    });
+
+    const pending = chat({
+      systemPrompt: 's',
+      turns: [{ role: 'user', content: 'x' }],
+      apiKey: 'sk-test',
+    });
+    const assertion = expect(pending).rejects.toMatchObject({
+      code: LLM_TIMEOUT_CODE,
+      timeoutMs: LLM_CALL_TIMEOUT_MS,
+    });
+    await vi.advanceTimersByTimeAsync(LLM_CALL_TIMEOUT_MS + 1);
+    await assertion;
+
+    // The teardown assertion — the SDK-request analogue of asserting
+    // `child.kill()` fired on the session watchdog's own test: the
+    // signal threaded into the live `messages.stream` call is genuinely
+    // aborted, not merely a promise this package gave up awaiting while
+    // the real request kept running underneath.
+    expect(capturedSignal).toBeDefined();
+    expect(capturedSignal?.aborted).toBe(true);
+  });
+
+  it('honours a caller-supplied timeoutMs override instead of the package default', async () => {
+    vi.useFakeTimers();
+    mockStream.mockImplementation((_req: unknown, opts: { signal: AbortSignal }) => ({
+      on: () => {},
+      finalMessage: () =>
+        new Promise<never>((_, reject) => {
+          opts.signal.addEventListener(
+            'abort',
+            () => reject(opts.signal.reason ?? new Error('aborted')),
+            { once: true }
+          );
+        }),
+    }));
+
+    const pending = chat({
+      systemPrompt: 's',
+      turns: [{ role: 'user', content: 'x' }],
+      apiKey: 'sk-test',
+      timeoutMs: 5_000,
+    });
+    const assertion = expect(pending).rejects.toMatchObject({
+      code: LLM_TIMEOUT_CODE,
+      timeoutMs: 5_000,
+    });
+    await vi.advanceTimersByTimeAsync(5_001);
+    await assertion;
+  });
+
+  it('refuses an absurd timeoutMs synchronously, before any client is even constructed', async () => {
+    await expect(
+      chat({
+        systemPrompt: 's',
+        turns: [{ role: 'user', content: 'x' }],
+        apiKey: 'sk-test',
+        timeoutMs: 0,
+      })
+    ).rejects.toThrow(/finite number greater than 0/);
+    expect(mockClientCtor).not.toHaveBeenCalled();
   });
 });

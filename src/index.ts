@@ -269,6 +269,22 @@ export interface ChatOptions {
    * abort is the supported escape hatch.
    */
   abortSignal?: AbortSignal;
+  /**
+   * Optional override for {@link LLM_CALL_TIMEOUT_MS} — the wall-clock bound
+   * a caller accepts for this ONE call (retries, any provider-side fallback,
+   * and — where a route's bespoke integration has landed — the underlying
+   * SDK request all count INSIDE it, not just the caller's own await). See
+   * this file's "Timeout contract" section below for the full shape: what
+   * fires, what a caller matches on, and which routes currently give
+   * genuine teardown versus only the uniform rejection.
+   *
+   * Must be a finite number greater than 0 — refused SYNCHRONOUSLY, before
+   * any network or process work starts, on `0`, a negative number, `NaN`,
+   * or `Infinity` (accepting `Infinity` would mean "the contract doesn't
+   * apply to me", which defeats the point of it being a contract). Omit to
+   * use {@link LLM_CALL_TIMEOUT_MS}.
+   */
+  timeoutMs?: number;
 }
 
 /** Result of a single LLM call via {@link chat}. */
@@ -366,6 +382,236 @@ export interface ChatWithToolLoopResult {
   /** Aggregated usage across all iterations of the loop. */
   usage: TokenUsage;
 }
+
+// ────────────────────────────────────────────────────────────────────
+// Timeout contract — a wedged turn surfaces identically on every route
+// ────────────────────────────────────────────────────────────────────
+//
+// The problem this closes: a caller could not write ONE piece of error
+// handling that recognised "this turn wedged" across every route. Each
+// transport's own timeout did what it did correctly — claude-cli's
+// session-holding transport has a real package-owned watchdog
+// (`SESSION_TURN_TIMEOUT_MS`, 10 minutes, kills the held process and
+// rejects with a bespoke, structurally-matchable error) — but the keyed
+// routes (Anthropic, OpenAI, DeepSeek, the OpenAI-compatible factory,
+// Google) had nothing of ours: no `timeout` passed to their SDK client
+// constructors at all, so the vendor's own default applied — and both
+// `@anthropic-ai/sdk` and `openai` declare that default as ~10 minutes
+// PER ATTEMPT with `maxRetries: 2`, so the real worst case was nearer 30
+// minutes, silently, and an ordinary `npm update` could change either
+// number with no test anywhere noticing.
+//
+// THE BOUND is {@link LLM_CALL_TIMEOUT_MS} — one constant, not five
+// independently-tuned numbers pretending to be one contract — matching
+// `SESSION_TURN_TIMEOUT_MS` deliberately, so "wedged" means the same
+// wall-clock everywhere by default. {@link ChatOptions.timeoutMs}
+// overrides it per call.
+//
+// RETRIES COUNT INSIDE THE BOUND. A route with bespoke teardown (see
+// {@link TIMEOUT_TEARDOWN_CONFIRMED}) sets the vendor SDK's OWN
+// `maxRetries` to 0 and its own `timeout` far larger than any sane call
+// bound at client-construction time — not merely alongside our watchdog,
+// but INSTEAD of relying on it: picking our bound to equal a vendor's
+// default (both happen to be 10 minutes for Anthropic) would put the two
+// timers in a RACE, decided by whichever socket-level tick wins, rather
+// than ours governing outright. Neutralising the vendor's own knobs is
+// what makes this package's own retry ladder the only retry logic, and
+// what makes the contract answerable for a provider whose SDK default is
+// not yet known (Gemini, at the time this was written) — the mechanism
+// overrides the vendor's timeout/retry knobs, it never reads or reasons
+// about what they were set to.
+//
+// THE ERROR SHAPE IS A FIELD, NOT A CLASS, NOT A MESSAGE MATCH. Every
+// route throws a plain `Error` carrying `code: LLM_TIMEOUT_CODE` and
+// `timeoutMs` as own, enumerable properties — matching how this codebase
+// already classifies thrown SDK errors elsewhere (structural-field
+// inspection, e.g. reading `err.status`, never `instanceof`), and
+// avoiding the fragility `claude-cli`'s own file header discloses against
+// itself for its message-prefix matches ("a future `llm` release
+// rewording that string would silently stop being caught"). Downstream,
+// in a five-tag outcome vocabulary (`ok / empty / unreachable / refused /
+// invalid`), this maps to `unreachable` — never `refused` (which means
+// "reached, and it declined": a definite outcome) and never `invalid`
+// (which means "something came back and couldn't be interpreted": a
+// timeout is nothing coming back at all). A caller matches with
+// `err?.code === LLM_TIMEOUT_CODE`.
+//
+// SHAPE VERSUS TEARDOWN — the two halves of the contract, and why they
+// ship on different schedules. {@link runWithTimeoutContract} is the
+// CHEAP, UNIVERSAL half: it races a call against a timer, so an await
+// rejects at `timeoutMs` with this contract's own shape on EVERY route —
+// including one whose bespoke SDK integration hasn't landed yet — with
+// zero vendor-specific knowledge. It does NOT stop the underlying
+// request: racing past a promise doesn't cancel it, so on a route not
+// yet in {@link TIMEOUT_TEARDOWN_CONFIRMED} the real call keeps running
+// in the background, discarded, until it resolves or errors on its own —
+// a real resource/cost exposure (and a route whose `onProgress`/`onRetry`
+// callbacks can still fire after the caller has moved on), disclosed
+// here rather than silently accepted forever. {@link withTimeoutSignal}
+// is the EXPENSIVE, PER-ROUTE half: it produces a combined `AbortSignal`
+// a bespoke integration threads into the LIVE SDK call (e.g. Anthropic's
+// `client.messages.stream(request, { signal })`), so an expired timeout
+// genuinely tears the in-flight request down — the SDK-request analogue
+// of `claude-cli`'s own `child.kill()`.
+//
+// WHAT A CALLER GETS DURING THE FAN. Every route wrapped with
+// {@link runWithTimeoutContract} gives the uniform rejection shape from
+// day one, regardless of whether its bespoke teardown has landed —
+// "it depends which route you called" never applies to the ERROR a
+// caller catches, only to whether the underlying request was actually
+// killed. {@link TIMEOUT_TEARDOWN_CONFIRMED} is the single, checkable
+// source of truth for the remainder: which routes currently give genuine
+// teardown, not just the shape. It grows by exactly one entry per route's
+// bespoke PR, in the SAME COMMIT as the fix — never batch-updated ahead
+// of the code that earns it — mirroring the pattern this estate already
+// uses to track another package's outcome vocabulary (a runtime set a
+// conformance check can compare against, not a fact a reader has to
+// reverse-engineer from behaviour).
+
+/**
+ * The package-owned bound on a single `chat()` / `chatWithTools()` /
+ * `chatWithToolLoop()` call — wall-clock, RETRIES INCLUDED, not per HTTP
+ * attempt. Same constant `claude-cli`'s session-holding transport uses for
+ * its own per-turn watchdog (`SESSION_TURN_TIMEOUT_MS`), deliberately: a
+ * "wedged turn" means the same wall-clock everywhere by default, not five
+ * independently-tuned numbers pretending to be one contract. Overridable
+ * per call via {@link ChatOptions.timeoutMs}.
+ */
+export const LLM_CALL_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
+
+/**
+ * Structural code a caller matches on to recognise a call the timeout
+ * contract tore down — `err?.code === LLM_TIMEOUT_CODE`, never a class
+ * (`instanceof`), never a message match. See this section's own header
+ * comment for why.
+ */
+export const LLM_TIMEOUT_CODE = 'LLM_TIMEOUT';
+
+/** The shape every route throws when the timeout contract fires — a plain
+ * `Error` carrying `code` and `timeoutMs` as own, enumerable properties. */
+export interface LlmTimeoutError extends Error {
+  code: typeof LLM_TIMEOUT_CODE;
+  /** The bound that actually fired — the resolved `timeoutMs`, not
+   * necessarily {@link LLM_CALL_TIMEOUT_MS} if the caller overrode it. */
+  timeoutMs: number;
+}
+
+/**
+ * Validate a caller-supplied {@link ChatOptions.timeoutMs} (or fall back to
+ * {@link LLM_CALL_TIMEOUT_MS}) — refused SYNCHRONOUSLY, before any network
+ * or process work starts, never silently substituted. `Infinity` is refused
+ * alongside `0` / negative / `NaN`: accepting it would mean "the contract
+ * doesn't apply to this caller", which defeats the point of it being a
+ * contract rather than an opt-in. A large-but-finite override is honoured
+ * exactly as given, never clamped.
+ */
+export function resolveTimeoutMs(timeoutMs: number | undefined): number {
+  const ms = timeoutMs ?? LLM_CALL_TIMEOUT_MS;
+  if (!Number.isFinite(ms) || ms <= 0) {
+    throw new Error(
+      `llm: invalid timeoutMs (${String(timeoutMs)}) — must be a finite number greater than 0. ` +
+        'Omit it to use the package default (LLM_CALL_TIMEOUT_MS).'
+    );
+  }
+  return ms;
+}
+
+/** Build the {@link LlmTimeoutError} every route throws when the timeout
+ * contract tears a call down — same shape everywhere, so a caller matches
+ * on `err.code`, never on `err.message` or `err instanceof SomeClass`. */
+export function makeTimeoutError(timeoutMs: number): LlmTimeoutError {
+  const err = new Error(
+    `llm: call timed out after ${timeoutMs}ms — the timeout contract tore it down.`
+  ) as LlmTimeoutError;
+  err.code = LLM_TIMEOUT_CODE;
+  err.timeoutMs = timeoutMs;
+  return err;
+}
+
+/**
+ * Combine a caller-supplied `AbortSignal` with a timeout into ONE signal —
+ * whichever fires first wins. This is the EXPENSIVE, PER-ROUTE half of the
+ * timeout contract: a bespoke integration threads the returned `signal`
+ * into its live SDK call (see the Anthropic adapter's `client.ts` +
+ * `index.ts`) so an expired timeout genuinely tears the in-flight request
+ * down, rather than merely stopping the caller's own await.
+ *
+ * `cleanup()` MUST be called once the call this guards settles, one way or
+ * another (a `finally` block at the call site) — an uncleared timer
+ * outlives the call it was guarding, which keeps the process alive and,
+ * under fake timers, leaks state between tests.
+ */
+export function withTimeoutSignal(
+  timeoutMs: number | undefined,
+  callerSignal?: AbortSignal
+): { signal: AbortSignal; cleanup: () => void } {
+  const ms = resolveTimeoutMs(timeoutMs);
+  const controller = new AbortController();
+  const onCallerAbort = (): void => controller.abort(callerSignal!.reason);
+  if (callerSignal?.aborted) {
+    controller.abort(callerSignal.reason);
+  } else if (callerSignal) {
+    callerSignal.addEventListener('abort', onCallerAbort, { once: true });
+  }
+  const timer = setTimeout(() => controller.abort(makeTimeoutError(ms)), ms);
+  if (typeof timer.unref === 'function') timer.unref();
+  const cleanup = (): void => {
+    clearTimeout(timer);
+    callerSignal?.removeEventListener('abort', onCallerAbort);
+  };
+  return { signal: controller.signal, cleanup };
+}
+
+/**
+ * The CHEAP, UNIVERSAL half of the timeout contract: races `call()`
+ * against a timer, so an await rejects at `timeoutMs` with this contract's
+ * own error shape on every route, with zero vendor-specific knowledge.
+ * THIS DOES NOT STOP THE UNDERLYING CALL — see this section's own header
+ * comment for what that leaves exposed on a route not yet in
+ * {@link TIMEOUT_TEARDOWN_CONFIRMED}. Prefer {@link withTimeoutSignal}
+ * threaded into the live SDK call when a route's bespoke integration
+ * exists; use this as the mechanical stopgap everywhere else so the
+ * ERROR SHAPE, at least, is never route-dependent.
+ */
+export async function runWithTimeoutContract<T>(
+  timeoutMs: number | undefined,
+  call: () => Promise<T>
+): Promise<T> {
+  const ms = resolveTimeoutMs(timeoutMs);
+  let timer: ReturnType<typeof setTimeout>;
+  const timedOut = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(makeTimeoutError(ms)), ms);
+    if (typeof timer.unref === 'function') timer.unref();
+  });
+  try {
+    return await Promise.race([call(), timedOut]);
+  } finally {
+    clearTimeout(timer!);
+  }
+}
+
+/**
+ * Providers whose SDK call is genuinely torn down when the timeout
+ * contract fires — not merely raced past by {@link runWithTimeoutContract}.
+ * Grows by exactly one entry per route's bespoke PR, in the SAME COMMIT as
+ * the fix — never batch-updated ahead of the code that earns it. Mirrors
+ * the pattern this estate already uses to track another package's outcome
+ * vocabulary: a runtime set a conformance check can compare against,
+ * rather than a fact only discoverable by reading each route's
+ * implementation by hand.
+ *
+ * `'anthropic'` lands with the PR that adds `maxRetries: 0` + an oversized
+ * vendor `timeout` at client construction (see `anthropic/client.ts`) and
+ * threads {@link withTimeoutSignal}'s combined signal into the live
+ * `messages.stream` call (see `anthropic/index.ts`).
+ *
+ * `claude-cli`'s SESSION-HOLDING transport (`SESSION_TURN_TIMEOUT_MS`) is
+ * NOT listed here — it predates this contract, lives on a branch this
+ * change deliberately does not touch, and needs its own PR once that
+ * branch lands to attach `code`/`timeoutMs` to the error it already
+ * throws and already tears down for.
+ */
+export const TIMEOUT_TEARDOWN_CONFIRMED: ReadonlySet<string> = new Set(['anthropic']);
 
 // ────────────────────────────────────────────────────────────────────
 // Accounting helpers

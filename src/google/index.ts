@@ -29,6 +29,7 @@ import {
   registerModelLabels,
   registerProviderConnection,
   resolveBaseUrl,
+  runWithTimeoutContract,
 } from '../index.js';
 
 // ────────────────────────────────────────────────────────────────────
@@ -271,36 +272,38 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
   if (options.turns.length === 0) {
     throw new Error('google.chat() requires at least one turn');
   }
-  throwIfAborted(options.abortSignal);
-  const modelClass: ModelClass = options.modelClass ?? 'reasoning';
-  const client = getClient(options.apiKey ?? null);
-  const modelId = models[modelClass];
+  return runWithTimeoutContract(options.timeoutMs, async () => {
+    throwIfAborted(options.abortSignal);
+    const modelClass: ModelClass = options.modelClass ?? 'reasoning';
+    const client = getClient(options.apiKey ?? null);
+    const modelId = models[modelClass];
 
-  const raw = await callWithRetries(
-    () => callGenerateContent(client, modelId, options.systemPrompt, options.turns),
-    options.onRetry
-  );
-
-  if (raw.finishReason && raw.finishReason !== 'STOP') {
-    console.warn(
-      `google.chat: response finish_reason=${raw.finishReason} (model=${modelId}, output_tokens=${raw.rawUsage.outputTokens})`
+    const raw = await callWithRetries(
+      () => callGenerateContent(client, modelId, options.systemPrompt, options.turns),
+      options.onRetry
     );
-  }
 
-  const usage = shapeUsage(raw.rawUsage, modelClass);
-  await fireUsageHook(options.onUsage, usage, 'google.chat');
+    if (raw.finishReason && raw.finishReason !== 'STOP') {
+      console.warn(
+        `google.chat: response finish_reason=${raw.finishReason} (model=${modelId}, output_tokens=${raw.rawUsage.outputTokens})`
+      );
+    }
 
-  if (!raw.text) {
-    throw new Error(
-      `google.chat: response had no text content (finish_reason=${raw.finishReason})`
-    );
-  }
+    const usage = shapeUsage(raw.rawUsage, modelClass);
+    await fireUsageHook(options.onUsage, usage, 'google.chat');
 
-  return {
-    content: raw.text,
-    usage,
-    stopReason: raw.finishReason,
-  };
+    if (!raw.text) {
+      throw new Error(
+        `google.chat: response had no text content (finish_reason=${raw.finishReason})`
+      );
+    }
+
+    return {
+      content: raw.text,
+      usage,
+      stopReason: raw.finishReason,
+    };
+  });
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -406,30 +409,32 @@ export async function chatWithTools(options: ChatWithToolsOptions): Promise<Chat
     throw new Error('google.chatWithTools() requires at least one turn');
   if (options.tools.length === 0)
     throw new Error('google.chatWithTools() requires at least one tool');
-  throwIfAborted(options.abortSignal);
-  const modelClass: ModelClass = options.modelClass ?? 'reasoning';
-  const client = getClient(options.apiKey ?? null);
-  const modelId = models[modelClass];
+  return runWithTimeoutContract(options.timeoutMs, async () => {
+    throwIfAborted(options.abortSignal);
+    const modelClass: ModelClass = options.modelClass ?? 'reasoning';
+    const client = getClient(options.apiKey ?? null);
+    const modelId = models[modelClass];
 
-  const r = await callWithRetries(
-    () =>
-      callGenerateWithTools(
-        client,
-        modelId,
-        options.systemPrompt,
-        turnsToContents(options.turns),
-        toGeminiTools(options.tools)
-      ),
-    options.onRetry
-  );
-  const usage = shapeUsage(r.rawUsage, modelClass);
-  await fireUsageHook(options.onUsage, usage, 'google.chatWithTools');
-  return {
-    toolUses: r.functionCalls.map((f) => ({ id: f.id ?? f.name, name: f.name, input: f.args })),
-    text: r.text,
-    stopReason: r.finishReason,
-    usage,
-  };
+    const r = await callWithRetries(
+      () =>
+        callGenerateWithTools(
+          client,
+          modelId,
+          options.systemPrompt,
+          turnsToContents(options.turns),
+          toGeminiTools(options.tools)
+        ),
+      options.onRetry
+    );
+    const usage = shapeUsage(r.rawUsage, modelClass);
+    await fireUsageHook(options.onUsage, usage, 'google.chatWithTools');
+    return {
+      toolUses: r.functionCalls.map((f) => ({ id: f.id ?? f.name, name: f.name, input: f.args })),
+      text: r.text,
+      stopReason: r.finishReason,
+      usage,
+    };
+  });
 }
 
 /** Multi-turn tool loop: model → execute tools → feed functionResponse parts
@@ -442,128 +447,130 @@ export async function chatWithToolLoop(
     throw new Error('google.chatWithToolLoop() requires at least one turn');
   if (options.tools.length === 0)
     throw new Error('google.chatWithToolLoop() requires at least one tool');
-  const modelClass: ModelClass = options.modelClass ?? 'reasoning';
-  const client = getClient(options.apiKey ?? null);
-  const modelId = models[modelClass];
-  const tools = toGeminiTools(options.tools);
-  const maxIterations = Math.max(1, options.maxIterations ?? 5);
+  return runWithTimeoutContract(options.timeoutMs, async () => {
+    const modelClass: ModelClass = options.modelClass ?? 'reasoning';
+    const client = getClient(options.apiKey ?? null);
+    const modelId = models[modelClass];
+    const tools = toGeminiTools(options.tools);
+    const maxIterations = Math.max(1, options.maxIterations ?? 5);
 
-  const contents: GeminiContent[] = turnsToContents(options.turns);
-  const allToolUses: ToolUse[] = [];
-  const allToolResults: ChatWithToolLoopResult['toolResults'] = [];
-  const aggregate: TokenUsage = {
-    provider: PROVIDER,
-    model: modelId,
-    direction: modelClass,
-    // Single credential mechanism — see shapeUsage's comment above.
-    route: 'api-key',
-    inputTokens: 0,
-    outputTokens: 0,
-    cacheCreationInputTokens: 0,
-    cacheReadInputTokens: 0,
-  };
+    const contents: GeminiContent[] = turnsToContents(options.turns);
+    const allToolUses: ToolUse[] = [];
+    const allToolResults: ChatWithToolLoopResult['toolResults'] = [];
+    const aggregate: TokenUsage = {
+      provider: PROVIDER,
+      model: modelId,
+      direction: modelClass,
+      // Single credential mechanism — see shapeUsage's comment above.
+      route: 'api-key',
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheCreationInputTokens: 0,
+      cacheReadInputTokens: 0,
+    };
 
-  let iteration = 0;
-  while (iteration < maxIterations) {
-    iteration += 1;
-    throwIfAborted(options.abortSignal);
-    const r = await callWithRetries(
-      () => callGenerateWithTools(client, modelId, options.systemPrompt, contents, tools),
-      options.onRetry
-    );
-    aggregate.inputTokens += r.rawUsage.inputTokens;
-    aggregate.outputTokens += r.rawUsage.outputTokens;
-    aggregate.cacheReadInputTokens += r.rawUsage.cachedInputTokens;
-    await fireUsageHook(
-      options.onUsage,
-      shapeUsage(r.rawUsage, modelClass),
-      'google.chatWithToolLoop'
-    );
-    if (options.onIteration) {
-      try {
-        await options.onIteration({
-          iteration,
-          toolUses: r.functionCalls.map((f) => ({
-            id: f.id ?? f.name,
-            name: f.name,
-            input: f.args,
-          })),
-          stopReason: r.finishReason,
-        });
-      } catch (err) {
-        console.warn('google.chatWithToolLoop: onIteration callback threw', err);
+    let iteration = 0;
+    while (iteration < maxIterations) {
+      iteration += 1;
+      throwIfAborted(options.abortSignal);
+      const r = await callWithRetries(
+        () => callGenerateWithTools(client, modelId, options.systemPrompt, contents, tools),
+        options.onRetry
+      );
+      aggregate.inputTokens += r.rawUsage.inputTokens;
+      aggregate.outputTokens += r.rawUsage.outputTokens;
+      aggregate.cacheReadInputTokens += r.rawUsage.cachedInputTokens;
+      await fireUsageHook(
+        options.onUsage,
+        shapeUsage(r.rawUsage, modelClass),
+        'google.chatWithToolLoop'
+      );
+      if (options.onIteration) {
+        try {
+          await options.onIteration({
+            iteration,
+            toolUses: r.functionCalls.map((f) => ({
+              id: f.id ?? f.name,
+              name: f.name,
+              input: f.args,
+            })),
+            stopReason: r.finishReason,
+          });
+        } catch (err) {
+          console.warn('google.chatWithToolLoop: onIteration callback threw', err);
+        }
       }
+      if (r.functionCalls.length === 0) {
+        return {
+          text: r.text,
+          toolUses: allToolUses,
+          toolResults: allToolResults,
+          iterations: iteration,
+          usage: aggregate,
+        };
+      }
+      // Append the model's turn (carrying the functionCall parts) verbatim, then a
+      // user turn of functionResponse parts.
+      if (r.modelContent) contents.push(r.modelContent);
+      const responseParts: unknown[] = [];
+      for (const fc of r.functionCalls) {
+        const use: ToolUse = { id: fc.id ?? fc.name, name: fc.name, input: fc.args };
+        allToolUses.push(use);
+        let content: string;
+        let isError = false;
+        try {
+          content = await options.executor(use);
+        } catch (err) {
+          content = err instanceof Error ? err.message : String(err);
+          isError = true;
+        }
+        responseParts.push({
+          functionResponse: { id: fc.id, name: fc.name, response: { output: content } },
+        });
+        allToolResults.push({ toolUseId: use.id, content, isError });
+      }
+      contents.push({ role: 'user', parts: responseParts });
     }
-    if (r.functionCalls.length === 0) {
+    // Iteration cap hit while the model was still calling tools. One FINAL
+    // no-tools call forces a written answer synthesised from the history,
+    // instead of returning nothing. Degrade to empty text if it fails.
+    throwIfAborted(options.abortSignal);
+    try {
+      const fin = await callWithRetries(
+        () =>
+          callGenerateWithTools(
+            client,
+            modelId,
+            options.systemPrompt,
+            contents,
+            [] as ReturnType<typeof toGeminiTools>
+          ),
+        options.onRetry
+      );
+      aggregate.inputTokens += fin.rawUsage.inputTokens;
+      aggregate.outputTokens += fin.rawUsage.outputTokens;
+      aggregate.cacheReadInputTokens += fin.rawUsage.cachedInputTokens;
+      await fireUsageHook(
+        options.onUsage,
+        shapeUsage(fin.rawUsage, modelClass),
+        'google.chatWithToolLoop'
+      );
       return {
-        text: r.text,
+        text: fin.text,
+        toolUses: allToolUses,
+        toolResults: allToolResults,
+        iterations: iteration,
+        usage: aggregate,
+      };
+    } catch (err) {
+      console.warn('google.chatWithToolLoop: final synthesis call failed', err);
+      return {
+        text: '',
         toolUses: allToolUses,
         toolResults: allToolResults,
         iterations: iteration,
         usage: aggregate,
       };
     }
-    // Append the model's turn (carrying the functionCall parts) verbatim, then a
-    // user turn of functionResponse parts.
-    if (r.modelContent) contents.push(r.modelContent);
-    const responseParts: unknown[] = [];
-    for (const fc of r.functionCalls) {
-      const use: ToolUse = { id: fc.id ?? fc.name, name: fc.name, input: fc.args };
-      allToolUses.push(use);
-      let content: string;
-      let isError = false;
-      try {
-        content = await options.executor(use);
-      } catch (err) {
-        content = err instanceof Error ? err.message : String(err);
-        isError = true;
-      }
-      responseParts.push({
-        functionResponse: { id: fc.id, name: fc.name, response: { output: content } },
-      });
-      allToolResults.push({ toolUseId: use.id, content, isError });
-    }
-    contents.push({ role: 'user', parts: responseParts });
-  }
-  // Iteration cap hit while the model was still calling tools. One FINAL
-  // no-tools call forces a written answer synthesised from the history,
-  // instead of returning nothing. Degrade to empty text if it fails.
-  throwIfAborted(options.abortSignal);
-  try {
-    const fin = await callWithRetries(
-      () =>
-        callGenerateWithTools(
-          client,
-          modelId,
-          options.systemPrompt,
-          contents,
-          [] as ReturnType<typeof toGeminiTools>
-        ),
-      options.onRetry
-    );
-    aggregate.inputTokens += fin.rawUsage.inputTokens;
-    aggregate.outputTokens += fin.rawUsage.outputTokens;
-    aggregate.cacheReadInputTokens += fin.rawUsage.cachedInputTokens;
-    await fireUsageHook(
-      options.onUsage,
-      shapeUsage(fin.rawUsage, modelClass),
-      'google.chatWithToolLoop'
-    );
-    return {
-      text: fin.text,
-      toolUses: allToolUses,
-      toolResults: allToolResults,
-      iterations: iteration,
-      usage: aggregate,
-    };
-  } catch (err) {
-    console.warn('google.chatWithToolLoop: final synthesis call failed', err);
-    return {
-      text: '',
-      toolUses: allToolUses,
-      toolResults: allToolResults,
-      iterations: iteration,
-      usage: aggregate,
-    };
-  }
+  });
 }

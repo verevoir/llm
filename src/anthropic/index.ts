@@ -29,6 +29,7 @@ import {
   type Turn,
   registerModelCatalog,
   registerProviderConnection,
+  withTimeoutSignal,
 } from '../index.js';
 
 // ────────────────────────────────────────────────────────────────────
@@ -160,13 +161,14 @@ registerProviderConnection({
 async function streamedCall(
   perCallApiKey: string | null,
   makeRequest: (oauth: boolean) => Record<string, unknown>,
-  onProgress?: (info: ProgressInfo) => Promise<void>,
-  onRetry?: (info: ChatRetryInfo) => Promise<void>
+  onProgress: ((info: ProgressInfo) => Promise<void>) | undefined,
+  onRetry: ((info: ChatRetryInfo) => Promise<void>) | undefined,
+  signal: AbortSignal
 ): Promise<StreamedResult & { route: CredentialRoute }> {
   const first = resolveClient(perCallApiKey);
   try {
     const result = await callWithRetries(
-      () => callStreamed(first.client, makeRequest(first.oauth), onProgress),
+      () => callStreamed(first.client, makeRequest(first.oauth), onProgress, signal),
       onRetry
     );
     return { ...result, route: first.oauth ? 'subscription-oauth' : 'api-key' };
@@ -177,7 +179,7 @@ async function streamedCall(
     noteOAuthRejected(err);
     const fallback = resolveClient(perCallApiKey); // now the metered-key client
     const result = await callWithRetries(
-      () => callStreamed(fallback.client, makeRequest(fallback.oauth), onProgress),
+      () => callStreamed(fallback.client, makeRequest(fallback.oauth), onProgress, signal),
       onRetry
     );
     return { ...result, route: fallback.oauth ? 'subscription-oauth' : 'api-key' };
@@ -335,13 +337,19 @@ interface StreamedResult {
 async function callStreamed(
   client: Anthropic,
   request: Record<string, unknown>,
-  onProgress?: (info: ProgressInfo) => Promise<void>
+  onProgress: ((info: ProgressInfo) => Promise<void>) | undefined,
+  signal: AbortSignal
 ): Promise<StreamedResult> {
   // The cast goes through `unknown` because the SDK's MessageStreamParams
   // is a structural shape we can't match without pinning to its full
   // generic. `buildRequest` is the source of truth for valid payloads.
+  // `{ signal }` is the timeout contract's bespoke half (see the core's
+  // `withTimeoutSignal`) — threading the combined caller/timeout signal
+  // into the LIVE request is what makes an expired timeout genuinely tear
+  // this call down, rather than merely stopping the caller's own await.
   const stream = client.messages.stream(
-    request as unknown as Parameters<typeof client.messages.stream>[0]
+    request as unknown as Parameters<typeof client.messages.stream>[0],
+    { signal }
   );
 
   if (onProgress) {
@@ -517,110 +525,130 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
   if (options.turns.length === 0) {
     throw new Error('anthropic.chat() requires at least one turn');
   }
-  throwIfAborted(options.abortSignal);
-  const modelClass: ModelClass = options.modelClass ?? 'reasoning';
-  // See ChatOptions.model's doc comment: an explicit id wins over the
-  // catalog's class resolution, so two transports pinned to the same
-  // `model` answer with the same model regardless of what each one's
-  // class table currently maps to.
-  const modelId = options.model ?? models[modelClass];
+  // The timeout contract's combined signal — whichever of the caller's own
+  // abortSignal or options.timeoutMs (default LLM_CALL_TIMEOUT_MS) fires
+  // first wins. Threaded into every underlying SDK call this function makes
+  // (see callStreamed) so an expired timeout genuinely tears the in-flight
+  // request down; cleanup() runs in the finally below regardless of how
+  // this call settles.
+  const { signal, cleanup } = withTimeoutSignal(options.timeoutMs, options.abortSignal);
+  try {
+    throwIfAborted(signal);
+    const modelClass: ModelClass = options.modelClass ?? 'reasoning';
+    // See ChatOptions.model's doc comment: an explicit id wins over the
+    // catalog's class resolution, so two transports pinned to the same
+    // `model` answer with the same model regardless of what each one's
+    // class table currently maps to.
+    const modelId = options.model ?? models[modelClass];
 
-  // A model given the report_progress tool (auto-injected when
-  // onProgress is set) may end a turn having called ONLY that tool,
-  // with no text yet — smaller models (Haiku) do this readily. That's
-  // not a terminal state: acknowledge the progress call (feed a
-  // tool_result back) and let the model continue to the actual answer,
-  // rather than failing with "no text content". Cap the continuations
-  // so a misbehaving model can't loop forever. Usage is summed across
-  // the continuation calls; onUsage fires per call.
-  const MAX_PROGRESS_CONTINUATIONS = 4;
-  let messages: Turn[] = [...options.turns];
-  const aggregate = {
-    inputTokens: 0,
-    outputTokens: 0,
-    cacheCreationInputTokens: 0,
-    cacheReadInputTokens: 0,
-  };
-  const routesSeen: CredentialRoute[] = [];
+    // A model given the report_progress tool (auto-injected when
+    // onProgress is set) may end a turn having called ONLY that tool,
+    // with no text yet — smaller models (Haiku) do this readily. That's
+    // not a terminal state: acknowledge the progress call (feed a
+    // tool_result back) and let the model continue to the actual answer,
+    // rather than failing with "no text content". Cap the continuations
+    // so a misbehaving model can't loop forever. Usage is summed across
+    // the continuation calls; onUsage fires per call.
+    const MAX_PROGRESS_CONTINUATIONS = 4;
+    let messages: Turn[] = [...options.turns];
+    const aggregate = {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheCreationInputTokens: 0,
+      cacheReadInputTokens: 0,
+    };
+    const routesSeen: CredentialRoute[] = [];
 
-  for (let attempt = 0; attempt <= MAX_PROGRESS_CONTINUATIONS; attempt++) {
-    const streamed = await streamedCall(
-      options.apiKey ?? null,
-      (oauth) =>
-        buildRequest({
-          modelClass,
-          systemPrompt: options.systemPrompt,
-          turns: messages,
-          tools: options.onProgress ? [REPORT_PROGRESS_TOOL] : undefined,
-          // A continuation re-sends the growing history; cache its prefix.
-          cacheConversation: attempt > 0,
-          oauth,
-          model: options.model,
-          maxTokens: options.maxTokens,
-        }),
-      options.onProgress,
-      options.onRetry
-    );
-    routesSeen.push(streamed.route);
+    for (let attempt = 0; attempt <= MAX_PROGRESS_CONTINUATIONS; attempt++) {
+      const streamed = await streamedCall(
+        options.apiKey ?? null,
+        (oauth) =>
+          buildRequest({
+            modelClass,
+            systemPrompt: options.systemPrompt,
+            turns: messages,
+            tools: options.onProgress ? [REPORT_PROGRESS_TOOL] : undefined,
+            // A continuation re-sends the growing history; cache its prefix.
+            cacheConversation: attempt > 0,
+            oauth,
+            model: options.model,
+            maxTokens: options.maxTokens,
+          }),
+        options.onProgress,
+        options.onRetry,
+        signal
+      );
+      routesSeen.push(streamed.route);
 
-    aggregate.inputTokens += streamed.rawUsage.inputTokens;
-    aggregate.outputTokens += streamed.rawUsage.outputTokens;
-    aggregate.cacheCreationInputTokens += streamed.rawUsage.cacheCreationInputTokens;
-    aggregate.cacheReadInputTokens += streamed.rawUsage.cacheReadInputTokens;
-    await fireUsageHook(
-      options.onUsage,
-      shapeUsage(streamed.rawUsage, modelClass, streamed.route, modelId),
-      'anthropic.chat'
-    );
+      aggregate.inputTokens += streamed.rawUsage.inputTokens;
+      aggregate.outputTokens += streamed.rawUsage.outputTokens;
+      aggregate.cacheCreationInputTokens += streamed.rawUsage.cacheCreationInputTokens;
+      aggregate.cacheReadInputTokens += streamed.rawUsage.cacheReadInputTokens;
+      await fireUsageHook(
+        options.onUsage,
+        shapeUsage(streamed.rawUsage, modelClass, streamed.route, modelId),
+        'anthropic.chat'
+      );
 
-    if (streamed.text) {
-      if (streamed.stopReason && streamed.stopReason !== 'end_turn') {
-        console.warn(
-          `anthropic.chat: response stop_reason=${streamed.stopReason} (model=${models[modelClass]}, output_tokens=${streamed.rawUsage.outputTokens})`
-        );
+      if (streamed.text) {
+        if (streamed.stopReason && streamed.stopReason !== 'end_turn') {
+          console.warn(
+            `anthropic.chat: response stop_reason=${streamed.stopReason} (model=${models[modelClass]}, output_tokens=${streamed.rawUsage.outputTokens})`
+          );
+        }
+        return {
+          content: streamed.text,
+          usage: shapeUsage(aggregate, modelClass, combineRoutes(routesSeen), modelId),
+          stopReason: streamed.stopReason,
+        };
       }
-      return {
-        content: streamed.text,
-        usage: shapeUsage(aggregate, modelClass, combineRoutes(routesSeen), modelId),
-        stopReason: streamed.stopReason,
-      };
+
+      // No text. If the turn ended on a progress-only tool call and we
+      // still have budget, acknowledge it and continue to the answer.
+      if (
+        streamed.stopReason === 'tool_use' &&
+        streamed.progressToolUses.length > 0 &&
+        attempt < MAX_PROGRESS_CONTINUATIONS
+      ) {
+        const assistantBlocks: ContentBlock[] = streamed.progressToolUses.map((p) => ({
+          type: 'tool_use',
+          id: p.id,
+          name: 'report_progress',
+          input: p.input,
+        }));
+        const toolResultBlocks: ContentBlock[] = streamed.progressToolUses.map((p) => ({
+          type: 'tool_result',
+          tool_use_id: p.id,
+          content: 'ok',
+        }));
+        messages = [
+          ...messages,
+          { role: 'assistant', content: assistantBlocks },
+          { role: 'user', content: toolResultBlocks },
+        ];
+        continue;
+      }
+
+      // No text and nothing to continue on — a genuinely empty response.
+      throw new Error(
+        `anthropic.chat: response had no text content (stop_reason=${streamed.stopReason})`
+      );
     }
 
-    // No text. If the turn ended on a progress-only tool call and we
-    // still have budget, acknowledge it and continue to the answer.
-    if (
-      streamed.stopReason === 'tool_use' &&
-      streamed.progressToolUses.length > 0 &&
-      attempt < MAX_PROGRESS_CONTINUATIONS
-    ) {
-      const assistantBlocks: ContentBlock[] = streamed.progressToolUses.map((p) => ({
-        type: 'tool_use',
-        id: p.id,
-        name: 'report_progress',
-        input: p.input,
-      }));
-      const toolResultBlocks: ContentBlock[] = streamed.progressToolUses.map((p) => ({
-        type: 'tool_result',
-        tool_use_id: p.id,
-        content: 'ok',
-      }));
-      messages = [
-        ...messages,
-        { role: 'assistant', content: assistantBlocks },
-        { role: 'user', content: toolResultBlocks },
-      ];
-      continue;
-    }
-
-    // No text and nothing to continue on — a genuinely empty response.
     throw new Error(
-      `anthropic.chat: response had no text content (stop_reason=${streamed.stopReason})`
+      `anthropic.chat: no text content after ${MAX_PROGRESS_CONTINUATIONS} progress continuations`
     );
+  } catch (err) {
+    // The timeout contract's own shaped error (or the caller's own abort
+    // reason) wins over whatever the SDK itself threw once the signal has
+    // actually fired — matching claude-cli's own `abortReason(signal)`
+    // convention: once a signal is aborted, its reason is what a caller
+    // sees, never the underlying transport error the abort provoked.
+    if (signal.aborted && signal.reason !== undefined) throw signal.reason;
+    throw err;
+  } finally {
+    cleanup();
   }
-
-  throw new Error(
-    `anthropic.chat: no text content after ${MAX_PROGRESS_CONTINUATIONS} progress continuations`
-  );
 }
 
 /**
@@ -636,48 +664,57 @@ export async function chatWithTools(options: ChatWithToolsOptions): Promise<Chat
   if (options.tools.length === 0) {
     throw new Error('anthropic.chatWithTools() requires at least one tool');
   }
-  throwIfAborted(options.abortSignal);
-  const modelClass: ModelClass = options.modelClass ?? 'reasoning';
-  const modelId = options.model ?? models[modelClass];
-  const augmentedTools = options.onProgress
-    ? [...options.tools, REPORT_PROGRESS_TOOL]
-    : options.tools;
+  const { signal, cleanup } = withTimeoutSignal(options.timeoutMs, options.abortSignal);
+  try {
+    throwIfAborted(signal);
+    const modelClass: ModelClass = options.modelClass ?? 'reasoning';
+    const modelId = options.model ?? models[modelClass];
+    const augmentedTools = options.onProgress
+      ? [...options.tools, REPORT_PROGRESS_TOOL]
+      : options.tools;
 
-  const streamed = await streamedCall(
-    options.apiKey ?? null,
-    (oauth) =>
-      buildRequest({
-        modelClass,
-        systemPrompt: options.systemPrompt,
-        turns: options.turns,
-        tools: augmentedTools,
-        oauth,
-        model: options.model,
-        maxTokens: options.maxTokens,
-      }),
-    options.onProgress,
-    options.onRetry
-  );
-
-  if (
-    streamed.stopReason &&
-    streamed.stopReason !== 'end_turn' &&
-    streamed.stopReason !== 'tool_use'
-  ) {
-    console.warn(
-      `anthropic.chatWithTools: response stop_reason=${streamed.stopReason} (model=${modelId}, output_tokens=${streamed.rawUsage.outputTokens})`
+    const streamed = await streamedCall(
+      options.apiKey ?? null,
+      (oauth) =>
+        buildRequest({
+          modelClass,
+          systemPrompt: options.systemPrompt,
+          turns: options.turns,
+          tools: augmentedTools,
+          oauth,
+          model: options.model,
+          maxTokens: options.maxTokens,
+        }),
+      options.onProgress,
+      options.onRetry,
+      signal
     );
+
+    if (
+      streamed.stopReason &&
+      streamed.stopReason !== 'end_turn' &&
+      streamed.stopReason !== 'tool_use'
+    ) {
+      console.warn(
+        `anthropic.chatWithTools: response stop_reason=${streamed.stopReason} (model=${modelId}, output_tokens=${streamed.rawUsage.outputTokens})`
+      );
+    }
+
+    const usage = shapeUsage(streamed.rawUsage, modelClass, streamed.route, modelId);
+    await fireUsageHook(options.onUsage, usage, 'anthropic.chatWithTools');
+
+    return {
+      toolUses: streamed.toolUses,
+      text: streamed.text,
+      stopReason: streamed.stopReason,
+      usage,
+    };
+  } catch (err) {
+    if (signal.aborted && signal.reason !== undefined) throw signal.reason;
+    throw err;
+  } finally {
+    cleanup();
   }
-
-  const usage = shapeUsage(streamed.rawUsage, modelClass, streamed.route, modelId);
-  await fireUsageHook(options.onUsage, usage, 'anthropic.chatWithTools');
-
-  return {
-    toolUses: streamed.toolUses,
-    text: streamed.text,
-    stopReason: streamed.stopReason,
-    usage,
-  };
 }
 
 /**
@@ -704,187 +741,202 @@ export async function chatWithToolLoop(
   if (options.tools.length === 0) {
     throw new Error('anthropic.chatWithToolLoop() requires at least one tool');
   }
-  const modelClass: ModelClass = options.modelClass ?? 'reasoning';
-  const modelId = options.model ?? models[modelClass];
-  const augmentedTools = options.onProgress
-    ? [...options.tools, REPORT_PROGRESS_TOOL]
-    : options.tools;
-  const maxIterations = Math.max(1, options.maxIterations ?? 5);
+  const { signal, cleanup } = withTimeoutSignal(options.timeoutMs, options.abortSignal);
+  try {
+    const modelClass: ModelClass = options.modelClass ?? 'reasoning';
+    const modelId = options.model ?? models[modelClass];
+    const augmentedTools = options.onProgress
+      ? [...options.tools, REPORT_PROGRESS_TOOL]
+      : options.tools;
+    const maxIterations = Math.max(1, options.maxIterations ?? 5);
 
-  // Working message history: we append to this as the loop progresses.
-  // The initial state mirrors what the consumer passed in.
-  let messages: Turn[] = [...options.turns];
+    // Working message history: we append to this as the loop progresses.
+    // The initial state mirrors what the consumer passed in.
+    let messages: Turn[] = [...options.turns];
 
-  const allToolUses: ToolUse[] = [];
-  const allToolResults: ChatWithToolLoopResult['toolResults'] = [];
-  const routesSeen: CredentialRoute[] = [];
-  // Counts only — the full TokenUsage (provider/model/direction/route) is
-  // built at each return site via shapeUsage, once the routes every
-  // underlying call actually used are known.
-  const aggregateUsage = {
-    inputTokens: 0,
-    outputTokens: 0,
-    cacheCreationInputTokens: 0,
-    cacheReadInputTokens: 0,
-  };
+    const allToolUses: ToolUse[] = [];
+    const allToolResults: ChatWithToolLoopResult['toolResults'] = [];
+    const routesSeen: CredentialRoute[] = [];
+    // Counts only — the full TokenUsage (provider/model/direction/route) is
+    // built at each return site via shapeUsage, once the routes every
+    // underlying call actually used are known.
+    const aggregateUsage = {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheCreationInputTokens: 0,
+      cacheReadInputTokens: 0,
+    };
 
-  let iteration = 0;
-  while (iteration < maxIterations) {
-    iteration += 1;
+    let iteration = 0;
+    while (iteration < maxIterations) {
+      iteration += 1;
 
-    // Abort check at the top of each iteration so the previous
-    // iteration's onUsage / onIteration hook can abort cleanly via
-    // its captured AbortController. The in-flight LLM call has
-    // already settled and its tokens are recorded; what we prevent
-    // is starting the NEXT iteration.
-    throwIfAborted(options.abortSignal);
+      // Abort check at the top of each iteration so the previous
+      // iteration's onUsage / onIteration hook can abort cleanly via
+      // its captured AbortController. The in-flight LLM call has
+      // already settled and its tokens are recorded; what we prevent
+      // is starting the NEXT iteration.
+      throwIfAborted(signal);
 
-    const streamed = await streamedCall(
-      options.apiKey ?? null,
-      (oauth) =>
-        buildRequest({
-          modelClass,
-          systemPrompt: options.systemPrompt,
-          turns: messages,
-          tools: augmentedTools,
-          // Each iteration re-sends the growing history; a breakpoint on
-          // the last message lets the next iteration read this prefix
-          // from cache instead of reprocessing it.
-          cacheConversation: true,
-          oauth,
-          model: options.model,
-          maxTokens: options.maxTokens,
-        }),
-      options.onProgress,
-      options.onRetry
-    );
+      const streamed = await streamedCall(
+        options.apiKey ?? null,
+        (oauth) =>
+          buildRequest({
+            modelClass,
+            systemPrompt: options.systemPrompt,
+            turns: messages,
+            tools: augmentedTools,
+            // Each iteration re-sends the growing history; a breakpoint on
+            // the last message lets the next iteration read this prefix
+            // from cache instead of reprocessing it.
+            cacheConversation: true,
+            oauth,
+            model: options.model,
+            maxTokens: options.maxTokens,
+          }),
+        options.onProgress,
+        options.onRetry,
+        signal
+      );
 
-    routesSeen.push(streamed.route);
+      routesSeen.push(streamed.route);
 
-    // Per-iteration usage hook + aggregate tally.
-    const iterUsage = shapeUsage(streamed.rawUsage, modelClass, streamed.route, modelId);
-    aggregateUsage.inputTokens += iterUsage.inputTokens;
-    aggregateUsage.outputTokens += iterUsage.outputTokens;
-    aggregateUsage.cacheCreationInputTokens += iterUsage.cacheCreationInputTokens;
-    aggregateUsage.cacheReadInputTokens += iterUsage.cacheReadInputTokens;
-    await fireUsageHook(options.onUsage, iterUsage, 'anthropic.chatWithToolLoop');
+      // Per-iteration usage hook + aggregate tally.
+      const iterUsage = shapeUsage(streamed.rawUsage, modelClass, streamed.route, modelId);
+      aggregateUsage.inputTokens += iterUsage.inputTokens;
+      aggregateUsage.outputTokens += iterUsage.outputTokens;
+      aggregateUsage.cacheCreationInputTokens += iterUsage.cacheCreationInputTokens;
+      aggregateUsage.cacheReadInputTokens += iterUsage.cacheReadInputTokens;
+      await fireUsageHook(options.onUsage, iterUsage, 'anthropic.chatWithToolLoop');
 
-    if (options.onIteration) {
-      try {
-        await options.onIteration({
-          iteration,
-          toolUses: streamed.toolUses,
-          stopReason: streamed.stopReason,
-        });
-      } catch (err) {
-        console.warn('chatWithToolLoop: onIteration callback threw', err);
+      if (options.onIteration) {
+        try {
+          await options.onIteration({
+            iteration,
+            toolUses: streamed.toolUses,
+            stopReason: streamed.stopReason,
+          });
+        } catch (err) {
+          console.warn('chatWithToolLoop: onIteration callback threw', err);
+        }
       }
+
+      // No more tools to call — we have the model's final answer.
+      if (streamed.toolUses.length === 0) {
+        return {
+          text: streamed.text,
+          toolUses: allToolUses,
+          toolResults: allToolResults,
+          iterations: iteration,
+          usage: shapeUsage(aggregateUsage, modelClass, combineRoutes(routesSeen), modelId),
+        };
+      }
+
+      allToolUses.push(...streamed.toolUses);
+
+      // Build the assistant content this iteration produced, including
+      // both the text (if any) and the tool_use blocks. The next call
+      // must include this verbatim so the model recognises the
+      // tool_result blocks that follow.
+      const assistantBlocks: ContentBlock[] = [];
+      if (streamed.text) {
+        assistantBlocks.push({ type: 'text', text: streamed.text });
+      }
+      for (const u of streamed.toolUses) {
+        assistantBlocks.push({
+          type: 'tool_use',
+          id: u.id,
+          name: u.name,
+          input: u.input,
+        });
+      }
+
+      // Execute each tool_use; collect tool_result blocks.
+      const toolResultBlocks: ContentBlock[] = [];
+      for (const use of streamed.toolUses) {
+        let content: string;
+        let isError = false;
+        try {
+          content = await options.executor(use);
+        } catch (err) {
+          content = err instanceof Error ? err.message : String(err);
+          isError = true;
+        }
+        toolResultBlocks.push({
+          type: 'tool_result',
+          tool_use_id: use.id,
+          content,
+          is_error: isError || undefined,
+        });
+        allToolResults.push({ toolUseId: use.id, content, isError });
+      }
+
+      // Append both sides to the working message history and loop.
+      messages = [
+        ...messages,
+        { role: 'assistant', content: assistantBlocks },
+        { role: 'user', content: toolResultBlocks },
+      ];
     }
 
-    // No more tools to call — we have the model's final answer.
-    if (streamed.toolUses.length === 0) {
+    // Iteration cap hit while the model was still calling tools. Rather than
+    // return an empty answer (the model never wrote its final response), make
+    // one FINAL call with the tools removed — forcing it to synthesise a written
+    // answer from the history it built, instead of nothing. If this final call
+    // itself fails, degrade to the empty text rather than throwing.
+    throwIfAborted(signal);
+    try {
+      const finalStreamed = await streamedCall(
+        options.apiKey ?? null,
+        (oauth) =>
+          buildRequest({
+            modelClass,
+            systemPrompt: options.systemPrompt,
+            turns: messages,
+            tools: [], // no tools → the model must answer in text
+            cacheConversation: true,
+            oauth,
+            model: options.model,
+            maxTokens: options.maxTokens,
+          }),
+        options.onProgress,
+        options.onRetry,
+        signal
+      );
+      routesSeen.push(finalStreamed.route);
+      const finalUsage = shapeUsage(
+        finalStreamed.rawUsage,
+        modelClass,
+        finalStreamed.route,
+        modelId
+      );
+      aggregateUsage.inputTokens += finalUsage.inputTokens;
+      aggregateUsage.outputTokens += finalUsage.outputTokens;
+      aggregateUsage.cacheCreationInputTokens += finalUsage.cacheCreationInputTokens;
+      aggregateUsage.cacheReadInputTokens += finalUsage.cacheReadInputTokens;
+      await fireUsageHook(options.onUsage, finalUsage, 'anthropic.chatWithToolLoop');
       return {
-        text: streamed.text,
+        text: finalStreamed.text,
+        toolUses: allToolUses,
+        toolResults: allToolResults,
+        iterations: iteration,
+        usage: shapeUsage(aggregateUsage, modelClass, combineRoutes(routesSeen), modelId),
+      };
+    } catch (err) {
+      console.warn('anthropic.chatWithToolLoop: final synthesis call failed', err);
+      return {
+        text: '',
         toolUses: allToolUses,
         toolResults: allToolResults,
         iterations: iteration,
         usage: shapeUsage(aggregateUsage, modelClass, combineRoutes(routesSeen), modelId),
       };
     }
-
-    allToolUses.push(...streamed.toolUses);
-
-    // Build the assistant content this iteration produced, including
-    // both the text (if any) and the tool_use blocks. The next call
-    // must include this verbatim so the model recognises the
-    // tool_result blocks that follow.
-    const assistantBlocks: ContentBlock[] = [];
-    if (streamed.text) {
-      assistantBlocks.push({ type: 'text', text: streamed.text });
-    }
-    for (const u of streamed.toolUses) {
-      assistantBlocks.push({
-        type: 'tool_use',
-        id: u.id,
-        name: u.name,
-        input: u.input,
-      });
-    }
-
-    // Execute each tool_use; collect tool_result blocks.
-    const toolResultBlocks: ContentBlock[] = [];
-    for (const use of streamed.toolUses) {
-      let content: string;
-      let isError = false;
-      try {
-        content = await options.executor(use);
-      } catch (err) {
-        content = err instanceof Error ? err.message : String(err);
-        isError = true;
-      }
-      toolResultBlocks.push({
-        type: 'tool_result',
-        tool_use_id: use.id,
-        content,
-        is_error: isError || undefined,
-      });
-      allToolResults.push({ toolUseId: use.id, content, isError });
-    }
-
-    // Append both sides to the working message history and loop.
-    messages = [
-      ...messages,
-      { role: 'assistant', content: assistantBlocks },
-      { role: 'user', content: toolResultBlocks },
-    ];
-  }
-
-  // Iteration cap hit while the model was still calling tools. Rather than
-  // return an empty answer (the model never wrote its final response), make
-  // one FINAL call with the tools removed — forcing it to synthesise a written
-  // answer from the history it built, instead of nothing. If this final call
-  // itself fails, degrade to the empty text rather than throwing.
-  throwIfAborted(options.abortSignal);
-  try {
-    const finalStreamed = await streamedCall(
-      options.apiKey ?? null,
-      (oauth) =>
-        buildRequest({
-          modelClass,
-          systemPrompt: options.systemPrompt,
-          turns: messages,
-          tools: [], // no tools → the model must answer in text
-          cacheConversation: true,
-          oauth,
-          model: options.model,
-          maxTokens: options.maxTokens,
-        }),
-      options.onProgress,
-      options.onRetry
-    );
-    routesSeen.push(finalStreamed.route);
-    const finalUsage = shapeUsage(finalStreamed.rawUsage, modelClass, finalStreamed.route, modelId);
-    aggregateUsage.inputTokens += finalUsage.inputTokens;
-    aggregateUsage.outputTokens += finalUsage.outputTokens;
-    aggregateUsage.cacheCreationInputTokens += finalUsage.cacheCreationInputTokens;
-    aggregateUsage.cacheReadInputTokens += finalUsage.cacheReadInputTokens;
-    await fireUsageHook(options.onUsage, finalUsage, 'anthropic.chatWithToolLoop');
-    return {
-      text: finalStreamed.text,
-      toolUses: allToolUses,
-      toolResults: allToolResults,
-      iterations: iteration,
-      usage: shapeUsage(aggregateUsage, modelClass, combineRoutes(routesSeen), modelId),
-    };
   } catch (err) {
-    console.warn('anthropic.chatWithToolLoop: final synthesis call failed', err);
-    return {
-      text: '',
-      toolUses: allToolUses,
-      toolResults: allToolResults,
-      iterations: iteration,
-      usage: shapeUsage(aggregateUsage, modelClass, combineRoutes(routesSeen), modelId),
-    };
+    if (signal.aborted && signal.reason !== undefined) throw signal.reason;
+    throw err;
+  } finally {
+    cleanup();
   }
 }
 
