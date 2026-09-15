@@ -169,6 +169,50 @@ describe('@verevoir/llm/google — tool calling', () => {
     );
   });
 
+  it('assigns distinct ids across DIFFERENT iterations of the same loop, not just within one', async () => {
+    // Regression for the cross-iteration collision the antagonistic review
+    // caught in the first attempt at this fix: a fallback keyed only on
+    // name + position-in-that-response resets its index every iteration,
+    // but chatWithToolLoop's returned toolUses/toolResults are a flat,
+    // whole-loop aggregate (src/index.ts's own doc comment: "across every
+    // iteration of the loop") — so two same-named, id-less calls at the
+    // same position in two different iterations would still collide in
+    // exactly the array a caller correlates by id.
+    generateMock
+      .mockResolvedValueOnce(parallelSameNameFnCallReply([{ step: 'first round' }]))
+      .mockResolvedValueOnce(parallelSameNameFnCallReply([{ step: 'second round' }]))
+      .mockResolvedValueOnce(textReply('done'));
+    const executor = vi.fn(
+      async (use: { id: string; input: Record<string, unknown> }) => `result-for-${use.id}`
+    );
+    const r = await chatWithToolLoop({
+      systemPrompt: 's',
+      turns: [{ role: 'user', content: 'go' }],
+      tools: [TOOL],
+      executor,
+      apiKey: 'k',
+    });
+    expect(r.iterations).toBe(3);
+    expect(r.toolUses).toHaveLength(2);
+    const [fromIteration1, fromIteration2] = r.toolUses;
+    expect(fromIteration1.id).not.toBe(fromIteration2.id);
+    // Each iteration's result must be filed under that iteration's own
+    // use's id — under the cross-iteration collision, both would land
+    // under the same key and this pairing would be indistinguishable.
+    expect(r.toolResults).toContainEqual(
+      expect.objectContaining({
+        toolUseId: fromIteration1.id,
+        content: `result-for-${fromIteration1.id}`,
+      })
+    );
+    expect(r.toolResults).toContainEqual(
+      expect.objectContaining({
+        toolUseId: fromIteration2.id,
+        content: `result-for-${fromIteration2.id}`,
+      })
+    );
+  });
+
   it('chatWithTools emits a model span with scope google.chatWithTools', async () => {
     generateMock.mockResolvedValueOnce(fnCallReply({ step: 'x' }));
     const spans: ModelSpan[] = [];
