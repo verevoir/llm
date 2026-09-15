@@ -15,7 +15,7 @@ vi.mock('openai', () => ({
 }));
 
 // Import AFTER vi.mock so the mocked constructor is the one captured.
-import { chat } from './index.js';
+import { chat, chatWithTools, chatWithToolLoop } from './index.js';
 import { setModelSpanSink, type ModelSpan, type TokenUsage } from '../index.js';
 
 interface FakeUsage {
@@ -145,7 +145,7 @@ describe('deepseek.chat', () => {
     expect(result.usage.direction).toBe('extraction');
   });
 
-  it('captures prompt_cache_hit_tokens into cacheReadInputTokens', async () => {
+  it('captures prompt_cache_hit_tokens into cacheReadInputTokens, excluded from inputTokens (STDIO-487)', async () => {
     mockCreate.mockResolvedValue(
       fakeResponse('reply', 'stop', {
         prompt_tokens: 100,
@@ -165,7 +165,10 @@ describe('deepseek.chat', () => {
     expect(onUsage).toHaveBeenCalledTimes(1);
     const usage = onUsage.mock.calls[0][0];
     expect(usage.provider).toBe('deepseek');
-    expect(usage.inputTokens).toBe(100);
+    // prompt_tokens (100) INCLUDES the cached subset (30); inputTokens is the
+    // non-cached remainder (70), not the raw total — double-counting both
+    // (billing the cached tokens twice) was STDIO-487.
+    expect(usage.inputTokens).toBe(70);
     expect(usage.outputTokens).toBe(50);
     expect(usage.cacheReadInputTokens).toBe(30);
   });
@@ -226,5 +229,107 @@ describe('deepseek.chat', () => {
 
     expect(result.content).toBe('finally');
     expect(mockCreate).toHaveBeenCalledTimes(2);
+  });
+});
+
+// ── Tool calling, via the shared factory (mirrors src/samba/chat.test.ts) ───
+
+const TOOL = {
+  name: 'record',
+  description: 'record a thing',
+  input_schema: { type: 'object' as const, properties: { x: { type: 'number' } } },
+};
+
+function toolCallResponse(id: string, args: string) {
+  return {
+    choices: [
+      {
+        message: {
+          content: '',
+          tool_calls: [{ id, type: 'function', function: { name: 'record', arguments: args } }],
+        },
+        finish_reason: 'tool_calls',
+      },
+    ],
+    usage: { prompt_tokens: 10, completion_tokens: 5 },
+  };
+}
+
+describe('deepseek — tool calling (via the shared OpenAI-compatible factory)', () => {
+  beforeEach(() => mockCreate.mockReset());
+  afterEach(() => setModelSpanSink(null));
+
+  it('chatWithTools reports the genuine provider tool-call id, not a name-based fallback', async () => {
+    mockCreate.mockResolvedValue(toolCallResponse('call_abc123', '{"x":1}'));
+    const r = await chatWithTools({
+      systemPrompt: 'sys',
+      turns: [{ role: 'user', content: 'go' }],
+      tools: [TOOL],
+      apiKey: 'sk-test',
+    });
+    expect(r.toolUses).toHaveLength(1);
+    expect(r.toolUses[0].id).toBe('call_abc123');
+  });
+
+  it('chatWithTools emits a model span with scope deepseek.chatWithTools', async () => {
+    mockCreate.mockResolvedValue(toolCallResponse('c1', '{"x":1}'));
+    const spans: ModelSpan[] = [];
+    setModelSpanSink((s) => spans.push(s));
+
+    await chatWithTools({
+      systemPrompt: 'sys',
+      turns: [{ role: 'user', content: 'go' }],
+      tools: [TOOL],
+      apiKey: 'sk-test',
+    });
+
+    expect(spans).toHaveLength(1);
+    expect(spans[0]).toMatchObject({
+      scope: 'deepseek.chatWithTools',
+      provider: 'deepseek',
+      route: 'api-key',
+    });
+  });
+
+  it('chatWithToolLoop executes the tool, feeds the result back, and returns the final reply', async () => {
+    mockCreate
+      .mockResolvedValueOnce(toolCallResponse('c1', '{"x":1}'))
+      .mockResolvedValueOnce(fakeResponse('done'));
+    const executor = vi.fn(async () => 'recorded');
+
+    const r = await chatWithToolLoop({
+      systemPrompt: 'sys',
+      turns: [{ role: 'user', content: 'go' }],
+      tools: [TOOL],
+      executor,
+      apiKey: 'sk-test',
+    });
+
+    expect(executor).toHaveBeenCalledOnce();
+    expect(r.text).toBe('done');
+    expect(r.iterations).toBe(2);
+    expect(r.toolResults[0]).toMatchObject({ content: 'recorded', isError: false });
+  });
+
+  it('on cap-hit, makes a final no-tools call and returns its synthesised answer — matching every other tool-loop route', async () => {
+    mockCreate
+      .mockResolvedValueOnce(toolCallResponse('c1', '{}'))
+      .mockResolvedValueOnce(toolCallResponse('c2', '{}'))
+      .mockResolvedValueOnce(fakeResponse('finished work'));
+
+    const r = await chatWithToolLoop({
+      systemPrompt: 'sys',
+      turns: [{ role: 'user', content: 'go' }],
+      tools: [TOOL],
+      executor: async () => 'r',
+      apiKey: 'sk-test',
+      maxIterations: 2,
+    });
+
+    expect(r.iterations).toBe(2);
+    expect(r.text).toBe('finished work');
+    expect(mockCreate).toHaveBeenCalledTimes(3);
+    const finalArgs = mockCreate.mock.calls[2][0] as { tools?: unknown };
+    expect(finalArgs.tools).toBeUndefined();
   });
 });
