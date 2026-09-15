@@ -14,7 +14,7 @@
 
 ## `onProgress` is Anthropic-only
 
-Only `src/anthropic/index.ts` reads `options.onProgress` (auto-injecting `report_progress`). Gemini, the OpenAI-compat factory (`samba`/`mistral`), direct OpenAI and DeepSeek never reference it — it never throws, it simply never fires. A caller building progress UX on the assumption of parity gets silence on five of seven routes.
+Only `src/anthropic/index.ts` reads `options.onProgress` (auto-injecting `report_progress`). Gemini, the OpenAI-compat factory (`samba`/`mistral`), direct OpenAI, DeepSeek, and **claude-cli** never reference it — it never throws, it simply never fires. claude-cli's own file header says so explicitly: "`onProgress` IS ACCEPTED, NEVER INVOKED ... A caller supplying `onProgress` will never see it called; nothing here throws for supplying it" (`src/claude-cli/index.ts:139-144`). A caller building progress UX on the assumption of parity gets silence on **six of seven routes** — every route except Anthropic.
 
 ## Why `assertNoBuiltinToolsReachable` is correctly narrow, not a gap
 
@@ -22,6 +22,8 @@ Every API-based route (six of seven) only ever sends the tools a caller explicit
 
 **Caveat:** this covers only tools declared through this package's own `tools` parameter. Grepped `main` for provider-side/server-executed tools (e.g. an Anthropic `web_search`/`computer_use` passthrough) — zero matches on any adapter, as of this commit. Re-check this claim if a future release adds one.
 
-## Left open, not guessed at
+## Gemini has no client-side call timeout, and no wired abort path
 
-**Gemini SDK (`@google/genai`) timeout default** — not established from source this session; not asserted here as any particular value. Mark open until read directly.
+Established by reading the installed `@google/genai@2.21.0` runtime (`dist/node/index.cjs`), not the type declarations alone: `createAttemptSignal(timeout, callerSignal)` builds **no `AbortController` at all** — `signal: undefined` on the underlying `fetch` — when both `timeout` and a caller signal are absent. `src/google/index.ts` never sets `httpOptions.timeout` when constructing `GoogleGenAI` (only `baseUrl`, when overridden), so this is the adapter's actual, current configuration, not a hypothetical one. Separately, `generateContent`'s request config does accept a per-call `abortSignal` (verified: every generated API method reads `abortSignal: params.config?.abortSignal`) — but `callGenerateContent` (`src/google/index.ts`) never passes `options.abortSignal` into it; the adapter's own `throwIfAborted` check runs once, before the call starts, and never again.
+
+**Net effect: a hung Gemini call has no code-level bound at all** — not a long inherited SDK default, none — and cannot be interrupted once in flight via `ChatOptions.abortSignal` either. This is the sharpest gap in the timeout-asymmetry picture (claude-cli's package-owned 10-minute timeout vs. the keyed routes' SDK-inherited defaults): Gemini is the one route with neither a default nor a wired escape hatch.
