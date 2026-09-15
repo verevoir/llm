@@ -467,6 +467,23 @@ export interface ChatWithToolLoopResult {
 // uses to track another package's outcome vocabulary (a runtime set a
 // conformance check can compare against, not a fact a reader has to
 // reverse-engineer from behaviour).
+//
+// DEEPSEEK/MISTRAL/SAMBA ARE NOT INDEPENDENT ROUTES FOR THIS SET'S
+// PURPOSES — they are configuration over the one shared OpenAI-compatible
+// factory (`openai-compat.ts`). Once that factory's bespoke teardown
+// lands (its own `AbortController`/`signal` threaded into the live
+// `chat.completions.create` call, matching Anthropic's pattern), a
+// SINGLE PR closes it for all three at once — do not add
+// `'deepseek'`/`'mistral'`/`'samba'` as three separate entries earned by
+// three separate PRs; add whichever name(s) reflect what was actually
+// changed (the factory itself, most likely just `'openai-compat'` or
+// all three names added together in that one commit). Recording this now
+// because `deepseek` is about to stop being its own implementation (see
+// `#49`, concurrent) and start being a re-export of the same function
+// objects `mistral`/`samba` already are — the fan work that eventually
+// closes this set's gap for the factory should not rediscover that fact
+// under time pressure and accidentally imply `deepseek` needed separate
+// bespoke work.
 
 /**
  * The package-owned bound on a single `chat()` / `chatWithTools()` /
@@ -610,6 +627,10 @@ export async function runWithTimeoutContract<T>(
  * change deliberately does not touch, and needs its own PR once that
  * branch lands to attach `code`/`timeoutMs` to the error it already
  * throws and already tears down for.
+ *
+ * See the header comment just above this export for why `deepseek`,
+ * `mistral`, and `samba` are NOT three separate entries to earn
+ * independently — they are one shared factory.
  */
 export const TIMEOUT_TEARDOWN_CONFIRMED: ReadonlySet<string> = new Set(['anthropic']);
 
