@@ -232,9 +232,15 @@ describe('claude-cli chat(session) / chatWithTools / chatWithToolLoop', () => {
       const scriptPath = config.mcpServers['llm-tools'].args[0];
       const script = await readFile(scriptPath, 'utf8');
       const port = Number(script.match(/const PORT = (\d+);/)![1]);
+      // The bridge now requires its own shared secret on every tools/call
+      // (mcp-bridge.ts's AUTHENTICATION mechanism) — recovered the same
+      // way the real shim does, from the mcp-config's own env field.
+      const token = config.mcpServers['llm-tools'].env.LLM_BRIDGE_TOKEN;
 
       const socket = createConnection({ port, host: '127.0.0.1' }, () => {
-        socket.write(JSON.stringify({ id: 't1', name: 'echo', arguments: { text: 'hi' } }) + '\n');
+        socket.write(
+          JSON.stringify({ id: 't1', name: 'echo', arguments: { text: 'hi' }, token }) + '\n'
+        );
       });
       await new Promise<void>((resolve) => socket.once('data', () => resolve()));
       socket.end();

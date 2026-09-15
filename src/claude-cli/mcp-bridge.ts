@@ -56,9 +56,50 @@
  * leading, unconfirmed hypothesis for why. See `session.ts`'s own file
  * header for the full probe history and the isolating probe this points
  * to next.
+ *
+ * AUTHENTICATION — THE LOOPBACK PORT REQUIRES A SHARED SECRET; IT IS NOT
+ * TRUST-BY-BINDING. Binding to 127.0.0.1 keeps the port unreachable over
+ * the network, but loopback TCP is not filesystem-permissioned: ANY
+ * process already running on the same machine can open a connection to
+ * it, regardless of which user started it. Without a check, that
+ * connection could drive the caller's own `ToolExecutor` directly — this
+ * was confirmed reachable from an ordinary, unrelated socket via this
+ * file's own `mcp-bridge.test.ts` (its `sendToolCall` helper, which never
+ * goes through the generated shim at all) before this fix existed: the
+ * 'forwards an armed tools/call...' test already drove the executor that
+ * way, and passed, with zero authentication.
+ *
+ * THE FIX: `createToolBridge` generates a random 32-byte token once per
+ * bridge and writes it into the generated `--mcp-config`'s own `env`
+ * field for the shim's spawn — a channel that never touches the port,
+ * set at the moment `claude` spawns the shim rather than read from a
+ * file an unrelated process could also read. The shim includes it on
+ * every forwarded `tools/call`; `handleRequest` checks it FIRST, before
+ * anything else (including whether a turn is even armed), with a
+ * constant-time comparison (`tokensMatch`), so an unauthenticated caller
+ * learns nothing about internal state either. A mismatch REFUSES rather
+ * than drops: logged via `console.warn`, and answered on the socket with
+ * an explicit `{ refused: true, reason }` rather than silence — so a
+ * caller (or a test) can tell a refusal from a message that was simply
+ * never sent, the same distinction this package's `refused`/`unreachable`
+ * vocabulary draws everywhere else.
+ *
+ * THE LOOPBACK BINDING IS DEFENSE IN DEPTH ON TOP OF THIS, NOT THE
+ * CONTROL ITSELF — stated plainly rather than implied otherwise: it
+ * rules out network reachability entirely, but does not by itself rule
+ * out another local process attempting a connection. The token is what
+ * actually stops one.
+ *
+ * RELAYED, NOT CONFIRMED: whether `claude`'s own spawn of an
+ * `--mcp-config`-declared server genuinely honours that entry's `env`
+ * field is asserted from the MCP server config format's own
+ * widely-documented shape (the same one `command`/`args` already rest
+ * on), not independently confirmed against a real invocation — the same
+ * category of gap as the rest of this file's still-open MCP question.
  */
 
 import { createServer, type Server, type Socket } from 'node:net';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -123,6 +164,17 @@ function toolsToMcpDeclarations(tools: ToolDef[]): unknown[] {
   }));
 }
 
+/** Constant-time comparison of a caller-supplied token against the
+ * bridge's own — a plain `===` would leak timing information about how
+ * many leading bytes matched. Anything other than a same-length string
+ * is an immediate mismatch, checked before ever reaching
+ * `timingSafeEqual` (which throws on unequal-length buffers, so a bare
+ * length check first is required, not optional hardening). */
+function tokensMatch(expected: string, provided: unknown): boolean {
+  if (typeof provided !== 'string' || provided.length !== expected.length) return false;
+  return timingSafeEqual(Buffer.from(provided), Buffer.from(expected));
+}
+
 /**
  * The shim script's source, as a template — `toolsJson` / `port` are
  * substituted via `JSON.stringify`/template interpolation of a NUMBER,
@@ -138,6 +190,13 @@ function buildShimScript(tools: ToolDef[], port: number): string {
 const net = require('net');
 const TOOLS = ${toolsJson};
 const PORT = ${port};
+// Read from this process's own environment — set by claude at spawn time
+// from the --mcp-config entry's "env" field (see index.ts's AUTHENTICATION
+// paragraph). Never baked into this script's source: unlike PORT/TOOLS,
+// which are fixed for the bridge's whole life and safe to embed, the
+// token flows through the one channel that doesn't also touch the port
+// this fix exists to protect.
+const TOKEN = process.env.LLM_BRIDGE_TOKEN || '';
 let buf = '';
 function send(obj) { process.stdout.write(JSON.stringify(obj) + '\\n'); }
 function reply(id, result) { send({ jsonrpc: '2.0', id, result }); }
@@ -160,7 +219,7 @@ process.stdin.on('data', (chunk) => {
       reply(msg.id, { tools: TOOLS });
     } else if (msg.method === 'tools/call') {
       const client = net.createConnection({ port: PORT, host: '127.0.0.1' }, () => {
-        client.write(JSON.stringify({ id: String(msg.id), name: msg.params.name, arguments: msg.params.arguments || {} }) + '\\n');
+        client.write(JSON.stringify({ id: String(msg.id), name: msg.params.name, arguments: msg.params.arguments || {}, token: TOKEN }) + '\\n');
       });
       let respBuf = '';
       client.on('data', (d) => {
@@ -196,15 +255,38 @@ process.stdin.on('end', () => process.exit(0));
  * owns tearing it down via `close()` when that process exits.
  */
 export async function createToolBridge(tools: ToolDef[]): Promise<ToolBridge> {
+  // A random, per-bridge shared secret — see this file's header
+  // AUTHENTICATION paragraph. Generated fresh for every bridge, never
+  // reused across sessions or persisted anywhere beyond this call's
+  // closure and the generated --mcp-config's own env field.
+  const token = randomBytes(32).toString('hex');
   let current: ArmedTurnState | null = null;
 
   async function handleRequest(line: string, socket: Socket): Promise<void> {
-    let parsed: { id: string; name: string; arguments: Record<string, unknown> };
+    let parsed: { id: string; name: string; arguments: Record<string, unknown>; token?: unknown };
     try {
       parsed = JSON.parse(line);
     } catch {
-      return; // Malformed request from the shim — nothing legible to reply to.
+      return; // Malformed request — nothing legible to reply to, from the shim or otherwise.
     }
+
+    if (!tokensMatch(token, parsed.token)) {
+      // Checked FIRST, before anything else in this function — an
+      // unauthenticated caller learns nothing about whether a turn is
+      // even armed. REFUSED, not dropped: see this file's header
+      // AUTHENTICATION paragraph for why silence is the wrong shape here.
+      console.warn(
+        'claude-cli mcp-bridge: refused an unauthenticated tools/call attempt from ' +
+          `${socket.remoteAddress ?? 'unknown'}:${socket.remotePort ?? 'unknown'} — ` +
+          'invalid or missing token'
+      );
+      socket.write(
+        JSON.stringify({ id: parsed.id, refused: true, reason: 'invalid or missing token' }) + '\n'
+      );
+      socket.end();
+      return;
+    }
+
     const respond = (result: { content: { type: 'text'; text: string }[]; isError: boolean }) => {
       socket.write(JSON.stringify({ id: parsed.id, result }) + '\n');
     };
@@ -276,7 +358,16 @@ export async function createToolBridge(tools: ToolDef[]): Promise<ToolBridge> {
   await writeFile(
     mcpConfigPath,
     JSON.stringify({
-      mcpServers: { 'llm-tools': { command: process.execPath, args: [scriptPath] } },
+      mcpServers: {
+        'llm-tools': {
+          command: process.execPath,
+          args: [scriptPath],
+          // See this file's header AUTHENTICATION paragraph — the channel
+          // the shared secret travels over, distinct from the port and
+          // from the script file itself.
+          env: { LLM_BRIDGE_TOKEN: token },
+        },
+      },
     }),
     'utf8'
   );
