@@ -754,5 +754,54 @@ describe('claude-cli session lifecycle', () => {
       await expect(pending).rejects.toThrow('aborted mid-call');
       expect(child.kill).toHaveBeenCalledTimes(1);
     });
+
+    it('result-then-abort on a reused AbortController does NOT kill the now-healthy session — the abort listener must not outlive the turn it was armed for', async () => {
+      // Regression test for the leak found by applying the split-
+      // indivisibility test to the settlement race: the abort listener
+      // used to be removed on only ONE of the four settlement paths (the
+      // synchronous stdin-write-error branch). A turn that resolved
+      // normally via `result` left it armed — so a caller reusing one
+      // AbortController across a request whose lifetime outlives a
+      // single turn would have the SAME signal firing later kill a
+      // session that had already completed cleanly.
+      const { child, emitLine } = fakeChild();
+      mockSpawn.mockImplementationOnce(() => child);
+      const session = createSession();
+      const controller = new AbortController();
+
+      setImmediate(() => emitLine({ type: 'result', result: 'first' }));
+      const r1 = await runSessionTurn({
+        session,
+        systemPrompt: 'sys',
+        message: 'a',
+        tools: [],
+        maxToolCalls: 0,
+        signal: controller.signal,
+      });
+      expect(r1.text).toBe('first');
+
+      // The turn is over. Now the SAME controller fires — a later,
+      // unrelated abort (e.g. an overall request timeout tied to one
+      // AbortController reused across several turns), not a fresh one.
+      controller.abort(new Error('unrelated later abort'));
+
+      // The observable consequence, not merely "was the listener
+      // removed": the session must still be alive and usable. Asserting
+      // only that removeEventListener fired would pass against a fix
+      // that removed the listener but left some OTHER path still able to
+      // kill a settled session.
+      expect(child.kill).not.toHaveBeenCalled();
+
+      setImmediate(() => emitLine({ type: 'result', result: 'second' }));
+      const r2 = await runSessionTurn({
+        session,
+        systemPrompt: 'sys',
+        message: 'b',
+        tools: [],
+        maxToolCalls: 0,
+      });
+      expect(r2.text).toBe('second');
+      expect(mockSpawn).toHaveBeenCalledTimes(1); // one process served both turns — never respawned
+    });
   });
 });
