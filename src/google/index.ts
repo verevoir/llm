@@ -360,6 +360,22 @@ interface GeminiToolResult {
   finishReason: string;
 }
 
+/**
+ * Fallback id for a Gemini functionCall that arrived without one
+ * (`FunctionCall.id` is genuinely optional on the wire — some calls carry
+ * it, some don't). Derived from the call's name plus its position within
+ * *this turn's* functionCalls array: stable within the turn (recomputed
+ * identically from the same response, for both the ToolUse a caller sees
+ * and the ToolResult recorded against it) and, critically, distinct between
+ * two parallel calls to the *same* tool name — which the previous fallback
+ * (`f.name` alone) was not. It does not need uniqueness across turns:
+ * each turn's tool uses and results are only ever correlated against each
+ * other.
+ */
+function fallbackToolCallId(name: string, indexInTurn: number): string {
+  return `${name}#${indexInTurn}`;
+}
+
 async function callGenerateWithTools(
   client: GoogleGenAI,
   modelId: string,
@@ -425,7 +441,11 @@ export async function chatWithTools(options: ChatWithToolsOptions): Promise<Chat
   const usage = shapeUsage(r.rawUsage, modelClass);
   await fireUsageHook(options.onUsage, usage, 'google.chatWithTools');
   return {
-    toolUses: r.functionCalls.map((f) => ({ id: f.id ?? f.name, name: f.name, input: f.args })),
+    toolUses: r.functionCalls.map((f, i) => ({
+      id: f.id ?? fallbackToolCallId(f.name, i),
+      name: f.name,
+      input: f.args,
+    })),
     text: r.text,
     stopReason: r.finishReason,
     usage,
@@ -483,8 +503,8 @@ export async function chatWithToolLoop(
       try {
         await options.onIteration({
           iteration,
-          toolUses: r.functionCalls.map((f) => ({
-            id: f.id ?? f.name,
+          toolUses: r.functionCalls.map((f, i) => ({
+            id: f.id ?? fallbackToolCallId(f.name, i),
             name: f.name,
             input: f.args,
           })),
@@ -507,8 +527,12 @@ export async function chatWithToolLoop(
     // user turn of functionResponse parts.
     if (r.modelContent) contents.push(r.modelContent);
     const responseParts: unknown[] = [];
-    for (const fc of r.functionCalls) {
-      const use: ToolUse = { id: fc.id ?? fc.name, name: fc.name, input: fc.args };
+    for (const [i, fc] of r.functionCalls.entries()) {
+      const use: ToolUse = {
+        id: fc.id ?? fallbackToolCallId(fc.name, i),
+        name: fc.name,
+        input: fc.args,
+      };
       allToolUses.push(use);
       let content: string;
       let isError = false;

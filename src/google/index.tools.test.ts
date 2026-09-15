@@ -44,6 +44,25 @@ function textReply(text: string) {
   };
 }
 
+// Two parallel calls to the SAME tool name, neither carrying an id — the
+// shape that collided under the old `f.id ?? f.name` fallback.
+function parallelSameNameFnCallReply(argsList: Record<string, unknown>[]) {
+  return {
+    functionCalls: argsList.map((args) => ({ name: 'record_step', args })), // no `id` field
+    candidates: [
+      {
+        content: {
+          role: 'model',
+          parts: argsList.map((args) => ({ functionCall: { name: 'record_step', args } })),
+        },
+        finishReason: 'STOP',
+      },
+    ],
+    usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 5 },
+    text: '',
+  };
+}
+
 beforeEach(() => generateMock.mockReset());
 afterEach(() => setModelSpanSink(null));
 
@@ -102,6 +121,52 @@ describe('@verevoir/llm/google — tool calling', () => {
       c.parts.some((p) => (p as { functionResponse?: unknown }).functionResponse)
     );
     expect(hasFnResponse).toBe(true);
+  });
+
+  it('assigns distinct ids to parallel calls to the same tool when Gemini omits an id', async () => {
+    // Regression for the id: f.id ?? f.name collision — under the old
+    // fallback both calls below would share id 'record_step' and a caller
+    // could not tell them apart.
+    generateMock.mockResolvedValueOnce(parallelSameNameFnCallReply([{ step: 'a' }, { step: 'b' }]));
+    const r = await chatWithTools({
+      systemPrompt: 's',
+      turns: [{ role: 'user', content: 'go' }],
+      tools: [TOOL],
+      apiKey: 'k',
+    });
+    expect(r.toolUses).toHaveLength(2);
+    const ids = r.toolUses.map((u) => u.id);
+    expect(new Set(ids).size).toBe(2);
+    expect(r.toolUses[0].input).toMatchObject({ step: 'a' });
+    expect(r.toolUses[1].input).toMatchObject({ step: 'b' });
+  });
+
+  it('chatWithToolLoop correlates each parallel same-name call to its own result by the distinct id', async () => {
+    generateMock
+      .mockResolvedValueOnce(parallelSameNameFnCallReply([{ step: 'a' }, { step: 'b' }]))
+      .mockResolvedValueOnce(textReply('done'));
+    const executor = vi.fn(
+      async (use: { id: string; input: Record<string, unknown> }) => `result-for-${use.id}`
+    );
+    const r = await chatWithToolLoop({
+      systemPrompt: 's',
+      turns: [{ role: 'user', content: 'go' }],
+      tools: [TOOL],
+      executor,
+      apiKey: 'k',
+    });
+    expect(r.toolUses).toHaveLength(2);
+    const [u0, u1] = r.toolUses;
+    expect(u0.id).not.toBe(u1.id);
+    // Each result is filed under the SAME id its own tool use carries — under
+    // the old collision both would land under 'record_step' and this pairing
+    // would be indistinguishable.
+    expect(r.toolResults).toContainEqual(
+      expect.objectContaining({ toolUseId: u0.id, content: `result-for-${u0.id}` })
+    );
+    expect(r.toolResults).toContainEqual(
+      expect.objectContaining({ toolUseId: u1.id, content: `result-for-${u1.id}` })
+    );
   });
 
   it('chatWithTools emits a model span with scope google.chatWithTools', async () => {
