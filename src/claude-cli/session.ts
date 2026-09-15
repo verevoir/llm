@@ -282,6 +282,14 @@ interface PendingTurn {
   reject: (err: unknown) => void;
   assistantEventCount: number;
   watchdog: ReturnType<typeof setTimeout>;
+  /** Clears the watchdog timer AND removes this turn's abort listener —
+   * the ONE teardown every settlement path must call, exactly once,
+   * regardless of which of the four paths (result, watchdog, abort,
+   * process death) is the one actually settling this turn. See
+   * `runSessionTurn`'s own comment, at the point this is built, for why
+   * this used to be four separate hand-maintained removals and what
+   * went wrong because it was. */
+  teardown: () => void;
 }
 
 interface HeldSession {
@@ -431,7 +439,7 @@ async function killHeld(session: HeldSession): Promise<void> {
   if (session.pending) {
     const pending = session.pending;
     session.pending = null;
-    clearTimeout(pending.watchdog);
+    pending.teardown();
     pending.reject(
       new Error(`claude-cli: session ${session.id} was closed/evicted while a turn was in flight`)
     );
@@ -550,7 +558,7 @@ function handleStreamLine(session: HeldSession, line: string): void {
   if (evt.type === 'result') {
     const pending = session.pending;
     session.pending = null;
-    clearTimeout(pending.watchdog);
+    pending.teardown();
     pending.resolve({ raw: evt, assistantEventCount: pending.assistantEventCount });
   }
 }
@@ -573,7 +581,7 @@ function wireSessionEvents(session: HeldSession): void {
     if (session.pending) {
       const pending = session.pending;
       session.pending = null;
-      clearTimeout(pending.watchdog);
+      pending.teardown();
       pending.reject(
         new Error(
           `claude-cli: session ${session.id}'s process ${reason} mid-turn — the turn's result ` +
@@ -758,6 +766,7 @@ export async function runSessionTurn(options: SessionTurnOptions): Promise<Sessi
       assistantEventCount: number;
     }>((resolve, reject) => {
       const watchdog = setTimeout(() => {
+        teardown();
         session.pending = null;
         void killHeld(session);
         HELD.delete(session.id);
@@ -774,12 +783,46 @@ export async function runSessionTurn(options: SessionTurnOptions): Promise<Sessi
       if (typeof watchdog.unref === 'function') watchdog.unref();
 
       const onAbort = () => {
-        clearTimeout(watchdog);
+        teardown();
         session.pending = null;
         void killHeld(session);
         HELD.delete(session.id);
         reject(abortReasonLocal(options.signal!));
       };
+
+      // ONE TEARDOWN POINT, CALLED FROM EVERY SETTLEMENT PATH — not four
+      // hand-maintained removals. A turn settles exactly one of four
+      // ways: a `result` line (handleStreamLine, above), this watchdog
+      // firing, `onAbort` firing, or the process dying mid-turn
+      // (wireSessionEvents' `onGone`) — and every one of those must clear
+      // BOTH the watchdog timer AND this abort listener before settling,
+      // or whichever of the two didn't fire stays armed against a turn
+      // that has already ended.
+      //
+      // BUG THIS FIXES, RECORDED SO IT ISN'T REINTRODUCED: the abort
+      // listener used to be removed on exactly one of the four paths —
+      // the synchronous stdin-write-error branch, by hand. `{ once: true
+      // }` only unregisters a listener once IT fires, not once the
+      // promise settles some OTHER way — so a turn that resolved
+      // normally via `result` left the listener armed against a session
+      // that was legitimately still open. If the SAME AbortSignal fired
+      // later (a caller reusing one AbortController across a request
+      // whose lifetime outlives a single turn — plausible, not exotic),
+      // `onAbort` would still run and kill that healthy,
+      // already-completed session. `killHeld`'s `session.closed` guard
+      // happened to cover watchdog-then-abort and death-then-abort (both
+      // set `closed` before the abort could matter) but NOT
+      // result-then-abort, because nothing had closed the session at
+      // that point. Found by holding all four settlement paths in view
+      // at once and asking whether resolving via one leaves anything
+      // armed that another could still fire into — not visible from any
+      // single path read in isolation. See session.test.ts's
+      // 'result-then-abort on a reused AbortController' test.
+      const teardown = () => {
+        clearTimeout(watchdog);
+        options.signal?.removeEventListener('abort', onAbort);
+      };
+
       // getOrCreateSession, above, crosses an async boundary (an await,
       // even one that resolves in a single microtask tick) — a signal
       // aborted DURING that gap fires its 'abort' event before this
@@ -794,7 +837,7 @@ export async function runSessionTurn(options: SessionTurnOptions): Promise<Sessi
       }
       options.signal?.addEventListener('abort', onAbort, { once: true });
 
-      session.pending = { resolve, reject, assistantEventCount: 0, watchdog };
+      session.pending = { resolve, reject, assistantEventCount: 0, watchdog, teardown };
 
       const line =
         JSON.stringify({ type: 'user', message: { role: 'user', content: options.message } }) +
@@ -802,9 +845,8 @@ export async function runSessionTurn(options: SessionTurnOptions): Promise<Sessi
       try {
         session.child.stdin.write(line);
       } catch (err) {
-        clearTimeout(watchdog);
+        teardown();
         session.pending = null;
-        options.signal?.removeEventListener('abort', onAbort);
         reject(
           new Error(
             `claude-cli: could not write to held session ${session.id}'s stdin — ` +
