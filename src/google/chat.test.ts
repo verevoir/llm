@@ -17,7 +17,13 @@ vi.mock('@google/genai', () => ({
 
 // Import AFTER vi.mock so the mocked constructor is the one captured.
 import { chat } from './index.js';
-import { setModelSpanSink, type ModelSpan, type TokenUsage } from '../index.js';
+import {
+  setModelSpanSink,
+  type ModelSpan,
+  type TokenUsage,
+  LLM_TIMEOUT_CODE,
+  LLM_CALL_TIMEOUT_MS,
+} from '../index.js';
 
 interface FakeUsage {
   promptTokenCount: number;
@@ -213,5 +219,44 @@ describe('google.chat', () => {
 
     expect(result.content).toBe('finally');
     expect(mockGenerateContent).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('google.chat — the timeout contract (generic wrap: uniform shape now, bespoke teardown deferred)', () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("rejects with the LLM_TIMEOUT_CODE shape when the call hangs past LLM_CALL_TIMEOUT_MS — the ONLY thing bounding this route today, since Gemini's SDK builds no AbortController and has no default timeout of its own when none is wired in", async () => {
+    vi.useFakeTimers();
+    mockGenerateContent.mockImplementation(() => new Promise(() => {})); // hangs forever
+
+    const pending = chat({
+      systemPrompt: 'sys',
+      turns: [{ role: 'user', content: 'q' }],
+      apiKey: 'sk-test',
+    });
+    const assertion = expect(pending).rejects.toMatchObject({
+      code: LLM_TIMEOUT_CODE,
+      timeoutMs: LLM_CALL_TIMEOUT_MS,
+    });
+    await vi.advanceTimersByTimeAsync(LLM_CALL_TIMEOUT_MS + 1);
+    await assertion;
+  });
+
+  it('honours a caller-supplied timeoutMs override', async () => {
+    vi.useFakeTimers();
+    mockGenerateContent.mockImplementation(() => new Promise(() => {}));
+
+    const pending = chat({
+      systemPrompt: 'sys',
+      turns: [{ role: 'user', content: 'q' }],
+      apiKey: 'sk-test',
+      timeoutMs: 2_000,
+    });
+    const assertion = expect(pending).rejects.toMatchObject({
+      code: LLM_TIMEOUT_CODE,
+      timeoutMs: 2_000,
+    });
+    await vi.advanceTimersByTimeAsync(2_001);
+    await assertion;
   });
 });

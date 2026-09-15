@@ -25,6 +25,7 @@ import {
   registerModelLabels,
   registerProviderConnection,
   resolveBaseUrl,
+  runWithTimeoutContract,
 } from '../index.js';
 
 // ────────────────────────────────────────────────────────────────────
@@ -274,34 +275,36 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
   if (options.turns.length === 0) {
     throw new Error('deepseek.chat() requires at least one turn');
   }
-  throwIfAborted(options.abortSignal);
-  const modelClass: ModelClass = options.modelClass ?? 'reasoning';
-  const client = getClient(options.apiKey ?? null);
-  const modelId = models[modelClass];
+  return runWithTimeoutContract(options.timeoutMs, async () => {
+    throwIfAborted(options.abortSignal);
+    const modelClass: ModelClass = options.modelClass ?? 'reasoning';
+    const client = getClient(options.apiKey ?? null);
+    const modelId = models[modelClass];
 
-  const raw = await callWithRetries(
-    () => callChatCompletionsCreate(client, modelId, options.systemPrompt, options.turns),
-    options.onRetry
-  );
-
-  if (raw.finishReason && raw.finishReason !== 'stop') {
-    console.warn(
-      `deepseek.chat: finish_reason=${raw.finishReason} (model=${modelId}, output_tokens=${raw.rawUsage.outputTokens})`
+    const raw = await callWithRetries(
+      () => callChatCompletionsCreate(client, modelId, options.systemPrompt, options.turns),
+      options.onRetry
     );
-  }
 
-  const usage = shapeUsage(raw.rawUsage, modelClass);
-  await fireUsageHook(options.onUsage, usage, 'deepseek.chat');
+    if (raw.finishReason && raw.finishReason !== 'stop') {
+      console.warn(
+        `deepseek.chat: finish_reason=${raw.finishReason} (model=${modelId}, output_tokens=${raw.rawUsage.outputTokens})`
+      );
+    }
 
-  if (!raw.text) {
-    throw new Error(
-      `deepseek.chat: response had no text content (finishReason=${raw.finishReason})`
-    );
-  }
+    const usage = shapeUsage(raw.rawUsage, modelClass);
+    await fireUsageHook(options.onUsage, usage, 'deepseek.chat');
 
-  return {
-    content: raw.text,
-    usage,
-    stopReason: raw.finishReason,
-  };
+    if (!raw.text) {
+      throw new Error(
+        `deepseek.chat: response had no text content (finishReason=${raw.finishReason})`
+      );
+    }
+
+    return {
+      content: raw.text,
+      usage,
+      stopReason: raw.finishReason,
+    };
+  });
 }

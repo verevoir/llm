@@ -60,9 +60,32 @@ function resolveAnthropicAuth(
   return null;
 }
 
+/**
+ * The vendor SDK's OWN `timeout` / `maxRetries` knobs, neutralised on every
+ * client this adapter builds — not left at the SDK's default (`timeout`
+ * ~10 minutes PER ATTEMPT, `maxRetries: 2`, so a hung call's real worst case
+ * was silently nearer 30 minutes). This package's own timeout contract
+ * (`withTimeoutSignal` in the core, threaded into `callStreamed` below via
+ * the combined signal) is the ONLY thing that can ever fire on a call this
+ * adapter makes: `maxRetries: 0` removes the SDK's own retry-on-timeout
+ * multiplier (this adapter's own `callWithRetries` ladder is the only retry
+ * logic from here on), and `timeout` is set far larger than any sane call
+ * bound so it cannot race our own watchdog and win.
+ *
+ * Picking our own bound to literally equal the SDK's un-neutralised default
+ * (both happen to be 10 minutes) would otherwise leave the two timers
+ * racing, decided by whichever socket-level tick wins — setting the
+ * vendor's own knob this high, rather than merely adding a signal alongside
+ * it, is what makes ours the only timer that can fire, regardless of what
+ * the vendor's default is or is ever changed to.
+ */
+export const VENDOR_TIMEOUT_NEUTRALIZED_MS = 24 * 60 * 60 * 1000; // 24 hours
+
 /** Construct an SDK client for a resolved credential. A subscription OAuth token
  * is sent as a bearer `authToken` with the required `anthropic-beta` header; an
- * API key is sent as `apiKey`. */
+ * API key is sent as `apiKey`. Every client — regardless of credential kind —
+ * gets `maxRetries: 0` + the neutralised `timeout` above; see
+ * {@link VENDOR_TIMEOUT_NEUTRALIZED_MS}'s own doc comment for why. */
 function buildClient(auth: NonNullable<ReturnType<typeof resolveAnthropicAuth>>): Anthropic {
   const baseURL = resolveBaseUrl('ANTHROPIC_BASE_URL');
   if (auth.kind === 'oauth') {
@@ -74,10 +97,18 @@ function buildClient(auth: NonNullable<ReturnType<typeof resolveAnthropicAuth>>)
       authToken: auth.authToken,
       baseURL,
       defaultHeaders: { 'anthropic-beta': oauthBetaHeader() },
+      maxRetries: 0,
+      timeout: VENDOR_TIMEOUT_NEUTRALIZED_MS,
     });
   }
   // authToken: null so a stray ANTHROPIC_AUTH_TOKEN can't override an explicit key.
-  return new Anthropic({ apiKey: auth.apiKey, authToken: null, baseURL });
+  return new Anthropic({
+    apiKey: auth.apiKey,
+    authToken: null,
+    baseURL,
+    maxRetries: 0,
+    timeout: VENDOR_TIMEOUT_NEUTRALIZED_MS,
+  });
 }
 
 /** Resolve the client for a call plus whether it authenticates with a

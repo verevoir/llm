@@ -24,6 +24,7 @@ import {
   registerProviderConnection,
   resolveBaseUrl,
   localEndpointKey,
+  runWithTimeoutContract,
 } from '../index.js';
 
 // ────────────────────────────────────────────────────────────────────
@@ -260,32 +261,34 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
   if (options.turns.length === 0) {
     throw new Error('openai.chat() requires at least one turn');
   }
-  throwIfAborted(options.abortSignal);
-  const modelClass: ModelClass = options.modelClass ?? 'reasoning';
-  const client = getClient(options.apiKey ?? null);
-  const modelId = models[modelClass];
+  return runWithTimeoutContract(options.timeoutMs, async () => {
+    throwIfAborted(options.abortSignal);
+    const modelClass: ModelClass = options.modelClass ?? 'reasoning';
+    const client = getClient(options.apiKey ?? null);
+    const modelId = models[modelClass];
 
-  const raw = await callWithRetries(
-    () => callResponsesCreate(client, modelId, options.systemPrompt, options.turns),
-    options.onRetry
-  );
-
-  if (raw.status && raw.status !== 'completed') {
-    console.warn(
-      `openai.chat: response status=${raw.status} (model=${modelId}, output_tokens=${raw.rawUsage.outputTokens})`
+    const raw = await callWithRetries(
+      () => callResponsesCreate(client, modelId, options.systemPrompt, options.turns),
+      options.onRetry
     );
-  }
 
-  const usage = shapeUsage(raw.rawUsage, modelClass);
-  await fireUsageHook(options.onUsage, usage, 'openai.chat');
+    if (raw.status && raw.status !== 'completed') {
+      console.warn(
+        `openai.chat: response status=${raw.status} (model=${modelId}, output_tokens=${raw.rawUsage.outputTokens})`
+      );
+    }
 
-  if (!raw.text) {
-    throw new Error(`openai.chat: response had no text content (status=${raw.status})`);
-  }
+    const usage = shapeUsage(raw.rawUsage, modelClass);
+    await fireUsageHook(options.onUsage, usage, 'openai.chat');
 
-  return {
-    content: raw.text,
-    usage,
-    stopReason: raw.status,
-  };
+    if (!raw.text) {
+      throw new Error(`openai.chat: response had no text content (status=${raw.status})`);
+    }
+
+    return {
+      content: raw.text,
+      usage,
+      stopReason: raw.status,
+    };
+  });
 }

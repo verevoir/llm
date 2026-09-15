@@ -37,6 +37,7 @@ import {
   registerProviderConnection,
   resolveBaseUrl,
   localEndpointKey,
+  runWithTimeoutContract,
 } from './index.js';
 
 /** Config for one OpenAI-compatible provider. */
@@ -257,32 +258,34 @@ export function createOpenAICompatAdapter(config: OpenAICompatConfig): OpenAICom
     if (options.turns.length === 0) {
       throw new Error(`${provider}.chat() requires at least one turn`);
     }
-    throwIfAborted(options.abortSignal);
-    const modelClass: ModelClass = options.modelClass ?? 'reasoning';
-    const client = getClient(options.apiKey ?? null);
-    const modelId = models[modelClass];
+    return runWithTimeoutContract(options.timeoutMs, async () => {
+      throwIfAborted(options.abortSignal);
+      const modelClass: ModelClass = options.modelClass ?? 'reasoning';
+      const client = getClient(options.apiKey ?? null);
+      const modelId = models[modelClass];
 
-    const raw = await callWithRetries(
-      () => callChatCompletionsCreate(client, modelId, options.systemPrompt, options.turns),
-      options.onRetry
-    );
-
-    if (raw.finishReason && raw.finishReason !== 'stop') {
-      console.warn(
-        `${provider}.chat: finish_reason=${raw.finishReason} (model=${modelId}, output_tokens=${raw.rawUsage.outputTokens})`
+      const raw = await callWithRetries(
+        () => callChatCompletionsCreate(client, modelId, options.systemPrompt, options.turns),
+        options.onRetry
       );
-    }
 
-    const usage = shapeUsage(raw.rawUsage, modelClass);
-    await fireUsageHook(options.onUsage, usage, `${provider}.chat`);
+      if (raw.finishReason && raw.finishReason !== 'stop') {
+        console.warn(
+          `${provider}.chat: finish_reason=${raw.finishReason} (model=${modelId}, output_tokens=${raw.rawUsage.outputTokens})`
+        );
+      }
 
-    if (!raw.text) {
-      throw new Error(
-        `${provider}.chat: response had no text content (finishReason=${raw.finishReason})`
-      );
-    }
+      const usage = shapeUsage(raw.rawUsage, modelClass);
+      await fireUsageHook(options.onUsage, usage, `${provider}.chat`);
 
-    return { content: raw.text, usage, stopReason: raw.finishReason };
+      if (!raw.text) {
+        throw new Error(
+          `${provider}.chat: response had no text content (finishReason=${raw.finishReason})`
+        );
+      }
+
+      return { content: raw.text, usage, stopReason: raw.finishReason };
+    });
   }
 
   // ── Tool calling (STDIO-342) ───────────────────────────────────────────────
@@ -363,25 +366,32 @@ export function createOpenAICompatAdapter(config: OpenAICompatConfig): OpenAICom
       throw new Error(`${provider}.chatWithTools() requires at least one turn`);
     if (options.tools.length === 0)
       throw new Error(`${provider}.chatWithTools() requires at least one tool`);
-    throwIfAborted(options.abortSignal);
-    const modelClass: ModelClass = options.modelClass ?? 'reasoning';
-    const client = getClient(options.apiKey ?? null);
-    const modelId = models[modelClass];
-    const tools = toOpenAITools(options.tools);
+    return runWithTimeoutContract(options.timeoutMs, async () => {
+      throwIfAborted(options.abortSignal);
+      const modelClass: ModelClass = options.modelClass ?? 'reasoning';
+      const client = getClient(options.apiKey ?? null);
+      const modelId = models[modelClass];
+      const tools = toOpenAITools(options.tools);
 
-    const r = await callWithRetries(
-      () =>
-        createWithTools(client, modelId, baseMessages(options.systemPrompt, options.turns), tools),
-      options.onRetry
-    );
-    const usage = shapeUsage(r.raw, modelClass);
-    await fireUsageHook(options.onUsage, usage, `${provider}.chatWithTools`);
-    return {
-      toolUses: r.rawCalls.map(parseToolUse),
-      text: r.text,
-      stopReason: r.finishReason,
-      usage,
-    };
+      const r = await callWithRetries(
+        () =>
+          createWithTools(
+            client,
+            modelId,
+            baseMessages(options.systemPrompt, options.turns),
+            tools
+          ),
+        options.onRetry
+      );
+      const usage = shapeUsage(r.raw, modelClass);
+      await fireUsageHook(options.onUsage, usage, `${provider}.chatWithTools`);
+      return {
+        toolUses: r.rawCalls.map(parseToolUse),
+        text: r.text,
+        stopReason: r.finishReason,
+        usage,
+      };
+    });
   }
 
   /** Multi-turn tool loop: model → execute tools → feed tool results back, until
@@ -394,115 +404,117 @@ export function createOpenAICompatAdapter(config: OpenAICompatConfig): OpenAICom
       throw new Error(`${provider}.chatWithToolLoop() requires at least one turn`);
     if (options.tools.length === 0)
       throw new Error(`${provider}.chatWithToolLoop() requires at least one tool`);
-    const modelClass: ModelClass = options.modelClass ?? 'reasoning';
-    const client = getClient(options.apiKey ?? null);
-    const modelId = models[modelClass];
-    const tools = toOpenAITools(options.tools);
-    const maxIterations = Math.max(1, options.maxIterations ?? 5);
+    return runWithTimeoutContract(options.timeoutMs, async () => {
+      const modelClass: ModelClass = options.modelClass ?? 'reasoning';
+      const client = getClient(options.apiKey ?? null);
+      const modelId = models[modelClass];
+      const tools = toOpenAITools(options.tools);
+      const maxIterations = Math.max(1, options.maxIterations ?? 5);
 
-    const messages: unknown[] = baseMessages(options.systemPrompt, options.turns);
-    const allToolUses: ToolUse[] = [];
-    const allToolResults: ChatWithToolLoopResult['toolResults'] = [];
-    const aggregate: TokenUsage = {
-      provider,
-      model: modelId,
-      direction: modelClass,
-      // Single credential mechanism — see shapeUsage's comment above.
-      route: 'api-key',
-      inputTokens: 0,
-      outputTokens: 0,
-      cacheCreationInputTokens: 0,
-      cacheReadInputTokens: 0,
-    };
+      const messages: unknown[] = baseMessages(options.systemPrompt, options.turns);
+      const allToolUses: ToolUse[] = [];
+      const allToolResults: ChatWithToolLoopResult['toolResults'] = [];
+      const aggregate: TokenUsage = {
+        provider,
+        model: modelId,
+        direction: modelClass,
+        // Single credential mechanism — see shapeUsage's comment above.
+        route: 'api-key',
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheCreationInputTokens: 0,
+        cacheReadInputTokens: 0,
+      };
 
-    let iteration = 0;
-    while (iteration < maxIterations) {
-      iteration += 1;
-      throwIfAborted(options.abortSignal);
-      const r = await callWithRetries(
-        () => createWithTools(client, modelId, messages, tools),
-        options.onRetry
-      );
-      aggregate.inputTokens += r.raw.inputTokens;
-      aggregate.outputTokens += r.raw.outputTokens;
-      aggregate.cacheReadInputTokens += r.raw.cachedInputTokens;
-      await fireUsageHook(
-        options.onUsage,
-        shapeUsage(r.raw, modelClass),
-        `${provider}.chatWithToolLoop`
-      );
-      if (options.onIteration) {
-        try {
-          await options.onIteration({
-            iteration,
-            toolUses: r.rawCalls.map(parseToolUse),
-            stopReason: r.finishReason,
-          });
-        } catch (err) {
-          console.warn(`${provider}.chatWithToolLoop: onIteration threw`, err);
+      let iteration = 0;
+      while (iteration < maxIterations) {
+        iteration += 1;
+        throwIfAborted(options.abortSignal);
+        const r = await callWithRetries(
+          () => createWithTools(client, modelId, messages, tools),
+          options.onRetry
+        );
+        aggregate.inputTokens += r.raw.inputTokens;
+        aggregate.outputTokens += r.raw.outputTokens;
+        aggregate.cacheReadInputTokens += r.raw.cachedInputTokens;
+        await fireUsageHook(
+          options.onUsage,
+          shapeUsage(r.raw, modelClass),
+          `${provider}.chatWithToolLoop`
+        );
+        if (options.onIteration) {
+          try {
+            await options.onIteration({
+              iteration,
+              toolUses: r.rawCalls.map(parseToolUse),
+              stopReason: r.finishReason,
+            });
+          } catch (err) {
+            console.warn(`${provider}.chatWithToolLoop: onIteration threw`, err);
+          }
+        }
+        if (r.rawCalls.length === 0) {
+          return {
+            text: r.text,
+            toolUses: allToolUses,
+            toolResults: allToolResults,
+            iterations: iteration,
+            usage: aggregate,
+          };
+        }
+        // Append the assistant turn verbatim (text + tool_calls) so the model
+        // recognises the tool results that follow.
+        messages.push({ role: 'assistant', content: r.text || null, tool_calls: r.rawCalls });
+        for (const tc of r.rawCalls) {
+          const use = parseToolUse(tc);
+          allToolUses.push(use);
+          let content: string;
+          let isError = false;
+          try {
+            content = await options.executor(use);
+          } catch (err) {
+            content = err instanceof Error ? err.message : String(err);
+            isError = true;
+          }
+          messages.push({ role: 'tool', tool_call_id: tc.id, content });
+          allToolResults.push({ toolUseId: tc.id, content, isError });
         }
       }
-      if (r.rawCalls.length === 0) {
+      // Iteration cap hit while the model was still calling tools. One FINAL
+      // no-tools call forces a written answer synthesised from the history,
+      // instead of returning nothing. Degrade to empty text if it fails.
+      throwIfAborted(options.abortSignal);
+      try {
+        const fin = await callWithRetries(
+          () => createWithTools(client, modelId, messages, toOpenAITools([])),
+          options.onRetry
+        );
+        aggregate.inputTokens += fin.raw.inputTokens;
+        aggregate.outputTokens += fin.raw.outputTokens;
+        aggregate.cacheReadInputTokens += fin.raw.cachedInputTokens;
+        await fireUsageHook(
+          options.onUsage,
+          shapeUsage(fin.raw, modelClass),
+          `${provider}.chatWithToolLoop`
+        );
         return {
-          text: r.text,
+          text: fin.text,
+          toolUses: allToolUses,
+          toolResults: allToolResults,
+          iterations: iteration,
+          usage: aggregate,
+        };
+      } catch (err) {
+        console.warn(`${provider}.chatWithToolLoop: final synthesis call failed`, err);
+        return {
+          text: '',
           toolUses: allToolUses,
           toolResults: allToolResults,
           iterations: iteration,
           usage: aggregate,
         };
       }
-      // Append the assistant turn verbatim (text + tool_calls) so the model
-      // recognises the tool results that follow.
-      messages.push({ role: 'assistant', content: r.text || null, tool_calls: r.rawCalls });
-      for (const tc of r.rawCalls) {
-        const use = parseToolUse(tc);
-        allToolUses.push(use);
-        let content: string;
-        let isError = false;
-        try {
-          content = await options.executor(use);
-        } catch (err) {
-          content = err instanceof Error ? err.message : String(err);
-          isError = true;
-        }
-        messages.push({ role: 'tool', tool_call_id: tc.id, content });
-        allToolResults.push({ toolUseId: tc.id, content, isError });
-      }
-    }
-    // Iteration cap hit while the model was still calling tools. One FINAL
-    // no-tools call forces a written answer synthesised from the history,
-    // instead of returning nothing. Degrade to empty text if it fails.
-    throwIfAborted(options.abortSignal);
-    try {
-      const fin = await callWithRetries(
-        () => createWithTools(client, modelId, messages, toOpenAITools([])),
-        options.onRetry
-      );
-      aggregate.inputTokens += fin.raw.inputTokens;
-      aggregate.outputTokens += fin.raw.outputTokens;
-      aggregate.cacheReadInputTokens += fin.raw.cachedInputTokens;
-      await fireUsageHook(
-        options.onUsage,
-        shapeUsage(fin.raw, modelClass),
-        `${provider}.chatWithToolLoop`
-      );
-      return {
-        text: fin.text,
-        toolUses: allToolUses,
-        toolResults: allToolResults,
-        iterations: iteration,
-        usage: aggregate,
-      };
-    } catch (err) {
-      console.warn(`${provider}.chatWithToolLoop: final synthesis call failed`, err);
-      return {
-        text: '',
-        toolUses: allToolUses,
-        toolResults: allToolResults,
-        iterations: iteration,
-        usage: aggregate,
-      };
-    }
+    });
   }
 
   return {
