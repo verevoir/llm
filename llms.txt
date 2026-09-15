@@ -46,14 +46,15 @@ SDK does not enter your bundle.
   `chat()` is single-shot (spawn-per-call), same as before. `chatWithToolLoop()`
   — and `chat()` given a `session` — instead run on a HELD session
   (`createSession()`/`closeSession()`): one kept-alive `claude` process per
-  handle, tools exposed via an embedded MCP bridge (never by lifting
-  `--tools ""`), bounded by an idle timeout and an LRU cap so an unreleased
-  handle can't accumulate processes forever. A dead/evicted/never-used handle
-  is never an error — the next call transparently starts fresh under the same
-  id. `chatWithTools()` (single-shot, return-before-execution) is refused on
-  this transport, by design — tools run through the CLI's own agentic loop via
-  MCP, so there is no point where a tool_use exists without already having
-  been executed for a caller to run separately.
+  handle, tools exposed via an embedded MCP bridge (never by lifting the
+  built-in-tool denial — `--disallowedTools "*"` stays on), bounded by an idle
+  timeout and an LRU cap so an unreleased handle can't accumulate processes
+  forever. A dead/evicted/never-used handle is never an error — the next call
+  transparently starts fresh under the same id. `chatWithTools()` (single-shot,
+  return-before-execution) is refused on this transport, by design — tools run
+  through the CLI's own agentic loop via MCP, so there is no point where a
+  tool_use exists without already having been executed for a caller to run
+  separately.
 
 Every provider in the matrix (Anthropic, Google, OpenAI, DeepSeek, SambaNova,
 Mistral) can now drive the tool loop. `claude-cli` can now drive one too — via

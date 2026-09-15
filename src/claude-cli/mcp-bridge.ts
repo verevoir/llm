@@ -1,13 +1,14 @@
 /**
  * @verevoir/llm/claude-cli — the embedded MCP tool bridge.
  *
- * `--tools ""` (kept, per this adapter's own constraint — see index.ts's
- * file header) disables every BUILT-IN Claude Code tool. It says nothing
- * about a tool exposed through an explicit `--mcp-config` entry — those
- * are a different mechanism, and `--strict-mcp-config` (also always
- * passed alongside it) is what already limits the *set* of MCP servers a
- * call can reach to exactly the one named here, never anything from the
- * caller's own machine-wide or project configuration.
+ * `--disallowedTools "*"` (kept, per this adapter's own constraint — see
+ * index.ts's file header) removes every BUILT-IN Claude Code tool from
+ * context entirely. It says nothing about a tool exposed through an
+ * explicit `--mcp-config` entry — those are a different mechanism, and
+ * `--strict-mcp-config` (also always passed alongside it) is what
+ * already limits the *set* of MCP servers a call can reach to exactly
+ * the one named here, never anything from the caller's own
+ * machine-wide or project configuration.
  *
  * This module generates, per held session, a tiny stdio MCP SERVER — a
  * throwaway Node script written to a temp file — that `claude` itself
@@ -41,13 +42,20 @@
  * (talking to `claude`) has to match a spec neither side of this
  * repository controls.
  *
- * RELAYED, NOT CONFIRMED: whether `claude -p --tools "" --mcp-config …`
- * genuinely leaves an MCP-declared tool callable while every built-in
- * tool stays off is asserted here from MCP's own published stdio
- * transport spec and Claude Code's documented `--mcp-config` flag — this
- * repository has not independently observed it against a real
- * invocation. See `session.ts`'s own file header for the precise
- * verification this rests on being asked for.
+ * CONFIRMED, NOT RELAYED — THE BUILT-IN-TOOL HALF: `--disallowedTools
+ * "*"` genuinely removes every built-in tool from a session using this
+ * bridge, confirmed by three real, operator-run invocations — see
+ * `session.ts`'s own file header for the full account, including a run
+ * where the model was explicitly asked to invoke Bash and could not.
+ *
+ * STILL OPEN — THE MCP HALF: whether an MCP-declared tool exposed by
+ * this bridge stays callable once `--disallowedTools "*"`/`--mcp-config`
+ * are both in play has NOT been observed on a real invocation that got
+ * far enough to test it — every probe run so far shows `mcp_servers`
+ * empty before a connection is even attempted, with `--safe-mode` the
+ * leading, unconfirmed hypothesis for why. See `session.ts`'s own file
+ * header for the full probe history and the isolating probe this points
+ * to next.
  */
 
 import { createServer, type Server, type Socket } from 'node:net';
