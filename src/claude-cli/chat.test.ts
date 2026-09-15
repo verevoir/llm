@@ -49,6 +49,33 @@ function fakeChild() {
   return { child, written };
 }
 
+// ── stream-json fixture helpers ──────────────────────────────────────────
+// The real CLI's stdout, in --output-format stream-json, is one JSON
+// object per line. These build exactly that shape rather than the single
+// JSON blob every fixture used to be — matching what a real invocation
+// actually produces (see index.ts's file header).
+
+/** A `{"type":"system","subtype":"init",...}` line — the ONE event the
+ * tool-safety check reads. `tools` defaults to `[]`, matching what a
+ * correctly-behaving `--disallowedTools "*"` call should report; pass a
+ * non-empty array to simulate the exact defect `--tools ""` had. */
+function initLine(tools: string[] = []): string {
+  return JSON.stringify({ type: 'system', subtype: 'init', tools, mcp_servers: [] }) + '\n';
+}
+
+/** A terminal `{"type":"result",...}` line carrying the given fields. */
+function resultLine(fields: Record<string, unknown> = {}): string {
+  return JSON.stringify({ type: 'result', ...fields }) + '\n';
+}
+
+/** A full, well-formed successful stream: an init line (empty tools, the
+ * confirmed-correct case) followed by a result line. This is what
+ * "a real, well-behaved call" looks like for every fixture that isn't
+ * specifically testing the tool-safety check itself. */
+function streamOutput(resultFields: Record<string, unknown> = {}, tools: string[] = []): string {
+  return initLine(tools) + resultLine(resultFields);
+}
+
 /** Drive a fake child through a normal exit: emit stdout data, then close.
  * Always closes with a `null` signal — a real Node close event carries
  * `(exitCode, signal)` with exactly one of the two non-null, and every
@@ -170,8 +197,8 @@ describe('claudeCli.chat', () => {
     else process.env.CLAUDE_CODE_USE_VERTEX = originalUseVertex;
   });
 
-  it('spawns "claude" with -p, --system-prompt, --tools "" (disabled), strict MCP isolation, json output, no persistence, safe-mode', async () => {
-    mockSuccessfulCall(JSON.stringify({ result: 'ok' }));
+  it('spawns "claude" with -p, --system-prompt, --disallowedTools "*" (not --tools ""), stream-json in+out, strict MCP isolation, no persistence, safe-mode', async () => {
+    mockSuccessfulCall(streamOutput({ result: 'ok' }));
 
     await chat({ systemPrompt: 'you are a lens', turns: [{ role: 'user', content: 'diff here' }] });
 
@@ -181,19 +208,40 @@ describe('claudeCli.chat', () => {
       '-p',
       '--system-prompt',
       'you are a lens',
-      '--tools',
-      '',
-      '--strict-mcp-config',
+      '--input-format',
+      'stream-json',
       '--output-format',
-      'json',
+      'stream-json',
+      '--verbose',
+      '--disallowedTools',
+      '*',
+      '--strict-mcp-config',
       '--no-session-persistence',
       '--safe-mode',
     ]);
   });
 
+  it('never passes --tools at all — the fixed defect must not reappear under a different flag name', async () => {
+    mockSuccessfulCall(streamOutput({ result: 'ok' }));
+
+    await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] });
+
+    const [, args] = mockSpawn.mock.calls[0];
+    expect(args).not.toContain('--tools');
+  });
+
+  it('never passes --allowedTools — confirmed additive on top of the CLI default, not a restriction', async () => {
+    mockSuccessfulCall(streamOutput({ result: 'ok' }));
+
+    await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] });
+
+    const [, args] = mockSpawn.mock.calls[0];
+    expect(args).not.toContain('--allowedTools');
+  });
+
   describe('model pinning', () => {
     it('does not pass --model when options.model is not set — unchanged, unpinned behaviour', async () => {
-      mockSuccessfulCall(JSON.stringify({ result: 'ok' }));
+      mockSuccessfulCall(streamOutput({ result: 'ok' }));
 
       await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] });
 
@@ -202,7 +250,7 @@ describe('claudeCli.chat', () => {
     });
 
     it('passes --model <id> verbatim when options.model is set', async () => {
-      mockSuccessfulCall(JSON.stringify({ result: 'ok' }));
+      mockSuccessfulCall(streamOutput({ result: 'ok' }));
 
       await chat({
         systemPrompt: 'sys',
@@ -219,7 +267,7 @@ describe('claudeCli.chat', () => {
 
   describe('isolation from project/local configuration', () => {
     it('always passes --strict-mcp-config, so no MCP server outside an explicit --mcp-config can reach the call', async () => {
-      mockSuccessfulCall(JSON.stringify({ result: 'ok' }));
+      mockSuccessfulCall(streamOutput({ result: 'ok' }));
 
       await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] });
 
@@ -228,7 +276,7 @@ describe('claudeCli.chat', () => {
     });
 
     it("spawns with cwd set to the platform temp directory, never the caller's own working directory", async () => {
-      mockSuccessfulCall(JSON.stringify({ result: 'ok' }));
+      mockSuccessfulCall(streamOutput({ result: 'ok' }));
 
       await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] });
 
@@ -244,7 +292,7 @@ describe('claudeCli.chat', () => {
     });
 
     it('sets cwd on the claude --version fallback spawn too, not only the main call', async () => {
-      mockSuccessfulCall(JSON.stringify({ result: 'ok' }));
+      mockSuccessfulCall(streamOutput({ result: 'ok' }));
 
       await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] });
 
@@ -253,16 +301,18 @@ describe('claudeCli.chat', () => {
     });
   });
 
-  it('writes the single turn content to stdin', async () => {
-    const { written } = mockSuccessfulCall(JSON.stringify({ result: 'ok' }));
+  it('writes the single turn content to stdin as one stream-json user message line', async () => {
+    const { written } = mockSuccessfulCall(streamOutput({ result: 'ok' }));
 
     await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'the diff text' }] });
 
-    expect(written.join('')).toBe('the diff text');
+    expect(written.join('')).toBe(
+      JSON.stringify({ type: 'user', message: { role: 'user', content: 'the diff text' } }) + '\n'
+    );
   });
 
-  it('joins multiple turns as a labelled transcript', async () => {
-    const { written } = mockSuccessfulCall(JSON.stringify({ result: 'ok' }));
+  it('joins multiple turns as a labelled transcript, still sent as one stream-json line', async () => {
+    const { written } = mockSuccessfulCall(streamOutput({ result: 'ok' }));
 
     await chat({
       systemPrompt: 'sys',
@@ -272,12 +322,17 @@ describe('claudeCli.chat', () => {
       ],
     });
 
-    expect(written.join('')).toBe('## user\nfirst\n\n## assistant\nreply');
+    expect(written.join('')).toBe(
+      JSON.stringify({
+        type: 'user',
+        message: { role: 'user', content: '## user\nfirst\n\n## assistant\nreply' },
+      }) + '\n'
+    );
   });
 
   it('spawns claude with exactly the allowlisted environment, never a copy of the full parent env', async () => {
     process.env.ANTHROPIC_API_KEY = 'sk-should-never-reach-the-child';
-    mockSuccessfulCall(JSON.stringify({ result: 'ok' }));
+    mockSuccessfulCall(streamOutput({ result: 'ok' }));
 
     await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] });
 
@@ -354,7 +409,7 @@ describe('claudeCli.chat', () => {
   });
 
   it('reports route as the constant subscription-oauth', async () => {
-    mockSuccessfulCall(JSON.stringify({ result: 'ok' }));
+    mockSuccessfulCall(streamOutput({ result: 'ok' }));
 
     const result = await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] });
 
@@ -362,9 +417,9 @@ describe('claudeCli.chat', () => {
     expect(result.usage.provider).toBe(PROVIDER);
   });
 
-  it('extracts the reply text from the confirmed "result" field', async () => {
+  it('extracts the reply text from the confirmed "result" field of the terminal result event', async () => {
     mockSuccessfulCall(
-      JSON.stringify({
+      streamOutput({
         result: 'VERDICT: rejected\nFINDING: something is wrong',
         usage: { input_tokens: 100, output_tokens: 20, cache_read_input_tokens: 5 },
       })
@@ -378,30 +433,32 @@ describe('claudeCli.chat', () => {
     expect(result.usage.cacheReadInputTokens).toBe(5);
   });
 
-  it('falls back to raw stdout as text and warns when "result" is not a string', async () => {
+  it('falls back to raw stdout as text and warns when no result event carries a string "result" field', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    // Valid JSON, but no string "result" field — an unrecognised envelope.
-    mockSuccessfulCall(JSON.stringify({ something_else: 'entirely' }));
+    // A well-formed init line, but the "result" event carries no usable
+    // "result" field — an unrecognised terminal shape.
+    mockSuccessfulCall(initLine() + resultLine({ something_else: 'entirely' }));
 
     const result = await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] });
 
-    expect(result.content).toBe(JSON.stringify({ something_else: 'entirely' }));
-    expect(warn).toHaveBeenCalledWith(
-      expect.stringContaining('did not carry a string "result" field')
-    );
+    expect(result.content).toBe(initLine() + resultLine({ something_else: 'entirely' }));
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('did not carry a'));
     warn.mockRestore();
   });
 
-  it('treats non-JSON stdout as the raw reply text', async () => {
+  it('throws — via the tool-safety check — rather than treating fully non-JSON stdout as a usable reply', async () => {
+    // No parseable events at all means no init event either, so this hits
+    // the tool-safety refusal before ever reaching text extraction — the
+    // correct behaviour: an unparseable stream cannot be trusted.
     mockSuccessfulCall('plain text reply, not json at all');
 
-    const result = await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] });
-
-    expect(result.content).toBe('plain text reply, not json at all');
+    await expect(
+      chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] })
+    ).rejects.toThrow(/could not verify the promised zero-built-in-tools property/);
   });
 
   it('emits a model span to the registered sink with scope claudeCli.chat', async () => {
-    mockSuccessfulCall(JSON.stringify({ result: 'ok' }));
+    mockSuccessfulCall(streamOutput({ result: 'ok' }));
     const spans: ModelSpan[] = [];
     setModelSpanSink((s) => spans.push(s));
 
@@ -412,9 +469,7 @@ describe('claudeCli.chat', () => {
   });
 
   it('fires onUsage with the shaped usage record', async () => {
-    mockSuccessfulCall(
-      JSON.stringify({ result: 'ok', usage: { input_tokens: 7, output_tokens: 3 } })
-    );
+    mockSuccessfulCall(streamOutput({ usage: { input_tokens: 7, output_tokens: 3 } }));
     const onUsage = vi.fn<(u: TokenUsage) => Promise<void>>(async () => {});
 
     await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }], onUsage });
@@ -433,7 +488,7 @@ describe('claudeCli.chat', () => {
 
   /** Same call-time-deferred scheduling as {@link queueFailingCall}, but for
    * a non-zero exit that ALSO carries stdout — the shape this fix exists
-   * to recover from: `claude -p`'s own JSON envelope reaches stdout even
+   * to recover from: `claude -p`'s own result event reaches stdout even
    * when the process exits non-zero, and until this fix `chat()` never
    * read it at all. */
   function queueFailingCallWithStdout(stdout: string, stderr: string, exitCode = 1) {
@@ -451,16 +506,14 @@ describe('claudeCli.chat', () => {
 
   // THE ESCAPED DEFECT this block exists to regress. `claude -p`'s
   // commonest real failure — not logged in — exits 1 with EMPTY stderr;
-  // the actual reason lives only in stdout's own `--output-format json`
-  // envelope, under `result`. Before this fix, the non-zero-exit branch
-  // never read stdout at all, so this surfaced as the content-free
-  // "claude -p exited with code 1" and the real reason was silently
-  // dropped. There was no test for either shape below before this fix —
-  // that absence is why the bug shipped.
+  // the actual reason lives only in stdout's own terminal result event,
+  // under `result`. Before this fix, the non-zero-exit branch never read
+  // stdout at all, so this surfaced as the content-free "claude -p exited
+  // with code 1" and the real reason was silently dropped.
   describe('recovering the failure reason from stdout on a non-zero exit', () => {
-    it('recovers "Not logged in · Please run /login" from stdout\'s JSON envelope when stderr is empty', async () => {
+    it('recovers "Not logged in · Please run /login" from the terminal result event when stderr is empty', async () => {
       queueFailingCallWithStdout(
-        JSON.stringify({ is_error: true, result: 'Not logged in · Please run /login' }),
+        resultLine({ is_error: true, result: 'Not logged in · Please run /login' }),
         '',
         1
       );
@@ -470,9 +523,9 @@ describe('claudeCli.chat', () => {
       ).rejects.toThrow(/exited with code 1: Not logged in · Please run \/login/);
     });
 
-    it('recovers any JSON "result" on stdout on a non-zero exit, not only the not-logged-in case', async () => {
+    it('recovers any "result" text on stdout on a non-zero exit, not only the not-logged-in case', async () => {
       queueFailingCallWithStdout(
-        JSON.stringify({
+        resultLine({
           is_error: true,
           subtype: 'error_permission',
           result: 'permission denied by policy',
@@ -496,7 +549,7 @@ describe('claudeCli.chat', () => {
 
     it('appends stderr when it adds information the recovered stdout reason did not already carry', async () => {
       queueFailingCallWithStdout(
-        JSON.stringify({ is_error: true, result: 'Not logged in · Please run /login' }),
+        resultLine({ is_error: true, result: 'Not logged in · Please run /login' }),
         'child process wrote to a closed stream',
         1
       );
@@ -510,7 +563,7 @@ describe('claudeCli.chat', () => {
 
     it('does not duplicate stderr into the message when it merely repeats text already recovered from stdout', async () => {
       queueFailingCallWithStdout(
-        JSON.stringify({ is_error: true, result: 'Not logged in · Please run /login' }),
+        resultLine({ is_error: true, result: 'Not logged in · Please run /login' }),
         'Not logged in · Please run /login',
         1
       );
@@ -660,14 +713,14 @@ describe('claudeCli.chat', () => {
     });
   });
 
-  // ── The real, observed --output-format json envelope ───────────────────
+  // ── The real, observed terminal result event ────────────────────────────
   // Everything in this block is against the actual payload the operator
-  // relayed from a real `claude -p ... --output-format json` run — see
-  // index.ts's file header for the full reasoning behind each decision.
+  // relayed from real invocations — see index.ts's file header for the
+  // full reasoning behind each decision.
 
-  describe('the real --output-format json envelope', () => {
+  describe('the real stream-json terminal result event', () => {
     it('maps stop_reason from the payload to ChatReply.stopReason', async () => {
-      mockSuccessfulCall(JSON.stringify({ result: 'ok', stop_reason: 'max_tokens' }));
+      mockSuccessfulCall(streamOutput({ result: 'ok', stop_reason: 'max_tokens' }));
 
       const result = await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] });
 
@@ -675,7 +728,7 @@ describe('claudeCli.chat', () => {
     });
 
     it('defaults stopReason to end_turn when the payload carries no stop_reason', async () => {
-      mockSuccessfulCall(JSON.stringify({ result: 'ok' }));
+      mockSuccessfulCall(streamOutput({ result: 'ok' }));
 
       const result = await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] });
 
@@ -684,7 +737,7 @@ describe('claudeCli.chat', () => {
 
     it('refuses even on a zero exit code when the payload itself reports is_error: true', async () => {
       queueCall(
-        JSON.stringify({
+        streamOutput({
           is_error: true,
           subtype: 'error_max_turns',
           result: 'ran out of turns',
@@ -701,10 +754,24 @@ describe('claudeCli.chat', () => {
       expect(mockSpawn).toHaveBeenCalledTimes(1);
     });
 
+    it('reads only is_error, never subtype, as the failure signal — a real envelope carried subtype:"success" alongside is_error:true', async () => {
+      queueCall(
+        streamOutput({
+          is_error: true,
+          subtype: 'success',
+          result: 'Failed to authenticate: OAuth session expired and could not be refreshed',
+        })
+      );
+
+      await expect(
+        chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] })
+      ).rejects.toThrow(/is_error: true \(subtype=success\).*Failed to authenticate/);
+    });
+
     it('reports the model matching the top-level usage figures when modelUsage lists more than one, and warns about the rest rather than silently dropping them', async () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       mockSuccessfulCall(
-        JSON.stringify({
+        streamOutput({
           result: 'VERDICT: approved',
           usage: { input_tokens: 281, output_tokens: 10 },
           modelUsage: {
@@ -739,7 +806,7 @@ describe('claudeCli.chat', () => {
     it('does not warn about multiple models when modelUsage names only one', async () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       mockSuccessfulCall(
-        JSON.stringify({
+        streamOutput({
           result: 'ok',
           usage: { input_tokens: 10, output_tokens: 5 },
           modelUsage: {
@@ -761,11 +828,58 @@ describe('claudeCli.chat', () => {
     });
 
     it('reports model "unknown" when the payload carries no modelUsage at all', async () => {
-      mockSuccessfulCall(JSON.stringify({ result: 'ok' }));
+      mockSuccessfulCall(streamOutput({ result: 'ok' }));
 
       const result = await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] });
 
       expect(result.usage.model).toBe('unknown');
+    });
+  });
+
+  // ── THE TOOL-SAFETY VERIFICATION ─────────────────────────────────────
+  // The mechanism that replaces "trust --disallowedTools '*' by
+  // construction" — the exact class of trust that let --tools "" ship
+  // silently broken for three minor versions. See index.ts's file
+  // header's TOOL-SAFETY VERIFICATION paragraph.
+
+  describe('tool-safety verification against the init event', () => {
+    it('succeeds normally when the init event reports an empty tools array', async () => {
+      mockSuccessfulCall(streamOutput({ result: 'ok' }, []));
+
+      const result = await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] });
+
+      expect(result.content).toBe('ok');
+    });
+
+    it('refuses when the init event reports built-in tools reachable — the exact defect --tools "" had', async () => {
+      mockSuccessfulCall(streamOutput({ result: 'ok' }, ['Read', 'Edit', 'Bash']));
+
+      await expect(
+        chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] })
+      ).rejects.toThrow(/expected zero built-in tools reachable.*Read, Edit, Bash/);
+      // Refused before any spend accounting happened on this call's own
+      // usage — no onUsage-worthy content should ever be trusted.
+    });
+
+    it('refuses when no init event is present at all, rather than silently proceeding unverified', async () => {
+      // A terminal result event with no preceding init line — a shape
+      // this adapter cannot verify the tool-safety property against.
+      mockSuccessfulCall(resultLine({ result: 'ok' }));
+
+      await expect(
+        chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] })
+      ).rejects.toThrow(/could not verify the promised zero-built-in-tools property/);
+    });
+
+    it('does not fire onUsage when the tool-safety check refuses the call', async () => {
+      mockSuccessfulCall(streamOutput({ result: 'ok' }, ['Bash']));
+      const onUsage = vi.fn<(u: TokenUsage) => Promise<void>>(async () => {});
+
+      await expect(
+        chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }], onUsage })
+      ).rejects.toThrow();
+
+      expect(onUsage).not.toHaveBeenCalled();
     });
   });
 
@@ -777,7 +891,7 @@ describe('claudeCli.chat', () => {
 
   describe('substrateVersion', () => {
     it('spawns "claude --version" exactly once per process and caches the result', async () => {
-      mockSuccessfulCall(JSON.stringify({ result: 'first' }), {
+      mockSuccessfulCall(streamOutput({ result: 'first' }), {
         versionOutput: '2.1.243 (Claude Code)',
       });
       const first = await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q1' }] });
@@ -791,7 +905,7 @@ describe('claudeCli.chat', () => {
       // would have nothing queued to answer it and would hang, failing the
       // test on timeout rather than a wrong assertion — the single queued
       // call below IS that missing-mock canary.
-      queueCall(JSON.stringify({ result: 'second' }));
+      queueCall(streamOutput({ result: 'second' }));
       const second = await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q2' }] });
 
       expect(mockSpawn).toHaveBeenCalledTimes(3); // 2 from the first call + 1 main-only from the second
@@ -800,7 +914,7 @@ describe('claudeCli.chat', () => {
     });
 
     it('reports substrateVersion as undefined, without throwing, when the version fallback spawn fails', async () => {
-      queueCall(JSON.stringify({ result: 'ok' }));
+      queueCall(streamOutput({ result: 'ok' }));
       queueErroringCall(new Error('spawn claude ENOENT'));
 
       const result = await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] });
@@ -810,7 +924,7 @@ describe('claudeCli.chat', () => {
     });
 
     it('reports substrateVersion as undefined when "claude --version" exits non-zero', async () => {
-      queueCall(JSON.stringify({ result: 'ok' }));
+      queueCall(streamOutput({ result: 'ok' }));
       queueFailingCall('unknown flag', 2);
 
       const result = await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] });
@@ -819,7 +933,7 @@ describe('claudeCli.chat', () => {
     });
 
     it('is included on the model span emitted to the registered sink', async () => {
-      mockSuccessfulCall(JSON.stringify({ result: 'ok' }), {
+      mockSuccessfulCall(streamOutput({ result: 'ok' }), {
         versionOutput: '2.1.243 (Claude Code)',
       });
       const spans: ModelSpan[] = [];
