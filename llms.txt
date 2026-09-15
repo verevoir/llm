@@ -17,13 +17,24 @@ SDK does not enter your bundle.
   `chatWithToolLoop`, live `onProgress`). Requires `@anthropic-ai/sdk`.
 - `@verevoir/llm/google` — Google Gemini SDK adapter (`chat`, `chatWithTools`,
   `chatWithToolLoop` as of 0.13.0). Requires `@google/genai`.
-- `@verevoir/llm/openai` — OpenAI adapter via the Responses API
-  (`chat`; `chatWithTools` + `chatWithToolLoop` via the OpenAI-compatible factory).
-  Requires `openai`. The only keyless-capable adapter: a base-URL override with a
-  blank key points it at a local server (LM Studio / Ollama / vLLM).
+- `@verevoir/llm/openai` — OpenAI adapter via the Responses API (`chat`,
+  `chatWithTools`, `chatWithToolLoop` — a bespoke implementation on the
+  Responses API's own `function_call`/`function_call_output` shape, since that
+  API is not the Chat Completions protocol the OpenAI-compatible factory below
+  speaks; the two are not interchangeable). Requires `openai`. The only
+  keyless-capable adapter: a base-URL override with a blank key points it at a
+  local server (LM Studio / Ollama / vLLM).
 - `@verevoir/llm/deepseek` — DeepSeek adapter, OpenAI-compatible via the Chat
-  Completions API at `https://api.deepseek.com`. Reuses the `openai` peer — no
-  separate SDK. `chat` + tool-calling.
+  Completions API at `https://api.deepseek.com`, built from the same
+  `createOpenAICompatAdapter` factory as `/samba` and `/mistral` — configuration
+  only (base URL, key env var, model catalog), no separate request-building
+  code. Reuses the `openai` peer — no separate SDK. `chat` + tool-calling.
+
+  Every OpenAI-protocol-compatible provider (DeepSeek, SambaNova, Mistral, and
+  Qwen if configured) is this same seam plus a base URL and a model catalog —
+  not a separate adapter. Qwen has no dedicated module in this package for
+  that reason: it needs configuration against this seam
+  (`createOpenAICompatAdapter` or `modelConnection`), not code.
 - `@verevoir/llm/samba` — SambaNova adapter (`SAMBA_NOVA_API_KEY`),
   OpenAI-compatible. `chat` + tool-calling.
 - `@verevoir/llm/mistral` — Mistral adapter (`MISTRAL_API_KEY`),
