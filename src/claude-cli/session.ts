@@ -299,17 +299,18 @@ interface HeldSession {
 
 /** The stream-json turn's terminal `{"type":"result",...}` line —
  * CONFIRMED by a real invocation (see the file header's "CONFIRMED"
- * bullets) to carry this same inner shape as `--output-format json`'s
- * envelope (index.ts's `ClaudeCliJsonResult`). Declared separately from
- * index.ts's own (private) copy rather than imported: the two parse
- * different FRAMINGS (one JSON document at process exit vs. one line
- * among many in a live stream) even if the inner fields are identical,
- * so they are free to diverge without one file's fix silently becoming
- * the other's regression. NOTE: `subtype` describes how the
- * request/response CYCLE ended, not whether the CONTENT is an error —
- * a real observed envelope carried `subtype: "success"` alongside
- * `is_error: true`. Only `is_error` (below, in `runSessionTurn`) is
- * ever read as the failure signal; `subtype` is diagnostic text only. */
+ * bullets) to carry this same inner shape as the single-shot path's own
+ * confirmed envelope (index.ts's `ClaudeCliResultEvent`). Declared
+ * separately from index.ts's own (private) copy rather than imported:
+ * the two parse different FRAMINGS (one JSON document at process exit
+ * vs. one line among many in a live stream) even if the inner fields
+ * are identical, so they are free to diverge without one file's fix
+ * silently becoming the other's regression. NOTE: `subtype` describes
+ * how the request/response CYCLE ended, not whether the CONTENT is an
+ * error — a real observed envelope carried `subtype: "success"`
+ * alongside `is_error: true`. Only `is_error` (below, in
+ * `runSessionTurn`) is ever read as the failure signal; `subtype` is
+ * diagnostic text only. */
 interface ClaudeCliStreamResultEnvelope {
   type?: string;
   result?: string;
