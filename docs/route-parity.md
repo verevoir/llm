@@ -1,6 +1,6 @@
 # Cross-provider route parity — what these adapters do, as of one commit
 
-**Read against `main` @ `2e3b48548025f3019c37ebec3b3a972d3a633229` (0.26.3), source-verified this session — not settled behaviour of the providers, only of these adapters at this commit.** Re-check before relying on it after any adapter changes.
+**Originally drafted against `main` @ `2e3b48548025f3019c37ebec3b3a972d3a633229` (0.26.3); re-verified against `main` @ `8c0157f7ef7c6dfcb97d1781c514b17a579cb00a` (0.26.5) after both fixes this record describes (`#48`, `#50`) merged — not settled behaviour of the providers, only of these adapters at this commit.** Re-check before relying on it after any further adapter changes.
 
 ## Tool-calling: a structural fork, not a degradation
 
