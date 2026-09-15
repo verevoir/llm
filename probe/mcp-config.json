@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "echo-probe": {
+      "command": "node",
+      "args": ["/Users/adsurg/Projects/llm-session-tools/probe/mcp-echo-server.cjs"]
+    }
+  }
+}
