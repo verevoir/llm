@@ -590,6 +590,110 @@ describe('claude-cli session lifecycle', () => {
     });
   });
 
+  describe('permissionDenials', () => {
+    it('is an empty array when the envelope has no permission_denials field at all', async () => {
+      const { child, emitLine } = fakeChild();
+      mockSpawn.mockImplementationOnce(() => {
+        setImmediate(() => emitLine({ type: 'result', result: 'ok' }));
+        return child;
+      });
+      const session = createSession();
+
+      const r = await runSessionTurn({
+        session,
+        systemPrompt: 'sys',
+        message: 'a',
+        tools: [],
+        maxToolCalls: 0,
+      });
+
+      expect(r.permissionDenials).toEqual([]);
+    });
+
+    it('is an empty array when the envelope carries an explicit empty permission_denials — the shape observed on every real envelope so far', async () => {
+      const { child, emitLine } = fakeChild();
+      mockSpawn.mockImplementationOnce(() => {
+        setImmediate(() => emitLine({ type: 'result', result: 'ok', permission_denials: [] }));
+        return child;
+      });
+      const session = createSession();
+
+      const r = await runSessionTurn({
+        session,
+        systemPrompt: 'sys',
+        message: 'a',
+        tools: [],
+        maxToolCalls: 0,
+      });
+
+      expect(r.permissionDenials).toEqual([]);
+    });
+
+    it('keeps a populated entry raw and extracts a best-effort toolName — shape is UNCONFIRMED, never seen non-empty on a real invocation', async () => {
+      const { child, emitLine } = fakeChild();
+      const denial = { tool_name: 'Bash', reason: 'not allowed in this session' };
+      mockSpawn.mockImplementationOnce(() => {
+        setImmediate(() =>
+          emitLine({ type: 'result', result: 'ok', permission_denials: [denial] })
+        );
+        return child;
+      });
+      const session = createSession();
+
+      const r = await runSessionTurn({
+        session,
+        systemPrompt: 'sys',
+        message: 'a',
+        tools: [],
+        maxToolCalls: 0,
+      });
+
+      expect(r.permissionDenials).toEqual([{ raw: denial, toolName: 'Bash' }]);
+    });
+
+    it('leaves toolName undefined — never guessed — when no candidate key holds a string', async () => {
+      const { child, emitLine } = fakeChild();
+      const denial = { code: 'PERMISSION_DENIED' };
+      mockSpawn.mockImplementationOnce(() => {
+        setImmediate(() =>
+          emitLine({ type: 'result', result: 'ok', permission_denials: [denial] })
+        );
+        return child;
+      });
+      const session = createSession();
+
+      const r = await runSessionTurn({
+        session,
+        systemPrompt: 'sys',
+        message: 'a',
+        tools: [],
+        maxToolCalls: 0,
+      });
+
+      expect(r.permissionDenials).toEqual([{ raw: denial, toolName: undefined }]);
+    });
+
+    it('does not throw on a populated permission_denials — surfaced as data, per the is_error-only failure signal', async () => {
+      const { child, emitLine } = fakeChild();
+      mockSpawn.mockImplementationOnce(() => {
+        setImmediate(() =>
+          emitLine({
+            type: 'result',
+            result: 'ok',
+            is_error: false,
+            permission_denials: [{ toolName: 'Bash' }],
+          })
+        );
+        return child;
+      });
+      const session = createSession();
+
+      await expect(
+        runSessionTurn({ session, systemPrompt: 'sys', message: 'a', tools: [], maxToolCalls: 0 })
+      ).resolves.toMatchObject({ text: 'ok' });
+    });
+  });
+
   describe('the per-turn watchdog', () => {
     it('kills the process and refuses rather than hanging when no terminal result event ever arrives', async () => {
       vi.useFakeTimers();

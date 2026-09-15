@@ -222,6 +222,7 @@ import {
   SESSION_MAX_HELD,
   SESSION_TURN_TIMEOUT_MS,
   type ClaudeCliSessionHandle,
+  type PermissionDenial,
 } from './session.js';
 
 // Moved to env.ts (see its own file header for why) — re-exported here so
@@ -240,6 +241,7 @@ export {
   SESSION_MAX_HELD,
   SESSION_TURN_TIMEOUT_MS,
   type ClaudeCliSessionHandle,
+  type PermissionDenial,
 };
 
 // ALLOWED_ENV_VARS / CLAUDE_CLI_CREDENTIAL_ENV_VAR / allowedEnv now live in
@@ -293,6 +295,18 @@ export interface ClaudeCliChatWithToolsOptions extends ChatWithToolsOptions {
  * `chatWithToolLoop()` exactly like every other adapter's. */
 export interface ClaudeCliChatWithToolLoopOptions extends ChatWithToolLoopOptions {
   session?: ClaudeCliSessionHandle;
+}
+
+/**
+ * {@link ChatWithToolLoopResult}, plus this transport's own
+ * `permissionDenials` signal — see {@link PermissionDenial}'s own doc
+ * comment (in session.ts) for what it means and, just as importantly,
+ * what an EMPTY one does and does not tell a caller (read it alongside
+ * `toolUses`, never alone). Additive only — every base field is
+ * unchanged.
+ */
+export interface ClaudeCliChatWithToolLoopResult extends ChatWithToolLoopResult {
+  permissionDenials: PermissionDenial[];
 }
 
 /** Flags applied to every invocation. See the file header for why each one
@@ -951,7 +965,7 @@ export async function chatWithTools(
  */
 export async function chatWithToolLoop(
   options: ClaudeCliChatWithToolLoopOptions
-): Promise<ChatWithToolLoopResult> {
+): Promise<ClaudeCliChatWithToolLoopResult> {
   if (options.turns.length === 0) {
     throw new Error('claudeCli.chatWithToolLoop() requires at least one turn');
   }
@@ -1023,6 +1037,7 @@ export async function chatWithToolLoop(
       toolResults: turn.toolResults,
       iterations,
       usage: usageRecord,
+      permissionDenials: turn.permissionDenials,
     };
   } finally {
     if (ownSession) {

@@ -333,6 +333,64 @@ interface ClaudeCliStreamResultEnvelope {
       canonicalModel?: string;
     }
   >;
+  /** See {@link PermissionDenial} and {@link extractPermissionDenials} —
+   * present on every real envelope this repo has captured so far, always
+   * empty; its shape when POPULATED is unconfirmed. */
+  permission_denials?: unknown[];
+}
+
+/**
+ * One entry from the terminal envelope's `permission_denials` array — a
+ * field CONFIRMED to exist (the operator's own channel to the CLI; also
+ * observed, always empty, in every real envelope this repo has captured),
+ * but whose shape when POPULATED is UNCONFIRMED: this repository has never
+ * seen a non-empty one. Rather than assume a field name and silently
+ * mis-tag an existing `toolUses`/`toolResults` entry, each denial is kept
+ * as `raw` — exactly what the CLI sent — plus a best-effort `toolName`
+ * extracted by duck-typing over the field names most likely to carry it.
+ * A caller that learns the real shape can read `raw` directly rather than
+ * waiting on this file to model it.
+ *
+ * READ THIS ALONGSIDE `toolUses`, NEVER ALONE — an empty array here does
+ * NOT mean "nothing was denied": the `dontAsk` probe showed a model can
+ * decline a tool in plain text without ever attempting a call, which also
+ * leaves `permission_denials` empty. So: both `toolUses` and this empty
+ * means no attempt was ever made; a non-empty `toolUses` with this empty
+ * means every attempt reached the bridge; a non-empty entry here means at
+ * least one attempt was denied BEFORE it ever reached the bridge/executor
+ * — it will not also appear in `toolUses`, because the bridge never saw
+ * it in the first place.
+ */
+export interface PermissionDenial {
+  /** The denial entry exactly as the CLI reported it. */
+  raw: unknown;
+  /** Best-effort extraction — see this interface's own doc comment.
+   * `undefined` when none of the candidate keys held a non-empty string,
+   * rather than a guessed value. */
+  toolName?: string;
+}
+
+const PERMISSION_DENIAL_NAME_KEYS = ['tool_name', 'toolName', 'tool', 'name'] as const;
+
+/** Turn the envelope's raw `permission_denials` (unknown shape, possibly
+ * absent) into {@link PermissionDenial}s — never throws on a shape that
+ * doesn't match what's expected; a non-array or missing value is simply
+ * no denials, the same as an explicit empty array. */
+function extractPermissionDenials(value: unknown): PermissionDenial[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((entry) => {
+    let toolName: string | undefined;
+    if (entry && typeof entry === 'object') {
+      for (const key of PERMISSION_DENIAL_NAME_KEYS) {
+        const v = (entry as Record<string, unknown>)[key];
+        if (typeof v === 'string' && v !== '') {
+          toolName = v;
+          break;
+        }
+      }
+    }
+    return { raw: entry, toolName };
+  });
 }
 
 const HELD = new Map<string, HeldSession>();
@@ -641,6 +699,12 @@ export interface SessionTurnResult {
   modelUsage: ClaudeCliStreamResultEnvelope['modelUsage'];
   toolUses: ToolUse[];
   toolResults: BridgeToolResult[];
+  /** See {@link PermissionDenial}'s own doc comment for what this is and
+   * — just as importantly — what an EMPTY array here does and does not
+   * tell a caller. Never throws on its own; is_error remains the only
+   * failure signal this file reads (see the header's SECURITY CORRECTION
+   * section on why `subtype` isn't one either). */
+  permissionDenials: PermissionDenial[];
   /** Proxy for "how many model iterations happened" — see
    * `chatWithToolLoop`'s own doc comment in index.ts for why this is an
    * observed count of `assistant` stream events, not a count of
@@ -780,6 +844,7 @@ export async function runSessionTurn(options: SessionTurnOptions): Promise<Sessi
     modelUsage: parsed.modelUsage,
     toolUses: armed ? armed.toolUses : [],
     toolResults: armed ? armed.toolResults : [],
+    permissionDenials: extractPermissionDenials(parsed.permission_denials),
     assistantEventCount: envelope.assistantEventCount,
   };
 }

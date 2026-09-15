@@ -251,10 +251,36 @@ describe('claude-cli chat(session) / chatWithTools / chatWithToolLoop', () => {
         { toolUseId: 't1', content: 'echoed:{"text":"hi"}', isError: false },
       ]);
       expect(result.iterations).toBe(1); // one assistant event observed
+      expect(result.permissionDenials).toEqual([]); // nothing denied on this call
       expect(JSON.parse(written[0])).toEqual({
         type: 'user',
         message: { role: 'user', content: 'call echo' },
       });
+    });
+
+    it("surfaces a populated permission_denials on the public return, unmodeled shape kept raw — doesn't tag toolUses, since a denied call never reaches the bridge", async () => {
+      const { child, emitLine } = fakeSessionChild();
+      mockSpawn.mockImplementationOnce(() => {
+        setImmediate(() =>
+          emitLine({
+            type: 'result',
+            result: 'declined',
+            permission_denials: [{ tool_name: 'echo' }],
+          })
+        );
+        return child;
+      });
+      queueVersionSpawn();
+
+      const result = await chatWithToolLoop({
+        systemPrompt: 'sys',
+        turns: [{ role: 'user', content: 'call echo' }],
+        tools: [ECHO_TOOL],
+        executor: async () => 'never called — denied before reaching this bridge',
+      });
+
+      expect(result.permissionDenials).toEqual([{ raw: { tool_name: 'echo' }, toolName: 'echo' }]);
+      expect(result.toolUses).toEqual([]); // the denied call never reached the bridge/executor
     });
 
     it('requires at least one tool', async () => {
