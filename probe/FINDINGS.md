@@ -4,7 +4,7 @@
 
 ## What each probe establishes
 
-1. **`run-probe.sh`** (`--safe-mode` on, 3 turns: hello / invoke Bash / call the MCP `echo` tool). Confirmed: one process serves multiple turns without exiting between them; the terminal event's envelope shape (`result`, `is_error`, `stop_reason`, `usage`, `modelUsage`, `permission_denials`, …). Confirmed the `--tools ""` fail-open (the model reported having Bash/Read/Edit — later corroborated structurally, see below). `mcp_servers` came back `[]` under `--safe-mode` — MCP never connected.
+1. **`run-probe.sh`** (`--safe-mode` on, 3 turns: hello / invoke Bash / call the MCP `echo` tool). Confirmed: one process serves multiple turns without exiting between them; the terminal event's envelope shape (`result`, `is_error`, `stop_reason`, `usage`, `modelUsage`, `permission_denials`, etc.). Confirmed the `--tools ""` fail-open (the model reported having Bash/Read/Edit — later corroborated structurally, see below). `mcp_servers` came back `[]` under `--safe-mode` — MCP never connected.
 
 2. **`run-probe-no-safe-mode.sh`** (`--safe-mode` dropped, otherwise identical, 3 turns). First confirmation that `--safe-mode` was the MCP blocker: `mcp_servers` reported the configured server as `"connected"`, and stayed connected across turns within the one process — the bridge is per-session, matching the held-session design's assumption. This is also the script whose first run produced the one unreproduced hang — see below; that run predates the cwd-pinning fix later added to this family.
 
