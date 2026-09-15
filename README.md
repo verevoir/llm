@@ -45,13 +45,13 @@ The core export (`@verevoir/llm`) carries provider-agnostic types — `TokenUsag
 Each adapter lives under its own subpath so the unused provider SDK never
 enters the consumer's bundle:
 
-| Subpath                   | SDK dep             | Status                  |
-| ------------------------- | ------------------- | ----------------------- |
-| `@verevoir/llm`           | none                | shipped                 |
-| `@verevoir/llm/anthropic` | `@anthropic-ai/sdk` | shipped                 |
-| `@verevoir/llm/google`    | `@google/genai`     | `chat()` only (`0.4.0`) |
-| `@verevoir/llm/openai`    | `openai`            | `chat()` only (`0.5.0`) |
-| `@verevoir/llm/deepseek`  | `openai`            | `chat()` only (`0.6.0`) |
+| Subpath                   | SDK dep             | Status                                                          |
+| ------------------------- | ------------------- | ---------------------------------------------------------------- |
+| `@verevoir/llm`           | none                | shipped                                                         |
+| `@verevoir/llm/anthropic` | `@anthropic-ai/sdk` | shipped                                                         |
+| `@verevoir/llm/google`    | `@google/genai`     | `chat()` only (`0.4.0`)                                         |
+| `@verevoir/llm/openai`    | `openai`            | shipped — `chat` + tool calling (`0.27.0`)                      |
+| `@verevoir/llm/deepseek`  | `openai`            | shipped — config over the OpenAI-compatible factory (`0.27.0`) |
 
 Multi-provider deployments depend on the same `chat()` contract; consumers
 switch backends by importing a different subpath, not by changing call sites.
@@ -63,7 +63,7 @@ different endpoint with `<PROVIDER>_BASE_URL` — a gateway, proxy, regional, or
 self-hosted endpoint — without a code change:
 
 | Provider        | Key env                             | Base-URL override                     |
-| --------------- | ----------------------------------- | ------------------------------------- |
+| --------------- | ------------------------------------ | -------------------------------------- |
 | OpenAI          | `OPENAI_API_KEY`                    | `OPENAI_BASE_URL`                     |
 | Anthropic       | `ANTHROPIC_API_KEY`                 | `ANTHROPIC_BASE_URL`                  |
 | Google (Gemini) | `GEMINI_API_KEY` / `GOOGLE_API_KEY` | `GEMINI_BASE_URL` / `GOOGLE_BASE_URL` |
