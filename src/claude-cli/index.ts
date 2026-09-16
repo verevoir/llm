@@ -194,16 +194,87 @@
 import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { fireUsageHook } from '../audit-hook.js';
-import type { ChatOptions, ChatReply, CredentialRoute, TokenUsage, TurnContent } from '../index.js';
+import type {
+  ChatOptions,
+  ChatReply,
+  ChatWithToolLoopOptions,
+  ChatWithToolLoopResult,
+  ChatWithToolsOptions,
+  ChatWithToolsResult,
+  CredentialRoute,
+  TokenUsage,
+  TurnContent,
+} from '../index.js';
 import { ALLOWED_ENV_VARS, allowedEnv, CLAUDE_CLI_CREDENTIAL_ENV_VAR, PROVIDER } from './env.js';
+import {
+  closeSession,
+  createSession,
+  resetClaudeCliSessionsForTests,
+  runSessionTurn,
+  SESSION_IDLE_TIMEOUT_MS,
+  SESSION_MAX_HELD,
+  SESSION_TURN_TIMEOUT_MS,
+  type ClaudeCliSessionHandle,
+  type PermissionDenial,
+} from './session.js';
 
 // PROVIDER and the env allowlist (ALLOWED_ENV_VARS / allowedEnv /
 // CLAUDE_CLI_CREDENTIAL_ENV_VAR) moved to env.ts — see that file's own
-// header for why (the upcoming session-holding transport needs to build
+// header for why (the session-holding transport below needs to build
 // the identical child environment without importing back into this
 // file). Re-exported here under the exact same names, so nothing
 // importing @verevoir/llm/claude-cli can tell they ever moved.
 export { ALLOWED_ENV_VARS, allowedEnv, CLAUDE_CLI_CREDENTIAL_ENV_VAR, PROVIDER };
+
+// The session-holding transport (session.ts, wave 2 of this split, plus
+// mcp-bridge.ts, 0.26.6) — re-exported from this single subpath entry
+// point, same as every other name here. See this file's SESSION-HOLDING
+// TRANSPORT paragraph below and session.ts's own header for the full
+// mechanism and verification history.
+export {
+  closeSession,
+  createSession,
+  resetClaudeCliSessionsForTests,
+  SESSION_IDLE_TIMEOUT_MS,
+  SESSION_MAX_HELD,
+  SESSION_TURN_TIMEOUT_MS,
+  type ClaudeCliSessionHandle,
+  type PermissionDenial,
+};
+
+/**
+ * SESSION-HOLDING TRANSPORT (wave 3 of the split that replaced the
+ * withdrawn omnibus #55; the mechanism itself was scoped and built as
+ * one whole, then divided for review afterward — see CHANGELOG's
+ * 0.26.7-0.27.1 entries for the full account of why and how it splits).
+ *
+ * feature parity on the keyless route was the bar: `chat()`'s single
+ * spawn-per-call process meant a tool exchange (ask → execute →
+ * continue) had structurally nowhere to live — turn N and turn N+1 were
+ * two different processes with nothing in common. The operator's
+ * decision: hold a session across a whole CONVERSATION, not one call,
+ * and expose it as a handle the CALLER owns — this package has no
+ * concept of a conversation, so a lifetime keyed on one would be policy
+ * this package cannot reason about. `createSession()`/`closeSession()`
+ * and the mechanism itself live in `session.ts`; this file wires three
+ * entry points against it: `chat()` gains an optional `session` for
+ * prompt-cache warmth without tools; `chatWithToolLoop()` runs the
+ * caller's own tools through the embedded MCP bridge (`mcp-bridge.ts`,
+ * 0.26.6) without lifting the built-in-tool denial; `chatWithTools()`
+ * (single-shot, return-before-execution) REFUSES on this transport,
+ * naming precisely why — tools run through `claude`'s own agentic loop
+ * via MCP, so there is never a point where a `tool_use` exists without
+ * already having been executed for a caller to run separately.
+ *
+ * RELAYED, NOT CONFIRMED, the same standard this adapter already holds
+ * `--model` to: whether `--input-format`/`--output-format stream-json`
+ * keeps one process alive across multiple turns, and whether an
+ * MCP-declared tool stays reachable under `--disallowedTools "*"`, are
+ * both asserted from Claude Code's own documented flags and MCP's own
+ * published stdio transport spec — not fully independently observed by
+ * this repository (see session.ts's own header for the full,
+ * three-real-invocation verification history, and what remains open).
+ */
 
 /** Flags applied to every invocation. See the file header's SECURITY
  * CORRECTION and TOOL-SAFETY VERIFICATION paragraphs for why this is
@@ -734,7 +805,10 @@ function runClaudeCli(args: string[], input: string, signal?: AbortSignal): Prom
  * Single-shot call through `claude -p`. See the file header for every
  * flag's justification and every refuse-rather-than-substitute mechanism.
  */
-export async function chat(options: ChatOptions): Promise<ChatReply> {
+export async function chat(options: ClaudeCliChatOptions): Promise<ChatReply> {
+  if (options.session) {
+    return chatOnSession(options.session, options);
+  }
   if (options.turns.length === 0) {
     throw new Error('claudeCli.chat() requires at least one turn');
   }
@@ -846,4 +920,242 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
   };
 }
 
-export const claudeCli = { PROVIDER, chat };
+/**
+ * {@link ChatOptions}, plus an optional held session — see the file
+ * header's SESSION-HOLDING TRANSPORT section. Additive only: a caller
+ * that never sets `session` sees exactly today's stateless single-shot
+ * `chat()`, unchanged in every respect. When `session` IS set, `turns`
+ * must carry exactly the ONE new message for this round — the held
+ * session already remembers everything before it (see
+ * `chatOnSession`'s own check). Nothing about this field forces
+ * anything — the caller can always fall back to `chat()`/
+ * `chatWithToolLoop()` WITHOUT a `session`, resending its own full
+ * history through the stateless single-shot path. That fallback, always
+ * available, is what makes a held session's own TTL (see session.ts's
+ * own file header) a resource policy rather than a correctness one:
+ * losing one costs a cold rebuild, never lost work, because the caller
+ * never depended on this package to be the only place the conversation
+ * lived.
+ */
+export interface ClaudeCliChatOptions extends ChatOptions {
+  session?: ClaudeCliSessionHandle;
+}
+
+/** {@link ChatWithToolsOptions}, plus the same optional `session` field.
+ * See {@link chatWithTools}'s own doc comment for why this function
+ * REFUSES on this transport regardless of whether `session` is set —
+ * the field exists for type-shape parity with
+ * {@link ClaudeCliChatWithToolLoopOptions}, not because this function
+ * honours it. */
+export interface ClaudeCliChatWithToolsOptions extends ChatWithToolsOptions {
+  session?: ClaudeCliSessionHandle;
+}
+
+/**
+ * Single-shot, return-before-execution tool calling — UNSUPPORTED on
+ * this transport, and refuses rather than faking the contract. Tools on
+ * this adapter run through `claude`'s own agentic loop via the embedded
+ * MCP bridge (`mcp-bridge.ts`): the bridge answers a `tools/call` by
+ * running the caller's executor IMMEDIATELY and SYNCHRONOUSLY, inside
+ * `claude`'s own turn. By the time this function could hand a `tool_use`
+ * back to a caller to execute separately — this contract's whole point
+ * — it has already been executed. There is no point in the exchange
+ * this function's return-before-execution shape could occupy on this
+ * transport, so it refuses rather than silently degrading into
+ * `chatWithToolLoop`'s behaviour under a different name.
+ * {@link chatWithToolLoop} is the shape this transport CAN honestly
+ * support: supply your executor up front, in `options.executor`.
+ */
+export async function chatWithTools(
+  _options: ClaudeCliChatWithToolsOptions
+): Promise<ChatWithToolsResult> {
+  throw new Error(
+    'claudeCli.chatWithTools() is not supported on this transport — tool calls run through an ' +
+      'embedded MCP server that claude itself invokes as part of its own turn, so there is no ' +
+      'point where a tool_use exists without already having been executed for a caller to run ' +
+      'separately. Use claudeCli.chatWithToolLoop() instead, with your executor supplied up front.'
+  );
+}
+
+/** {@link ChatWithToolLoopOptions}, plus an optional held session. Same
+ * `turns`-is-only-the-new-message contract as {@link ClaudeCliChatOptions}
+ * when `session` is set. Omitting `session` still works — a throwaway
+ * session is created and closed for the one call, so a caller that
+ * doesn't want to hold state across calls sees a single, self-contained
+ * `chatWithToolLoop()` exactly like every other adapter's. */
+export interface ClaudeCliChatWithToolLoopOptions extends ChatWithToolLoopOptions {
+  session?: ClaudeCliSessionHandle;
+}
+
+/**
+ * {@link ChatWithToolLoopResult}, plus this transport's own
+ * `permissionDenials` signal — see {@link PermissionDenial}'s own doc
+ * comment (in session.ts) for what it means and, just as importantly,
+ * what an EMPTY one does and does not tell a caller (read it alongside
+ * `toolUses`, never alone). Additive only — every base field is
+ * unchanged.
+ */
+export interface ClaudeCliChatWithToolLoopResult extends ChatWithToolLoopResult {
+  permissionDenials: PermissionDenial[];
+}
+
+/**
+ * `chat()`'s session branch — one turn on a held session rather than a
+ * fresh spawn. See the file header's SESSION-HOLDING TRANSPORT section
+ * for the mechanism; this function is deliberately small, reusing the
+ * single-shot path's own `contentToText` / `determinePrimaryModel` /
+ * `shapeUsage` / `resolveCliVersion` so the two paths report usage
+ * identically.
+ */
+async function chatOnSession(
+  session: ClaudeCliSessionHandle,
+  options: ClaudeCliChatOptions
+): Promise<ChatReply> {
+  if (options.turns.length === 0) {
+    throw new Error('claudeCli.chat() requires at least one turn');
+  }
+  if (options.turns.length > 1) {
+    // See ClaudeCliChatOptions's own doc comment: a held session already
+    // remembers everything before this call, unlike the stateless
+    // single-shot path this adapter otherwise uses.
+    throw new Error(
+      'claudeCli.chat(): when session is set, turns must carry exactly the ONE new message ' +
+        "for this round — the held session already remembers everything before it. Resending " +
+        "prior history would duplicate it in the model's own context."
+    );
+  }
+  throwIfAborted(options.abortSignal);
+  if (options.apiKey != null) {
+    throw new Error(
+      "claudeCli.chat() does not accept apiKey — it always uses the CLI's own logged-in " +
+        'subscription session, never a supplied credential.'
+    );
+  }
+
+  const turn = await runSessionTurn({
+    session,
+    systemPrompt: options.systemPrompt,
+    message: contentToText(options.turns[0].content),
+    tools: [],
+    maxToolCalls: 0,
+    model: options.model,
+    signal: options.abortSignal,
+  });
+
+  const substrateVersion = await resolveCliVersion();
+  const { model, sawMultipleModels, breakdown } = determinePrimaryModel(
+    turn.usage,
+    turn.modelUsage
+  );
+  if (sawMultipleModels) {
+    console.warn(
+      `claudeCli.chat(): this call invoked more than one model — ${breakdown}. ` +
+        `TokenUsage.model reports only "${model}".`
+    );
+  }
+  const usageRecord = shapeUsage(turn.usage, model, substrateVersion);
+  await fireUsageHook(options.onUsage, usageRecord, 'claudeCli.chat');
+
+  return { content: turn.text, usage: usageRecord, stopReason: turn.stopReason };
+}
+
+/**
+ * Multi-turn tool loop on this transport — runs the caller's own tools
+ * through the embedded MCP bridge inside `claude`'s own agentic loop,
+ * rather than this function manually feeding `tool_use`/`tool_result`
+ * blocks back and forth the way the API adapters' `chatWithToolLoop`
+ * does. `maxIterations` is enforced as a tool-CALL budget inside the
+ * bridge — once spent, further calls get a "budget exhausted, answer
+ * now" result rather than reaching the executor, this transport's
+ * analogue of the API adapters' no-tools finalise call.
+ *
+ * `options.session` omitted: a throwaway session is opened and closed
+ * for this one call, so the result is self-contained like every other
+ * adapter's `chatWithToolLoop`. `options.session` supplied: the turn runs
+ * on that held session, and prompt-cache warmth + tool availability
+ * persist to the NEXT call on the same handle — see
+ * `ClaudeCliChatWithToolLoopOptions`'s own doc comment for the
+ * turns-is-only-the-new-message contract that comes with it.
+ */
+export async function chatWithToolLoop(
+  options: ClaudeCliChatWithToolLoopOptions
+): Promise<ClaudeCliChatWithToolLoopResult> {
+  if (options.turns.length === 0) {
+    throw new Error('claudeCli.chatWithToolLoop() requires at least one turn');
+  }
+  if (options.tools.length === 0) {
+    throw new Error('claudeCli.chatWithToolLoop() requires at least one tool');
+  }
+  if (options.turns.length > 1) {
+    throw new Error(
+      'claudeCli.chatWithToolLoop(): turns must carry exactly the ONE new message for this ' +
+        'round — a held session already remembers everything before it (and a throwaway one, ' +
+        'created when options.session is omitted, has nothing before it to need more than one ' +
+        'for). See ClaudeCliChatWithToolLoopOptions.'
+    );
+  }
+  throwIfAborted(options.abortSignal);
+  if (options.apiKey != null) {
+    throw new Error(
+      "claudeCli.chatWithToolLoop() does not accept apiKey — it always uses the CLI's own " +
+        'logged-in subscription session, never a supplied credential.'
+    );
+  }
+
+  const ownSession = !options.session;
+  const session = options.session ?? createSession();
+  const maxToolCalls = Math.max(1, options.maxIterations ?? 5);
+
+  try {
+    const turn = await runSessionTurn({
+      session,
+      systemPrompt: options.systemPrompt,
+      message: contentToText(options.turns[0].content),
+      tools: options.tools,
+      executor: options.executor,
+      maxToolCalls,
+      model: options.model,
+      signal: options.abortSignal,
+    });
+
+    const substrateVersion = await resolveCliVersion();
+    const { model, sawMultipleModels, breakdown } = determinePrimaryModel(
+      turn.usage,
+      turn.modelUsage
+    );
+    if (sawMultipleModels) {
+      console.warn(
+        `claudeCli.chatWithToolLoop(): this call invoked more than one model — ${breakdown}. ` +
+          `TokenUsage.model reports only "${model}".`
+      );
+    }
+    const usageRecord = shapeUsage(turn.usage, model, substrateVersion);
+    await fireUsageHook(options.onUsage, usageRecord, 'claudeCli.chatWithToolLoop');
+
+    return {
+      text: turn.text,
+      toolUses: turn.toolUses,
+      toolResults: turn.toolResults,
+      permissionDenials: turn.permissionDenials,
+      iterations: turn.assistantEventCount,
+      usage: usageRecord,
+    };
+  } finally {
+    if (ownSession) {
+      // A throwaway session opened just for this call — nothing left
+      // registered for SESSION_IDLE_TIMEOUT_MS to clean up later.
+      // Best-effort: a close failure here must not mask whatever the
+      // turn itself returned or threw.
+      await closeSession(session).catch(() => {});
+    }
+  }
+}
+
+export const claudeCli = {
+  PROVIDER,
+  chat,
+  chatWithTools,
+  chatWithToolLoop,
+  createSession,
+  closeSession,
+};
