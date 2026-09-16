@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.26.8] — 2026-09-16
+
+**Wave 2a of 5, replacing the withdrawn `#57`.** `#57` (originally "wave 2/4", `session.ts` in full — lifecycle AND turn execution, one file) was REJECTED by review on `pull-requests-carry-what-why-tests`: 1,799 changed lines, nearly double the practical reviewability ceiling, with no override recorded — and the file's own header, plus its own test file's `describe` blocks, already showed an unexercised seam the review named explicitly: lifecycle (`createSession`/`closeSession`/dead-handle/eviction-bounds) vs. turn execution (`runSessionTurn`/watchdog/abort/tool-arming). This PR is that seam, cut for real: the lifecycle half only. The turn-execution half (wave 2b) stacks on top of this.
+
+**New (internal, no public behaviour change beyond wave 1): `claude-cli`'s session lifecycle — `createSession`/`closeSession`, the opaque `ClaudeCliSessionHandle`, dead-handle safety (a handle whose process died/was evicted/was never used starts fresh — the same shape as a 401), the two independent resource-policy bounds (`SESSION_IDLE_TIMEOUT_MS` measuring the gap between turns; `SESSION_MAX_HELD`, LRU-evicted), and `getOrCreateSession` — spawn-or-reuse, including the check-then-act concurrency fix a review already caught and proved on the withdrawn `#57` (two calls on the same fresh handle now share one spawn via a synchronous `INITIALIZING` reservation, never race two, never orphan a process).**
+
+**A confirmed leaf, same pattern the MCP bridge landed in at `0.26.6`: nothing on `main` calls anything in this file yet.** `getOrCreateSession` is exported specifically so this wave's own test file can exercise the full spawn/reuse/dead-handle/eviction contract directly, standing in for the caller (wave 2b's `runSessionTurn`) that doesn't exist yet.
+
+**Deliberately NOT in this wave**, per the review's own named split: the per-turn watchdog, abort handling, tool-bridge arming, terminal-envelope parsing, and permission-denial extraction — all genuinely turn-execution concerns, landing as wave 2b. The wire-shape verification history (three real operator-run probes) moves with them, since nothing in this wave depends on the streaming wire shape being right — it only spawns and tracks processes.
+
 ## [0.26.7] — 2026-09-16
 
 **Internal-only refactor, no public behaviour or export change: `claude-cli`'s env allowlist (`ALLOWED_ENV_VARS`/`allowedEnv`/`CLAUDE_CLI_CREDENTIAL_ENV_VAR`) and the `PROVIDER` constant moved from `index.ts` into a new `env.ts`.** Every doc comment carried across verbatim; `index.ts` re-exports all four names under the exact same identifiers, so `@verevoir/llm/claude-cli`'s existing consumers (including this repo's own `chat.test.ts`, unchanged) see no difference.
