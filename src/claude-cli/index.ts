@@ -1020,7 +1020,7 @@ async function chatOnSession(
     // single-shot path this adapter otherwise uses.
     throw new Error(
       'claudeCli.chat(): when session is set, turns must carry exactly the ONE new message ' +
-        "for this round — the held session already remembers everything before it. Resending " +
+        'for this round — the held session already remembers everything before it. Resending ' +
         "prior history would duplicate it in the model's own context."
     );
   }
