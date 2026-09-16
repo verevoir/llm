@@ -343,6 +343,101 @@ describe('claude-cli session lifecycle', () => {
     });
   });
 
+  describe('concurrent first use of a fresh handle', () => {
+    it('two runSessionTurn calls fired without awaiting spawn exactly ONE process, not two — the check-then-act race a review caught', async () => {
+      const { child, written, emitLine } = fakeChild();
+      mockSpawn.mockImplementationOnce(() => child);
+      const session = createSession();
+
+      const base = {
+        session,
+        systemPrompt: 'sys',
+        tools: [ECHO_TOOL],
+        executor: async () => 'x',
+        maxToolCalls: 3,
+      };
+
+      // Fired back-to-back, WITHOUT awaiting between them — exactly the
+      // shape the review's finding described: two calls racing past the
+      // same check-then-act window on a handle that has never been used.
+      // Real (unmocked) createToolBridge is deliberately in play here
+      // (as in the tools-bearing tests elsewhere in this file) — its
+      // genuine async fs/socket work is exactly what created the window
+      // this test exists to close.
+      const p1 = runSessionTurn({ ...base, message: 'a' });
+      const p2 = runSessionTurn({ ...base, message: 'b' });
+      // Attached immediately, before the async wait below -- the loser
+      // can reject well before Promise.allSettled ever gets to attach
+      // its own handler, which Node would otherwise flag as an
+      // unhandled rejection even though it IS handled, just later. This
+      // does not change what's asserted: the real outcome is still read
+      // from p1/p2 themselves via Promise.allSettled below.
+      p1.catch(() => {});
+      p2.catch(() => {});
+
+      // Only ONE turn ever reaches stdin — the loser is refused before
+      // writing anything (see the assertion on messages below). Waiting
+      // for that one write is the signal that spawn (if it was going to
+      // happen twice) already would have.
+      await vi.waitFor(() => expect(written.length).toBeGreaterThan(0));
+      expect(mockSpawn).toHaveBeenCalledTimes(1);
+
+      emitLine({ type: 'result', result: 'done' });
+
+      const settled = await Promise.allSettled([p1, p2]);
+      const fulfilled = settled.filter((r) => r.status === 'fulfilled');
+      const rejected = settled.filter((r) => r.status === 'rejected') as PromiseRejectedResult[];
+      // One call actually ran the turn; the other was REFUSED (per this
+      // file's own "ONE TURN IN FLIGHT PER SESSION" contract) rather than
+      // silently spawning — and orphaning — a second process.
+      expect(fulfilled).toHaveLength(1);
+      expect(rejected).toHaveLength(1);
+      expect(String(rejected[0].reason)).toMatch(/already has a turn in flight/);
+      expect(mockSpawn).toHaveBeenCalledTimes(1); // still just one, after both settle
+      expect(written).toHaveLength(1); // the refused call never wrote to stdin at all
+    });
+
+    it('two runSessionTurn calls on the same fresh handle with an INCOMPATIBLE second binding refuse the second, rather than silently rebinding mid-spawn', async () => {
+      const { child, written, emitLine } = fakeChild();
+      mockSpawn.mockImplementationOnce(() => child);
+      const session = createSession();
+
+      const p1 = runSessionTurn({
+        session,
+        systemPrompt: 'sys A',
+        message: 'a',
+        tools: [ECHO_TOOL],
+        executor: async () => 'x',
+        maxToolCalls: 3,
+      });
+      const p2 = runSessionTurn({
+        session,
+        systemPrompt: 'sys B', // deliberately different — the two calls disagree on binding
+        message: 'b',
+        tools: [],
+        maxToolCalls: 0,
+      });
+      p1.catch(() => {}); // see the sibling test above for why this is attached immediately
+      p2.catch(() => {});
+
+      await vi.waitFor(() => expect(written.length).toBeGreaterThan(0));
+      emitLine({ type: 'result', result: 'done' });
+
+      const settled = await Promise.allSettled([p1, p2]);
+      const rejected = settled.filter((r) => r.status === 'rejected') as PromiseRejectedResult[];
+      expect(rejected.length).toBeGreaterThanOrEqual(1);
+      // Whichever call lost the race — the in-flight-turn refusal or the
+      // incompatible-binding refusal — it must be ONE of these two known
+      // messages, never a silently wrong result or a second spawn.
+      for (const r of rejected) {
+        expect(String(r.reason)).toMatch(
+          /already has a turn in flight|already bound to a different systemPrompt\/model\/tool/
+        );
+      }
+      expect(mockSpawn).toHaveBeenCalledTimes(1); // one spawn regardless of which message won
+    });
+  });
+
   it('refuses a rebind with a different systemPrompt/model/tools on a still-live handle', async () => {
     const { child, emitLine } = fakeChild();
     mockSpawn.mockImplementationOnce(() => child);

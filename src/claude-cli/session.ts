@@ -395,6 +395,34 @@ function extractPermissionDenials(value: unknown): PermissionDenial[] {
 
 const HELD = new Map<string, HeldSession>();
 
+/** Sessions currently being spawned — one promise per handle id, held
+ * synchronously from the moment a fresh (or dead/evicted) handle is
+ * first claimed until spawn + bridge setup finishes, one way or the
+ * other.
+ *
+ * FIXES A REAL DEFECT A REVIEW CAUGHT, not a hypothetical one. Without
+ * this, the async work spawning a session does — killing a dead
+ * predecessor, `createToolBridge`'s own mkdtemp/writeFile/TCP-listen —
+ * ran between "is anything held under this id" and `HELD.set` landing.
+ * Two `runSessionTurn` calls issued back-to-back on the SAME fresh (or
+ * dead/evicted) handle both read `HELD` as empty, both spawned a full
+ * `claude` process + tool bridge, and the second `HELD.set` silently
+ * overwrote the first — orphaning its process, its bridge's listening
+ * socket, and its temp directory, none of which any cleanup path
+ * (`closeSession`, idle eviction, LRU eviction) could ever reach again.
+ * It also directly falsified this file's own documented "ONE TURN IN
+ * FLIGHT PER SESSION... refused rather than interleaved" claim for
+ * exactly the tools-supplied, first-use-of-a-handle case, since that
+ * guard (in `runSessionTurn`) only exists once a `HeldSession` is
+ * already in `HELD`.
+ *
+ * Reserving the slot HERE, synchronously — before ANY `await` in
+ * `getOrCreateSession`, including the dead-session cleanup path, not
+ * just bridge creation — closes the window: a second call on the same
+ * handle sees the reservation and awaits the SAME spawn rather than
+ * starting its own. See `requireCompatible` for what it gets back. */
+const INITIALIZING = new Map<string, Promise<HeldSession>>();
+
 /** A fresh, opaque session handle. Spawns nothing yet — the first
  * `runSessionTurn` call against it is what actually starts `claude`, so
  * creating a handle you never use costs nothing. */
@@ -593,74 +621,112 @@ interface SessionBinding {
   model: string | undefined;
 }
 
-/** Get the live session behind `handle`, spawning one if none exists,
- * the existing one has died/been evicted, or the caller asked for an
- * incompatible binding — see this file's header for the dead-handle and
- * fixed-binding contracts this implements. */
-async function getOrCreateSession(
-  handle: ClaudeCliSessionHandle,
-  binding: SessionBinding
-): Promise<HeldSession> {
-  const existing = HELD.get(handle.id);
-  if (existing && !existing.closed) {
-    const compatible =
-      sameNames(
-        existing.toolNames,
-        binding.tools.map((t) => t.name)
-      ) &&
-      existing.systemPrompt === binding.systemPrompt &&
-      existing.model === binding.model;
-    if (compatible) {
-      // Idle-timer management now lives entirely in runSessionTurn (clear
-      // on turn start, reschedule once it settles) — rescheduling here
-      // too would restart the countdown before the turn even begins,
-      // which is harmless but redundant, so it's left to the one place
-      // that actually knows the turn's start/end.
-      touchLRU(handle.id);
-      return existing;
-    }
+/** Shared compatibility check used by every path that hands back an
+ * existing OR just-finished-initializing session — see the file
+ * header's THE SYSTEM PROMPT, MODEL, AND TOOL SET ARE FIXED AT SPAWN
+ * paragraph. Extracted so a call that arrives while another is still
+ * spawning (see `INITIALIZING` above) enforces the identical rule a
+ * synchronous existing-session hit does, rather than silently handing
+ * back a session bound to whichever caller's binding won the race. */
+function requireCompatible(session: HeldSession, id: string, binding: SessionBinding): HeldSession {
+  const compatible =
+    sameNames(
+      session.toolNames,
+      binding.tools.map((t) => t.name)
+    ) &&
+    session.systemPrompt === binding.systemPrompt &&
+    session.model === binding.model;
+  if (!compatible) {
     throw new Error(
-      `claude-cli: session ${handle.id} is already bound to a different systemPrompt/model/tool ` +
+      `claude-cli: session ${id} is already bound to a different systemPrompt/model/tool ` +
         "set — a held session's claude process is fixed at spawn. Close it (closeSession) and " +
         'open a new one to change any of those, rather than silently keeping the old binding or ' +
         'reconfiguring it mid-session.'
     );
   }
-  if (existing) {
-    // A dead/closed entry left in the map (the process exited between
-    // turns, or was evicted) — clean it up before spawning fresh under
-    // the same id. THIS is the "presenting a dead handle starts fresh"
-    // contract: nothing here distinguishes "never seen this id" from
-    // "it died" from "it was evicted".
-    HELD.delete(handle.id);
-    await killHeld(existing);
+  return session;
+}
+
+/** Get the live session behind `handle`, spawning one if none exists,
+ * the existing one has died/been evicted, or the caller asked for an
+ * incompatible binding — see this file's header for the dead-handle and
+ * fixed-binding contracts this implements, and `INITIALIZING`'s own doc
+ * comment for the concurrent-first-use race this function closes. */
+async function getOrCreateSession(
+  handle: ClaudeCliSessionHandle,
+  binding: SessionBinding
+): Promise<HeldSession> {
+  // A concurrent call already claimed this handle and is still
+  // spawning — wait for THAT spawn rather than racing a second one.
+  // Checked first: this map is exactly where the reservation lives for
+  // the whole window between claiming the slot and HELD.set landing.
+  const inFlight = INITIALIZING.get(handle.id);
+  if (inFlight) {
+    return requireCompatible(await inFlight, handle.id, binding);
   }
 
-  const bridge = binding.tools.length > 0 ? await createToolBridge(binding.tools) : null;
-  const args = buildSessionArgs(binding.systemPrompt, binding.model, bridge?.mcpConfigPath);
-  const child = spawn('claude', args, {
-    env: allowedEnv(process.env),
-    cwd: tmpdir(),
-  }) as ChildProcessWithoutNullStreams;
+  const existing = HELD.get(handle.id);
+  if (existing && !existing.closed) {
+    const session = requireCompatible(existing, handle.id, binding);
+    // Idle-timer management now lives entirely in runSessionTurn (clear
+    // on turn start, reschedule once it settles) — rescheduling here
+    // too would restart the countdown before the turn even begins,
+    // which is harmless but redundant, so it's left to the one place
+    // that actually knows the turn's start/end.
+    touchLRU(handle.id);
+    return session;
+  }
 
-  const session: HeldSession = {
-    id: handle.id,
-    child,
-    bridge,
-    toolNames: binding.tools.map((t) => t.name),
-    systemPrompt: binding.systemPrompt,
-    model: binding.model,
-    idleTimer: setTimeout(() => {}, 0),
-    closed: false,
-    lineBuffer: '',
-    pending: null,
-  };
-  clearTimeout(session.idleTimer);
-  wireSessionEvents(session);
-  HELD.set(handle.id, session);
-  scheduleIdleEviction(session);
-  evictOverCapacity();
-  return session;
+  // Either nothing is held under this id, or what's held is dead/closed
+  // (existing.closed === true — the only way execution reaches here
+  // past the branch above) and needs cleaning up before a fresh spawn.
+  // Reserve the slot SYNCHRONOUSLY, before ANY await below — including
+  // the dead-session cleanup, not just createToolBridge — so a
+  // concurrent call arriving anywhere in this window sees the
+  // reservation instead of racing a second spawn past it.
+  const initPromise = (async (): Promise<HeldSession> => {
+    if (existing) {
+      // A dead/closed entry left in the map (the process exited between
+      // turns, or was evicted) — clean it up before spawning fresh under
+      // the same id. THIS is the "presenting a dead handle starts fresh"
+      // contract: nothing here distinguishes "never seen this id" from
+      // "it died" from "it was evicted".
+      HELD.delete(handle.id);
+      await killHeld(existing);
+    }
+
+    const bridge = binding.tools.length > 0 ? await createToolBridge(binding.tools) : null;
+    const args = buildSessionArgs(binding.systemPrompt, binding.model, bridge?.mcpConfigPath);
+    const child = spawn('claude', args, {
+      env: allowedEnv(process.env),
+      cwd: tmpdir(),
+    }) as ChildProcessWithoutNullStreams;
+
+    const session: HeldSession = {
+      id: handle.id,
+      child,
+      bridge,
+      toolNames: binding.tools.map((t) => t.name),
+      systemPrompt: binding.systemPrompt,
+      model: binding.model,
+      idleTimer: setTimeout(() => {}, 0),
+      closed: false,
+      lineBuffer: '',
+      pending: null,
+    };
+    clearTimeout(session.idleTimer);
+    wireSessionEvents(session);
+    HELD.set(handle.id, session);
+    scheduleIdleEviction(session);
+    evictOverCapacity();
+    return session;
+  })();
+  INITIALIZING.set(handle.id, initPromise);
+  try {
+    return await initPromise;
+  } finally {
+    INITIALIZING.delete(handle.id);
+  }
 }
 
 function abortReasonLocal(signal: AbortSignal): unknown {
