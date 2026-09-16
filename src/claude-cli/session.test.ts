@@ -1,4 +1,4 @@
-import { EventEmitter } from 'node:events';
+import { EventEmitter, getEventListeners } from 'node:events';
 import { readFile } from 'node:fs/promises';
 import { createConnection } from 'node:net';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -307,6 +307,47 @@ describe('claude-cli session lifecycle (wave 2a)', () => {
       const session = createSession(); // never used
       await expect(closeSession(session)).resolves.toBeUndefined();
       await expect(closeSession(session)).resolves.toBeUndefined(); // idempotent
+    });
+
+    it("closing a session with a turn IN FLIGHT removes that turn's abort listener too, not just its watchdog — the killHeld leak a review caught", async () => {
+      // A prior review REJECTED this wave: killHeld (called by
+      // closeSession, among others) only ever did
+      // `clearTimeout(pending.watchdog)` on a pending turn, never
+      // `pending.teardown()` — so the SAME abort-listener leak
+      // runSessionTurn's own settlement paths were fixed for earlier in
+      // this wave was still reachable from OUTSIDE runSessionTurn,
+      // through closeSession. This proves it's actually gone — not by
+      // inferring it from child.kill's call count (closeSession kills
+      // the process either way), but by asking node:events directly
+      // whether the listener is still attached to the signal.
+      const { child, written } = fakeChild();
+      mockSpawn.mockImplementationOnce(() => child);
+      const session = createSession();
+      const controller = new AbortController();
+
+      const pending = runSessionTurn({
+        session,
+        systemPrompt: 'sys',
+        message: 'a',
+        tools: [],
+        maxToolCalls: 0,
+        signal: controller.signal,
+      });
+      // Let the turn's async setup actually land — stdin written,
+      // session.pending set, abort listener registered — before killing
+      // the session out from under it. Mirrors this file's existing
+      // setImmediate-based "let async setup land first" pattern (see
+      // 'reuses the same process for a second turn').
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(written).toHaveLength(1);
+      expect(getEventListeners(controller.signal, 'abort')).toHaveLength(1);
+
+      await closeSession(session);
+      await expect(pending).rejects.toThrow(/closed\/evicted while a turn was in flight/);
+      expect(child.kill).toHaveBeenCalledTimes(1);
+
+      // THE ACTUAL FIX BEING PROVEN.
+      expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
     });
   });
 
@@ -898,6 +939,56 @@ describe('claude-cli session lifecycle (wave 2a)', () => {
       expect(children[0].child.kill).toHaveBeenCalledTimes(1);
       // The most recently used ones are still live.
       expect(children[children.length - 1].child.kill).not.toHaveBeenCalled();
+    });
+
+    it("evicting a session over capacity while it has a turn IN FLIGHT removes that turn's abort listener too — the same killHeld leak as closeSession's, reached via eviction instead", async () => {
+      // `victim` is created FIRST and never touched again after its own
+      // turn starts — the least-recently-used entry once SESSION_MAX_HELD
+      // more sessions land after it, which is exactly what
+      // evictOverCapacity picks, with NO check for an in-flight turn.
+      const { child: victimChild, written } = fakeChild();
+      mockSpawn.mockImplementationOnce(() => victimChild);
+      const victim = createSession();
+      const controller = new AbortController();
+      const pendingTurn = runSessionTurn({
+        session: victim,
+        systemPrompt: 'victim',
+        message: 'a',
+        tools: [],
+        maxToolCalls: 0,
+        signal: controller.signal,
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(written).toHaveLength(1);
+      expect(getEventListeners(controller.signal, 'abort')).toHaveLength(1);
+
+      // Fill up to (but not over) the cap with idle sessions — `victim`
+      // stays the LRU-oldest throughout, since none of these touch it.
+      for (let i = 0; i < SESSION_MAX_HELD - 1; i++) {
+        const c = fakeChild();
+        mockSpawn.mockImplementationOnce(() => c.child);
+        await getOrCreateSession(createSession(), {
+          tools: [],
+          systemPrompt: `idle ${i}`,
+          model: undefined,
+        });
+      }
+
+      // One more pushes HELD over capacity — evictOverCapacity picks the
+      // LRU-oldest (victim) regardless of its in-flight turn.
+      const overflow = fakeChild();
+      mockSpawn.mockImplementationOnce(() => overflow.child);
+      await getOrCreateSession(createSession(), {
+        tools: [],
+        systemPrompt: 'overflow',
+        model: undefined,
+      });
+
+      expect(victimChild.kill).toHaveBeenCalledTimes(1); // confirms victim really was the one evicted
+      await expect(pendingTurn).rejects.toThrow(/closed\/evicted while a turn was in flight/);
+
+      // THE ACTUAL FIX BEING PROVEN.
+      expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
     });
   });
 });

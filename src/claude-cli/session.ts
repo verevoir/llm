@@ -171,14 +171,28 @@ interface PendingTurn {
   watchdog: ReturnType<typeof setTimeout>;
   /** Removes the abort listener `runSessionTurn`'s promise executor
    * registered, AND clears the watchdog — the single teardown point
-   * every settlement path must call: success (handleStreamLine, below),
-   * the watchdog firing, an abort firing, process death
-   * (wireSessionEvents' onGone), and the synchronous stdin-write-error
-   * path. WAVE 4 FIX: before this field existed, only the write-error
-   * path removed the abort listener — a turn that resolved via a normal
-   * result line or the watchdog left the listener ARMED against a
-   * session that might still be open, so a LATER abort() on a REUSED
+   * EVERY path that can settle a pending turn must call: success
+   * (handleStreamLine, below), the watchdog firing, an abort firing,
+   * process death (wireSessionEvents' onGone), the synchronous
+   * stdin-write-error path, AND killHeld's own external-kill path
+   * (closeSession, evictOverCapacity, and the dead-session cleanup
+   * inside getOrCreateSession's spawn path — see killHeld's own comment
+   * below for the full account of why that needed the identical fix).
+   *
+   * WAVE 4 FIX, IN TWO PARTS. Part one (runSessionTurn's own four
+   * settlement paths) fixed the bug where a turn that resolved via a
+   * normal result line or the watchdog left the listener ARMED against
+   * a session that might still be open, so a LATER abort() on a REUSED
    * AbortController would incorrectly kill an already-healthy session.
+   * That first fix's own doc comment (and the PR that shipped it)
+   * claimed this covered "every settlement path" — A REVIEW CAUGHT THAT
+   * THIS WAS FALSE: killHeld is a FIFTH path that can settle a pending
+   * turn, reachable from OUTSIDE runSessionTurn entirely, and it was
+   * still doing the old partial cleanup (clearTimeout only) rather than
+   * calling this field at all. Part two — killHeld now calling
+   * `pending.teardown()` — closes that gap. The claim above is written
+   * to be true now, not as it was first (incorrectly) stated.
+   *
    * Idempotent — safe to call more than once (clearTimeout /
    * removeEventListener are both no-ops the second time), so every path
    * can call it unconditionally without checking who settled the turn
@@ -297,7 +311,23 @@ async function killHeld(session: HeldSession): Promise<void> {
   if (session.pending) {
     const pending = session.pending;
     session.pending = null;
-    clearTimeout(pending.watchdog);
+    // WAVE 4 FOLLOW-UP FIX — A REVIEW CAUGHT THAT THIS CALL WAS MISSING
+    // ENTIRELY. killHeld is reached, mid-turn, from THREE external-kill
+    // routes: closeSession (an exported public API a caller can invoke
+    // while a turn is in flight), evictOverCapacity (fires
+    // unconditionally on respawn once HELD.size exceeds
+    // SESSION_MAX_HELD, with NO check for an in-flight turn), and the
+    // dead-session cleanup inside getOrCreateSession's own spawn path.
+    // Every one of them used to leave `pending`'s abort listener
+    // permanently attached to the caller's AbortSignal, because only
+    // `clearTimeout(pending.watchdog)` ran here — never
+    // `removeEventListener`. This is the SAME bug class runSessionTurn's
+    // own settlement paths were fixed for earlier in this wave — just
+    // reachable from OUTSIDE runSessionTurn instead of from within it.
+    // See PendingTurn's own doc comment, above, for the fuller account
+    // (including that the first fix's claim of covering "every
+    // settlement path" was, at the time, false).
+    pending.teardown();
     pending.reject(
       new Error(`claude-cli: session ${session.id} was closed/evicted while a turn was in flight`)
     );
