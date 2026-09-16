@@ -17,7 +17,10 @@
  * `resolveModel` / `resolveModelByTerm` must never be able to silently
  * substitute this adapter for the real API one; a caller wanting this
  * substrate imports and calls it directly, chosen deliberately, never
- * resolved by policy.
+ * resolved by policy. `PROVIDER` and the env allowlist live in `env.ts`
+ * (re-exported here, unchanged) — pulled out so `session.ts` (below) can
+ * build the identical child environment without a module cycle back into
+ * this file.
  *
  * ══════════════════════════════════════════════════════════════════════
  * SECURITY CORRECTION (0.26.3) — READ THIS BEFORE TOUCHING THE FLAG LIST.
@@ -66,8 +69,10 @@
  * question (see the ISOLATION paragraph below) — conflating that fix
  * with this one is exactly how the `--tools ""` defect nearly escaped a
  * second time layered under a different, harder-to-isolate change. This
- * adapter never passes `--mcp-config` at all (see ISOLATION), so the
- * question does not even arise for `chat()`'s own single-shot path.
+ * adapter never passes `--mcp-config` at all on the single-shot path
+ * (see ISOLATION), so the question does not even arise for `chat()`'s
+ * own single-shot path without a session — see `session.ts`'s own
+ * header for the fuller account of where it DOES arise.
  *
  * TOOL-SAFETY VERIFICATION — THE MECHANISM. `chat()` builds its stdin as
  * ONE `{"type":"user","message":{"role":"user","content":"..."}}` line
@@ -120,15 +125,6 @@
  * dual-cost design (billed vs. notional) is deliberate, separate,
  * out-of-scope work (`decisions/023`, aigency-governance).
  *
- * `chat()` ONLY in this first cut — no `chatWithTools` /
- * `chatWithToolLoop`. `/google` shipped the same way at its own v0.4.0
- * release (chat() only), then added chatWithTools/chatWithToolLoop in
- * 0.13.0 — cited here as HISTORICAL precedent for a first cut, not as
- * `/google`'s current state, which already has both. `--disallowedTools
- * "*"` (always passed) makes a tool loop moot for THIS adapter's single-
- * shot purpose anyway, so a turn carrying a `tool_use` / `tool_result`
- * block is refused rather than silently flattened.
- *
  * `abortSignal` IS HONOURED AT ENTRY AND MID-CALL, not just an entry
  * check: aborting while the spawned child is still running kills it
  * (`child.kill()`) and rejects immediately with the signal's own reason,
@@ -136,159 +132,167 @@
  * memoized `claude --version` lookup is deliberately NOT wired to any
  * one call's signal, since every caller shares it.
  *
- * `onProgress` IS ACCEPTED, NEVER INVOKED. `--disallowedTools "*"`
- * disables every built-in tool a `report_progress` mechanism would
- * need, and the terminal `result` event still delivers the full reply
- * only once, not incrementally — there is no partial signal to narrate
- * from either way. A caller supplying `onProgress` will never see it
- * called; nothing here throws for supplying it.
+ * `onProgress` IS ACCEPTED, NEVER INVOKED on the single-shot path.
+ * `--disallowedTools "*"` disables every built-in tool a `report_progress`
+ * mechanism would need, and the terminal `result` event still delivers
+ * the full reply only once, not incrementally — there is no partial
+ * signal to narrate from either way. A caller supplying `onProgress`
+ * will never see it called; nothing here throws for supplying it.
  *
  * MODEL PINNING. `chat()` accepts `options.model` — an exact model id,
  * passed straight through as `--model <id>` — so a caller that must
  * compare this substrate against the direct API path (or across two
  * calls, e.g. a governance review of the same commit through both
  * transports) can force both to answer with the identical model rather
- * than each one's own default/class resolution silently diverging. See
- * `ChatOptions.model`'s own doc comment in the core for the full
- * rationale. `--model` is documented in Claude Code's own `--help` as
- * accepting either a class alias ("sonnet", "opus") or a full model id
- * ("claude-sonnet-4-20250514") — that documentation is what this flag
- * rests on; unlike the flags confirmed above against a real captured
- * payload, this one has NOT independently been re-verified against a
- * live invocation by this repository, and is stated here as relayed,
- * not confirmed, in the same spirit as the Bedrock/Vertex strips this
- * file used to carry. Omitting `options.model` leaves behaviour exactly
- * as before — the local install's own default, unpinned.
+ * than each one's own default/class resolution silently diverging.
+ * `--model` is documented in Claude Code's own `--help` as accepting
+ * either a class alias ("sonnet", "opus") or a full model id — that
+ * documentation is what this flag rests on; unlike the flags confirmed
+ * above against a real captured payload, this one has NOT independently
+ * been re-verified against a live invocation. Omitting `options.model`
+ * leaves behaviour exactly as before — the local install's own default,
+ * unpinned.
  *
  * `options.maxTokens` IS ACCEPTED, NEVER USED — disclosed rather than
  * silently ignored. There is no confirmed `claude -p` flag for an
- * output-token ceiling (unlike `--model`, nothing in the CLI's own
- * `--help` documents one), so this adapter has nothing to pass it to; a
- * caller relying on `maxTokens` to avoid a truncated reply on this
- * substrate has no lever here and should know that, not discover it by
- * the field quietly doing nothing.
+ * output-token ceiling, so this adapter has nothing to pass it to.
  *
  * ISOLATION FROM PROJECT/LOCAL CONFIGURATION, on top of `--safe-mode`'s
  * own documented disabling of CLAUDE.md/skills/plugins/hooks/MCP
- * servers/custom commands. Two more, deliberate: `--strict-mcp-config`
- * is passed on every invocation, so even if `--safe-mode`'s MCP
- * suppression turns out narrower in practice than its `--help` states,
- * no MCP server from any configuration source reaches this call — only
- * servers passed via an explicit `--mcp-config` flag would, and this
- * adapter never passes that flag, so the effective set is always empty.
- * And the spawn's `cwd` (see `runClaudeCli`) is set explicitly to the
- * platform temp directory rather than inherited from whatever directory
- * the calling process happens to be running in — a project's
- * `CLAUDE.md` / `.mcp.json` live relative to cwd, and a governance
- * review process's cwd is typically the very repository it is
- * reviewing, which is precisely the content this call must not see.
- * Both are defense-in-depth alongside `--safe-mode`, not a claim that
- * `--safe-mode` alone was proven insufficient — this repository has not
- * independently re-confirmed `--safe-mode`'s own documented MCP/
- * CLAUDE.md suppression by direct observation, so it is not relied on
- * alone, and whether it actually holds remains a SEPARATE, open
- * question this change does not touch (see the SECURITY CORRECTION
- * paragraph above).
+ * servers/custom commands. Two more, deliberate, on EVERY invocation
+ * (single-shot or session): `--strict-mcp-config` is passed always, so
+ * only servers passed via an explicit `--mcp-config` flag can ever
+ * reach a call — the single-shot path never passes that flag at all, so
+ * its effective MCP set is always empty; the session-holding path
+ * passes it only when the session has tools, naming exactly its own
+ * embedded bridge (see `session.ts`). And the spawn's `cwd` is set
+ * explicitly to the platform temp directory rather than inherited from
+ * whatever directory the calling process happens to be running in — a
+ * project's `CLAUDE.md` / `.mcp.json` live relative to cwd.
+ *
+ * ══════════════════════════════════════════════════════════════════════
+ * SESSION-HOLDING TRANSPORT (0.27.0) — TOOL CALLING + PROMPT-CACHE
+ * PARITY ON THE KEYLESS ROUTE.
+ * ══════════════════════════════════════════════════════════════════════
+ * `chat()`'s single-shot design — one process spawned and exited per
+ * call — means a tool exchange (ask → execute → continue) has
+ * structurally nowhere to live: turn N and turn N+1 are two different
+ * processes with nothing in common. `session.ts` (+ `mcp-bridge.ts`)
+ * adds a SECOND, additive transport: a `claude -p --input-format
+ * stream-json --output-format stream-json` process kept alive across
+ * multiple turns, exposed as an opaque `ClaudeCliSessionHandle` the
+ * CALLER holds and owns the lifetime of — this package has no concept
+ * of a conversation, so a lifetime keyed on one would be policy this
+ * package cannot reason about. See `session.ts`'s own file header for
+ * the full mechanism, the dead-handle-safety contract, the two resource
+ * policies bounding how much this package holds, and the complete probe
+ * history behind what is confirmed versus still relayed about the
+ * underlying wire shape.
+ *
+ * `chatWithToolLoop()` is the shape this transport can honestly
+ * support; `chatWithTools()` (single-shot, return-before-execution)
+ * REFUSES on this transport, naming precisely why — tools run through
+ * the CLI's own agentic loop via the embedded MCP bridge, so there is
+ * never a point where a `tool_use` exists without already having been
+ * executed for a caller to run separately. `chat()` gains an optional
+ * `session` for prompt-cache warmth without tools — tools and caching
+ * arrive together on this transport because both need the same held
+ * process.
  */
 
 import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { fireUsageHook } from '../audit-hook.js';
-import type { ChatOptions, ChatReply, CredentialRoute, TokenUsage, TurnContent } from '../index.js';
+import type {
+  ChatOptions,
+  ChatReply,
+  ChatWithToolLoopOptions,
+  ChatWithToolLoopResult,
+  ChatWithToolsOptions,
+  ChatWithToolsResult,
+  CredentialRoute,
+  TokenUsage,
+  TurnContent,
+} from '../index.js';
+import { ALLOWED_ENV_VARS, allowedEnv, CLAUDE_CLI_CREDENTIAL_ENV_VAR, PROVIDER } from './env.js';
+import {
+  closeSession,
+  createSession,
+  resetClaudeCliSessionsForTests,
+  runSessionTurn,
+  SESSION_IDLE_TIMEOUT_MS,
+  SESSION_MAX_HELD,
+  SESSION_TURN_TIMEOUT_MS,
+  type ClaudeCliSessionHandle,
+  type PermissionDenial,
+} from './session.js';
 
-/** Provider id reported on every {@link TokenUsage} this adapter returns —
- * see the file header for why this must never be `'anthropic'`. */
-export const PROVIDER = 'claude-cli';
+// Moved to env.ts (see its own file header for why) — re-exported here so
+// nothing importing @verevoir/llm/claude-cli can tell any of these four
+// names ever lived in this file.
+export { ALLOWED_ENV_VARS, allowedEnv, CLAUDE_CLI_CREDENTIAL_ENV_VAR, PROVIDER };
 
-/**
- * The base environment names every invocation gets, regardless of what
- * else is permitted. Mirrors `aigency-governance`'s own
- * `src/review/claudeCli.ts` `BASE_ENV_NAMES` exactly — that composition
- * built an independent parallel copy of this file's design and converged
- * on the same three names for the same reasons: `PATH` so the `claude`
- * binary can be found at all, `HOME` because per-user configuration and
- * cache (and, on macOS, the Keychain entry an interactively-logged-in CLI
- * reads its session from) key off it, `TMPDIR` because the CLI writes
- * scratch files and the platform fallback isn't writable everywhere. This
- * list stays boring on purpose — anything added to it is handed to
- * `claude` on every invocation forever.
- */
-const BASE_ENV_NAMES = ['PATH', 'HOME', 'TMPDIR'] as const;
-
-/**
- * The one credential this adapter names explicitly — a subscription OAuth
- * token, never the billed `ANTHROPIC_API_KEY` this file exists to avoid
- * spending.
- *
- * WHY HARDCODE ONE CREDENTIAL NAME INTO A PUBLISHED LIBRARY, RATHER THAN
- * LEAVING THE ALLOWLIST CALLER-EXTENSIBLE. This package has many callers
- * and they may legitimately authenticate the tooling THEY drive
- * differently — real elsewhere in this codebase (every adapter's
- * `<PROVIDER>_BASE_URL` override exists precisely because one caller's
- * endpoint isn't another's). It does not carry over to this constant,
- * because this adapter isn't wrapping "any subprocess" that a caller
- * configures — it is built around exactly one credential mechanism: this
- * file already asserts `route` as the constant `'subscription-oauth'`
- * (see the file header's PAYLOAD CONTRACT paragraph), specifically so
- * a caller can use a Claude subscription rather than a billed key.
- * `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) is the CLI's own
- * documented non-interactive mechanism for that credential — the same
- * token `anthropic/index.ts` in this package already prefers over
- * `ANTHROPIC_API_KEY` for the identical reason. A caller running the CLI
- * interactively, already logged in via Keychain (reachable because `HOME`
- * is passed through above), needs no env var at all: this name is simply
- * absent from their environment, and `allowedEnv` below omits whatever
- * isn't set rather than inventing it. A caller needing some OTHER
- * non-billed auth mechanism for the `claude` binary is not a case this
- * file has evidence for — naming a second credential without a confirmed
- * need would be guessing at a shape nobody has asked for, the same
- * standard the file header holds itself to everywhere else ("relayed, not
- * confirmed"). If that need arises, widening this is a one-line,
- * deliberate change, not a reason to leave the surface wide by default
- * now.
- */
-export const CLAUDE_CLI_CREDENTIAL_ENV_VAR = 'CLAUDE_CODE_OAUTH_TOKEN';
+// The session-holding transport (session.ts + mcp-bridge.ts) — see the file
+// header's SESSION-HOLDING TRANSPORT section. Re-exported from this single
+// subpath entry point, same as every other name here.
+export {
+  closeSession,
+  createSession,
+  resetClaudeCliSessionsForTests,
+  SESSION_IDLE_TIMEOUT_MS,
+  SESSION_MAX_HELD,
+  SESSION_TURN_TIMEOUT_MS,
+  type ClaudeCliSessionHandle,
+  type PermissionDenial,
+};
 
 /**
- * Every environment variable name the `claude` child process is permitted
- * to see — an ALLOWLIST, built from {@link BASE_ENV_NAMES} plus
- * {@link CLAUDE_CLI_CREDENTIAL_ENV_VAR}, never independently.
- *
- * REPLACES an earlier `STRIPPED_ENV_VARS` / `childEnv` DENYLIST that
- * deleted five named Anthropic/Bedrock/Vertex variables and passed
- * everything else in the caller's environment through to the child
- * unchanged — other cloud credentials, other API tokens, `SSH_AUTH_SOCK`,
- * `GITHUB_TOKEN`, all of it, handed to a third-party CLI subprocess this
- * codebase does not control. A denylist can only ever be as complete as
- * the list of things its author thought to name — this file's own
- * honesty that `STRIPPED_ENV_VARS` was never "provably exhaustive" was
- * itself the admission that the wrong primitive was in use. An allowlist
- * doesn't need to be exhaustive about threats to be complete about
- * permissions: nothing outside {@link ALLOWED_ENV_VARS} reaches the
- * child, full stop, regardless of what it's called or whether this file
- * has ever heard of it.
+ * {@link ChatOptions}, plus an optional held session — see the file
+ * header's SESSION-HOLDING TRANSPORT section. Additive only: a caller
+ * that never sets `session` sees exactly the original stateless
+ * single-shot contract, unchanged. Setting `session` is never required
+ * for anything — the caller can always fall back to
+ * `chat()`/`chatWithToolLoop()` WITHOUT a `session`, resending its own
+ * full history through the stateless single-shot path. That fallback,
+ * always available, is what makes a held session's own TTL (see
+ * session.ts's own file header) a resource policy rather than a
+ * correctness one: losing one costs a cold rebuild, never lost work,
+ * because the caller never depended on this package to be the only
+ * place the conversation lived.
  */
-export const ALLOWED_ENV_VARS = [...BASE_ENV_NAMES, CLAUDE_CLI_CREDENTIAL_ENV_VAR] as const;
+export interface ClaudeCliChatOptions extends ChatOptions {
+  session?: ClaudeCliSessionHandle;
+}
+
+/** {@link ChatWithToolsOptions}, plus the same optional `session` field.
+ * See {@link chatWithTools}'s own doc comment for why this function
+ * REFUSES on this transport regardless of whether `session` is set —
+ * the field exists for type-shape parity with {@link ClaudeCliChatWithToolLoopOptions},
+ * not because this function honours it. */
+export interface ClaudeCliChatWithToolsOptions extends ChatWithToolsOptions {
+  session?: ClaudeCliSessionHandle;
+}
+
+/** {@link ChatWithToolLoopOptions}, plus an optional held session. Same
+ * `turns`-is-only-the-new-message contract as {@link ClaudeCliChatOptions}
+ * when `session` is set. Omitting `session` still works — a throwaway
+ * session is created and closed for the one call, so a caller that
+ * doesn't want to hold state across calls sees a single, self-contained
+ * `chatWithToolLoop()` exactly like every other adapter's. */
+export interface ClaudeCliChatWithToolLoopOptions extends ChatWithToolLoopOptions {
+  session?: ClaudeCliSessionHandle;
+}
 
 /**
- * The environment to hand the `claude` child process: every name in
- * {@link ALLOWED_ENV_VARS} that `env` actually carries, and nothing else —
- * never the original object, and never anything not on the allowlist, no
- * matter what the caller's own shell exports. A name on the allowlist
- * that `env` does not have is simply absent from the result, not an
- * error here: a missing `CLAUDE_CODE_OAUTH_TOKEN` is `claude` itself
- * refusing to authenticate, reported through the normal failure path
- * below, not a concern of building the environment.
+ * {@link ChatWithToolLoopResult}, plus this transport's own
+ * `permissionDenials` signal — see {@link PermissionDenial}'s own doc
+ * comment (in session.ts) for what it means and, just as importantly,
+ * what an EMPTY one does and does not tell a caller (read it alongside
+ * `toolUses`, never alone). Additive only — every base field is
+ * unchanged.
  */
-export function allowedEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const child: NodeJS.ProcessEnv = {};
-  for (const name of ALLOWED_ENV_VARS) {
-    const value = env[name];
-    if (value !== undefined) {
-      child[name] = value;
-    }
-  }
-  return child;
+export interface ClaudeCliChatWithToolLoopResult extends ChatWithToolLoopResult {
+  permissionDenials: PermissionDenial[];
 }
 
 /** Flags applied to every invocation. See the file header's SECURITY
@@ -315,9 +319,10 @@ function buildArgs(systemPrompt: string, model: string | undefined): string[] {
     '--verbose',
     // CONFIRMED to remove every built-in tool from context entirely when
     // named bare, unlike --tools "" — see the file header's SECURITY
-    // CORRECTION paragraph. This adapter never passes --mcp-config, so
-    // there is no MCP tool for --disallowedTools's own documented
-    // MCP-filtering quirk to matter for on this path.
+    // CORRECTION paragraph. This adapter never passes --mcp-config on
+    // this single-shot path, so there is no MCP tool for
+    // --disallowedTools's own documented MCP-filtering quirk to matter
+    // for here.
     '--disallowedTools',
     '*',
     '--strict-mcp-config',
@@ -334,10 +339,10 @@ function buildArgs(systemPrompt: string, model: string | undefined): string[] {
  * Flatten a turn's content to plain text for the CLI's stdin. Per
  * {@link TurnContent}'s own contract ("adapters that don't support a given
  * block kind should surface a typed error rather than silently dropping
- * content"): a `tool_use` / `tool_result` block is meaningless here — this
- * adapter has no tool loop (`--disallowedTools "*"` disables every
- * built-in tool) — so a turn carrying one is refused rather than
- * silently flattened away.
+ * content"): a `tool_use` / `tool_result` block is meaningless on the
+ * single-shot path — this adapter has no tool loop there
+ * (`--disallowedTools "*"` disables every built-in tool) — so a turn
+ * carrying one is refused rather than silently flattened away.
  */
 function contentToText(content: TurnContent): string {
   if (typeof content === 'string') return content;
@@ -349,9 +354,9 @@ function contentToText(content: TurnContent): string {
     }
     throw new Error(
       `claudeCli: turn content block of type "${block.type}" is not supported — this adapter ` +
-        'has no tool loop (--disallowedTools "*" disables every built-in tool), so a ' +
-        'tool_use/tool_result block would be silently dropped rather than acted on. Use plain ' +
-        'text turns.'
+        'has no tool loop on the single-shot path (--disallowedTools "*" disables every ' +
+        'built-in tool), so a tool_use/tool_result block would be silently dropped rather than ' +
+        'acted on. Use plain text turns, or chatWithToolLoop() with a session for tool calling.'
     );
   }
   return parts.join('\n');
@@ -359,10 +364,9 @@ function contentToText(content: TurnContent): string {
 
 /**
  * Multiple turns are joined as a labelled transcript — not equivalent to a
- * real multi-turn CLI session (there is none; see the file header, this
- * adapter is `chat()`-only, single-shot). Documented rather than silently
- * mishandled. The one real caller this adapter is built for (a governance
- * review lens) always supplies exactly one turn.
+ * real multi-turn CLI session on the single-shot path (see the file
+ * header, `chat()` without a `session` is stateless, one process per
+ * call). Documented rather than silently mishandled.
  */
 function joinTurns(turns: ChatOptions['turns']): string {
   if (turns.length === 1) {
@@ -545,7 +549,9 @@ interface PrimaryModelResult {
  * counts equal the top-level `usage` block (the model that actually
  * produced the reply text); falls back to the first entry if no exact
  * match is found, since at least one real model id is still better than
- * `'unknown'` in that case.
+ * `'unknown'` in that case. Shared by the single-shot path and the
+ * session-holding transport (`chatOnSession` / `chatWithToolLoop`,
+ * below) so both report usage identically.
  */
 function determinePrimaryModel(
   usage: ClaudeCliResultEvent['usage'],
@@ -573,6 +579,7 @@ function determinePrimaryModel(
 // ── Substrate version, memoized for the process's lifetime ──────────────
 // See the file header — there is NO version field anywhere in the real
 // payload, so this spawn is now the ONLY source of substrateVersion.
+// Shared by the single-shot path and the session-holding transport.
 
 let cachedCliVersionPromise: Promise<string | undefined> | null = null;
 
@@ -817,10 +824,16 @@ function runClaudeCli(args: string[], input: string, signal?: AbortSignal): Prom
 }
 
 /**
- * Single-shot call through `claude -p`. See the file header for every
- * flag's justification and every refuse-rather-than-substitute mechanism.
+ * Single-shot call through `claude -p`, OR — when `options.session` is
+ * set — one turn on a held session (see the file header's
+ * SESSION-HOLDING TRANSPORT section). See the file header for every
+ * flag's justification and every refuse-rather-than-substitute mechanism
+ * on the single-shot path.
  */
-export async function chat(options: ChatOptions): Promise<ChatReply> {
+export async function chat(options: ClaudeCliChatOptions): Promise<ChatReply> {
+  if (options.session) {
+    return chatOnSession(options.session, options);
+  }
   if (options.turns.length === 0) {
     throw new Error('claudeCli.chat() requires at least one turn');
   }
@@ -932,4 +945,188 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
   };
 }
 
-export const claudeCli = { PROVIDER, chat };
+/**
+ * `chat()`'s session branch — one turn on a held session rather than a
+ * fresh spawn. See the file header's SESSION-HOLDING TRANSPORT section
+ * for the mechanism; this function is deliberately small, reusing the
+ * single-shot path's own `contentToText` / `determinePrimaryModel` /
+ * `shapeUsage` / `resolveCliVersion` so the two paths report usage
+ * identically.
+ */
+async function chatOnSession(
+  session: ClaudeCliSessionHandle,
+  options: ClaudeCliChatOptions
+): Promise<ChatReply> {
+  if (options.turns.length === 0) {
+    throw new Error('claudeCli.chat() requires at least one turn');
+  }
+  if (options.turns.length > 1) {
+    // See ClaudeCliChatOptions's own doc comment: a held session already
+    // remembers everything before this call, unlike the stateless
+    // single-shot path this adapter otherwise uses.
+    throw new Error(
+      'claudeCli.chat(): when session is set, turns must carry exactly the ONE new message ' +
+        'for this round — the held session already remembers everything before it. Resending ' +
+        "prior history would duplicate it in the model's own context."
+    );
+  }
+  throwIfAborted(options.abortSignal);
+  if (options.apiKey != null) {
+    throw new Error(
+      "claudeCli.chat() does not accept apiKey — it always uses the CLI's own logged-in " +
+        'subscription session, never a supplied credential.'
+    );
+  }
+
+  const turn = await runSessionTurn({
+    session,
+    systemPrompt: options.systemPrompt,
+    message: contentToText(options.turns[0].content),
+    tools: [],
+    maxToolCalls: 0,
+    model: options.model,
+    signal: options.abortSignal,
+  });
+
+  const substrateVersion = await resolveCliVersion();
+  const { model, sawMultipleModels, breakdown } = determinePrimaryModel(
+    turn.usage,
+    turn.modelUsage
+  );
+  if (sawMultipleModels) {
+    console.warn(
+      `claudeCli.chat(): this call invoked more than one model — ${breakdown}. ` +
+        `TokenUsage.model reports only "${model}".`
+    );
+  }
+  const usageRecord = shapeUsage(turn.usage, model, substrateVersion);
+  await fireUsageHook(options.onUsage, usageRecord, 'claudeCli.chat');
+
+  return { content: turn.text, usage: usageRecord, stopReason: turn.stopReason };
+}
+
+/**
+ * REFUSES on this transport, naming precisely why. Tools run through the
+ * embedded MCP bridge as part of `claude`'s own agentic turn — the
+ * bridge answers a `tools/call` by running the caller's executor
+ * immediately and synchronously as part of that one turn. By the time a
+ * caller to execute separately — this contract's whole point — it has
+ * already been executed. There is no point in the exchange this
+ * function's return-before-execution shape could occupy on this
+ * transport, so it refuses rather than silently degrading into
+ * `chatWithToolLoop`'s behaviour under a different name.
+ * {@link chatWithToolLoop} is the shape this transport CAN honestly
+ * support: supply your executor up front, in `options.executor`.
+ */
+export async function chatWithTools(
+  _options: ClaudeCliChatWithToolsOptions
+): Promise<ChatWithToolsResult> {
+  throw new Error(
+    'claudeCli.chatWithTools() is not supported on this transport — tool calls run through an ' +
+      'embedded MCP server that claude itself invokes as part of its own turn, so there is no ' +
+      'point where a tool_use exists without already having been executed for a caller to run ' +
+      'separately. Use claudeCli.chatWithToolLoop() instead, with your executor supplied up front.'
+  );
+}
+
+/**
+ * Runs the caller's tools through `claude`'s own agentic loop, via the
+ * embedded MCP bridge (`mcp-bridge.ts`) named through `--mcp-config` on
+ * the held session's spawn. `maxIterations` becomes a tool-CALL budget
+ * enforced inside the bridge — once spent, a further call gets a
+ * "budget exhausted, answer now" result rather than reaching the
+ * executor, this transport's analogue of the API adapters' no-tools
+ * finalise call.
+ *
+ * `options.session` omitted: a throwaway session is opened and closed
+ * for this one call, so the result is self-contained like every other
+ * adapter's `chatWithToolLoop`. `options.session` supplied: the turn runs
+ * on that held session, and prompt-cache warmth + tool availability
+ * persist to the NEXT call on the same handle — see
+ * `ClaudeCliChatWithToolLoopOptions`'s own doc comment for the
+ * turns-is-only-the-new-message contract that comes with it.
+ */
+export async function chatWithToolLoop(
+  options: ClaudeCliChatWithToolLoopOptions
+): Promise<ClaudeCliChatWithToolLoopResult> {
+  if (options.turns.length === 0) {
+    throw new Error('claudeCli.chatWithToolLoop() requires at least one turn');
+  }
+  if (options.tools.length === 0) {
+    throw new Error('claudeCli.chatWithToolLoop() requires at least one tool');
+  }
+  if (options.turns.length > 1) {
+    throw new Error(
+      'claudeCli.chatWithToolLoop(): turns must carry exactly the ONE new message for this ' +
+        'round — a held session already remembers everything before it (and a throwaway one, ' +
+        'created when options.session is omitted, has nothing before it to need more than one ' +
+        'for). See ClaudeCliChatWithToolLoopOptions.'
+    );
+  }
+  throwIfAborted(options.abortSignal);
+  if (options.apiKey != null) {
+    throw new Error(
+      "claudeCli.chatWithToolLoop() does not accept apiKey — it always uses the CLI's own " +
+        'logged-in subscription session, never a supplied credential.'
+    );
+  }
+
+  const ownSession = !options.session;
+  const session = options.session ?? createSession();
+  const maxToolCalls = Math.max(1, options.maxIterations ?? 5);
+
+  try {
+    const turn = await runSessionTurn({
+      session,
+      systemPrompt: options.systemPrompt,
+      message: contentToText(options.turns[0].content),
+      tools: options.tools,
+      executor: options.executor,
+      maxToolCalls,
+      model: options.model,
+      signal: options.abortSignal,
+    });
+
+    const substrateVersion = await resolveCliVersion();
+    const { model, sawMultipleModels, breakdown } = determinePrimaryModel(
+      turn.usage,
+      turn.modelUsage
+    );
+    if (sawMultipleModels) {
+      console.warn(
+        `claudeCli.chatWithToolLoop(): this call invoked more than one model — ${breakdown}. ` +
+          `TokenUsage.model reports only "${model}".`
+      );
+    }
+    const usageRecord = shapeUsage(turn.usage, model, substrateVersion);
+    await fireUsageHook(options.onUsage, usageRecord, 'claudeCli.chatWithToolLoop');
+
+    return {
+      text: turn.text,
+      toolUses: turn.toolUses,
+      toolResults: turn.toolResults,
+      iterations: turn.assistantEventCount,
+      usage: usageRecord,
+      permissionDenials: turn.permissionDenials,
+    };
+  } finally {
+    // Always close a session THIS function created, whether the call
+    // above resolved or threw — never a session the caller supplied
+    // themselves, which is theirs to keep across the next call.
+    // Nothing left registered for SESSION_IDLE_TIMEOUT_MS to clean
+    // up later. Best-effort: a close failure here must not mask whatever
+    // the turn itself returned or threw.
+    if (ownSession) {
+      await closeSession(session).catch(() => {});
+    }
+  }
+}
+
+export const claudeCli = {
+  PROVIDER,
+  chat,
+  chatWithTools,
+  chatWithToolLoop,
+  createSession,
+  closeSession,
+};
