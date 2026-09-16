@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.27.1] — 2026-09-16
+
+**Wave 4 of 5, the last wave of the split replacing the withdrawn `#55` — fixes the abort-listener-outlives-a-resolved-turn bug that every prior wave (`#57`, `#61`) disclosed and deliberately deferred.**
+
+**The bug, precisely.** `session.ts`'s `runSessionTurn` registered its `AbortSignal` listener (`{ once: true }`) once per turn, but only ONE of the turn's four possible settlement paths (success via a `result` line, the per-turn watchdog firing, an abort firing, the process dying mid-turn) — the synchronous stdin-write-error path — ever removed it. A turn that resolved normally, or via the watchdog, left the listener ARMED against a session that might still be perfectly healthy. If the SAME `AbortSignal` fired again later — plausible for a caller reusing one `AbortController` across a request whose lifetime outlives a single turn — that stale listener fired `onAbort()` and killed an already-resolved, healthy session.
+
+**The fix.** A single `teardown()` closure, stored on `PendingTurn` (not just local to `runSessionTurn`'s own promise executor), that clears the watchdog AND removes the abort listener — called from every settlement path: the success path (`handleStreamLine`), the watchdog, `onAbort` itself, process death (`wireSessionEvents`' `onGone`), and the stdin-write-error path. One teardown point every path calls, rather than four places each separately (and previously, inconsistently) remembering to. Idempotent, so call order between paths never matters.
+
+**Proven non-vacuous, same discipline as the mcp-bridge auth fix and wave 2b's tool-arming fix**: the new regression test (`session.test.ts`, `abortSignal` describe block) was run against a temporarily neutered `teardown()` (the `removeEventListener` call commented out, uncommitted, never pushed) and failed for exactly the claimed reason — `child.kill` was called once when it should never have been — then reverted; `session.ts` is byte-identical to before that neuter except for the real fix.
+
+**This was never a hypothetical bug.** It was found, precisely, by applying the operator's own indivisibility test to `session.ts`'s turn-execution core during the reviewability-split conversation — tracing all four settlement paths together, rather than any one in isolation, is what surfaced it. See the estate's record of that conversation for the full account.
+
 ## [0.27.0] — 2026-09-16
 
 **Wave 3 of 5, replacing the withdrawn `#55` — `@verevoir/llm/claude-cli` gains `createSession`/`closeSession`, `chatWithToolLoop`, and `chatWithTools` on its public surface.** The first wave in this split that changes exported surface (hence minor, not patch) — everything up to this point (`mcp-bridge.ts` at 0.26.6, `env.ts` at 0.26.7, `session.ts` in two waves at 0.26.8/0.26.9) was a confirmed leaf with no caller on `main`. This wires those into `index.ts`:

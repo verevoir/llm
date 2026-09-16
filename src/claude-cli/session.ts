@@ -169,6 +169,21 @@ interface PendingTurn {
   reject: (err: unknown) => void;
   assistantEventCount: number;
   watchdog: ReturnType<typeof setTimeout>;
+  /** Removes the abort listener `runSessionTurn`'s promise executor
+   * registered, AND clears the watchdog — the single teardown point
+   * every settlement path must call: success (handleStreamLine, below),
+   * the watchdog firing, an abort firing, process death
+   * (wireSessionEvents' onGone), and the synchronous stdin-write-error
+   * path. WAVE 4 FIX: before this field existed, only the write-error
+   * path removed the abort listener — a turn that resolved via a normal
+   * result line or the watchdog left the listener ARMED against a
+   * session that might still be open, so a LATER abort() on a REUSED
+   * AbortController would incorrectly kill an already-healthy session.
+   * Idempotent — safe to call more than once (clearTimeout /
+   * removeEventListener are both no-ops the second time), so every path
+   * can call it unconditionally without checking who settled the turn
+   * first. */
+  teardown: () => void;
 }
 
 interface HeldSession {
@@ -403,7 +418,9 @@ function handleStreamLine(session: HeldSession, line: string): void {
   if (evt.type === 'result') {
     const pending = session.pending;
     session.pending = null;
-    clearTimeout(pending.watchdog);
+    // teardown() clears the watchdog AND removes the abort listener —
+    // see PendingTurn's own doc comment for the bug this fixes (wave 4).
+    pending.teardown();
     pending.resolve({ raw: evt, assistantEventCount: pending.assistantEventCount });
   }
 }
@@ -426,7 +443,7 @@ function wireSessionEvents(session: HeldSession): void {
     if (session.pending) {
       const pending = session.pending;
       session.pending = null;
-      clearTimeout(pending.watchdog);
+      pending.teardown();
       pending.reject(
         new Error(
           `claude-cli: session ${session.id}'s process ${reason} mid-turn — the turn's result ` +
@@ -779,8 +796,7 @@ export async function runSessionTurn(options: SessionTurnOptions): Promise<Sessi
       assistantEventCount: number;
     }>((resolve, reject) => {
       const watchdog = setTimeout(() => {
-        // KNOWN LIMITATION (see this commit's message / CHANGELOG): this
-        // path does not remove the abort listener below. Fixed in wave 4.
+        teardown();
         session.pending = null;
         void killHeld(session);
         HELD.delete(session.id);
@@ -796,8 +812,18 @@ export async function runSessionTurn(options: SessionTurnOptions): Promise<Sessi
       }, SESSION_TURN_TIMEOUT_MS);
       if (typeof watchdog.unref === 'function') watchdog.unref();
 
-      const onAbort = () => {
+      // THE WAVE 4 FIX — a single teardown point every settlement path
+      // calls, rather than four places each separately (and, before this,
+      // inconsistently) remembering to. See PendingTurn's own doc comment
+      // for the bug this closes. Idempotent, so every path below can call
+      // it unconditionally regardless of who settles the turn first.
+      const teardown = () => {
         clearTimeout(watchdog);
+        options.signal?.removeEventListener('abort', onAbort);
+      };
+
+      const onAbort = () => {
+        teardown();
         session.pending = null;
         void killHeld(session);
         HELD.delete(session.id);
@@ -811,18 +837,18 @@ export async function runSessionTurn(options: SessionTurnOptions): Promise<Sessi
       // subscribing is what catches that window; the entry-only
       // throwIfAbortedLocal call above only catches an abort that had
       // already happened before runSessionTurn was even called. This is
-      // a DIFFERENT bug from the KNOWN LIMITATION named above (that one
-      // is about the listener outliving a turn that resolved some other
-      // way; this one is about the listener not existing yet when an
-      // abort fires early). Both involve this same `onAbort`, but they
-      // are not the same defect.
+      // a DIFFERENT bug from the one `teardown` above fixes (that one is
+      // about the listener outliving a turn that resolved some other way;
+      // this one is about the listener not existing yet when an abort
+      // fires early). Both involve this same `onAbort`, but they are not
+      // the same defect.
       if (options.signal?.aborted) {
         onAbort();
         return;
       }
       options.signal?.addEventListener('abort', onAbort, { once: true });
 
-      session.pending = { resolve, reject, assistantEventCount: 0, watchdog };
+      session.pending = { resolve, reject, assistantEventCount: 0, watchdog, teardown };
 
       const line =
         JSON.stringify({ type: 'user', message: { role: 'user', content: options.message } }) +
@@ -830,12 +856,8 @@ export async function runSessionTurn(options: SessionTurnOptions): Promise<Sessi
       try {
         session.child.stdin.write(line);
       } catch (err) {
-        clearTimeout(watchdog);
+        teardown();
         session.pending = null;
-        // The one path in this wave that DOES remove the listener — see
-        // the KNOWN LIMITATION above for why this is not, on its own,
-        // the fix.
-        options.signal?.removeEventListener('abort', onAbort);
         reject(
           new Error(
             `claude-cli: could not write to held session ${session.id}'s stdin — ` +

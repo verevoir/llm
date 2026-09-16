@@ -608,13 +608,55 @@ describe('claude-cli session lifecycle (wave 2a)', () => {
       expect(child.kill).toHaveBeenCalledTimes(1);
     });
 
-    // NOT covered in this wave, deliberately: result-then-abort on a
-    // reused AbortController. See this file's commit message / the
-    // KNOWN LIMITATION comments in session.ts — that scenario currently
-    // DOES incorrectly kill the session, and the regression test proving
-    // both the bug and its fix lands in wave 4 of this split, alongside
-    // the fix itself, rather than being added here to document a defect
-    // this wave isn't fixing.
+    it('does NOT kill an already-resolved session when the same AbortController fires again afterward — the abort-listener-outlives-a-resolved-turn bug, fixed in wave 4', async () => {
+      const { child, emitLine } = fakeChild();
+      mockSpawn.mockImplementationOnce(() => child);
+      const session = createSession();
+      const controller = new AbortController();
+
+      // setImmediate, not a synchronous emitLine call — matching the
+      // established pattern elsewhere in this file (see 'reuses the same
+      // process for a second turn'): a synchronous emitLine here would
+      // race runSessionTurn's own async setup (getOrCreateSession's
+      // await, arming, the stdin write) and arrive before session.pending
+      // is armed, getting silently discarded by handleStreamLine's own
+      // 'no turn waiting' guard — not a defect in the fix, a fixture
+      // ordering issue the existing tests already avoid this same way.
+      setImmediate(() => emitLine({ type: 'result', result: 'done' }));
+      const result = await runSessionTurn({
+        session,
+        systemPrompt: 'sys',
+        message: 'a',
+        tools: [],
+        maxToolCalls: 0,
+        signal: controller.signal,
+      });
+      expect(result.text).toBe('done');
+
+      // The turn already resolved successfully via the normal result-line
+      // path. A LATER abort on the SAME controller must not reach back and
+      // kill the now-healthy session — before the fix, the abort listener
+      // stayed armed past a successful resolution (only the synchronous
+      // stdin-write-error path removed it), so this exact abort() would
+      // have called child.kill() on a session that had nothing wrong with
+      // it.
+      controller.abort(new Error('late abort, unrelated to the already-finished turn'));
+
+      expect(child.kill).not.toHaveBeenCalled();
+
+      // And the session must still be genuinely usable for a second turn —
+      // not just "not killed", but actually still serving.
+      setImmediate(() => emitLine({ type: 'result', result: 'second' }));
+      const r2 = await runSessionTurn({
+        session,
+        systemPrompt: 'sys',
+        message: 'b',
+        tools: [],
+        maxToolCalls: 0,
+      });
+      expect(r2.text).toBe('second');
+      expect(mockSpawn).toHaveBeenCalledTimes(1); // one process served both turns
+    });
   });
 
   describe('the confirmed real envelope shape', () => {
