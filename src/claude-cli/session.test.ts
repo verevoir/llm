@@ -1,4 +1,6 @@
 import { EventEmitter } from 'node:events';
+import { readFile } from 'node:fs/promises';
+import { createConnection } from 'node:net';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mockSpawn = vi.fn();
@@ -48,6 +50,61 @@ function fakeChild() {
     emitLine: (obj: unknown) => child.stdout.emit('data', Buffer.from(JSON.stringify(obj) + '\n')),
     emitRaw: (text: string) => child.stdout.emit('data', Buffer.from(text)),
   };
+}
+
+/** Recovers the REAL (unmocked) bridge's port + shared token the same
+ * way the actual generated shim does — by reading the `--mcp-config`
+ * JSON `createToolBridge` writes to disk, not from anything `ToolBridge`
+ * exposes directly. Mirrors `mcp-bridge.test.ts`'s own `bridgePort` /
+ * `bridgeToken` helpers (duplicated rather than imported — those are
+ * private to that test file). */
+async function bridgeConnectionInfo(bridge: {
+  mcpConfigPath: string;
+}): Promise<{ port: number; token: string }> {
+  const configRaw = await readFile(bridge.mcpConfigPath, 'utf8');
+  const config = JSON.parse(configRaw) as {
+    mcpServers: Record<string, { args: string[]; env?: Record<string, string> }>;
+  };
+  const entry = config.mcpServers['llm-tools'];
+  const script = await readFile(entry.args[0], 'utf8');
+  const match = script.match(/const PORT = (\d+);/);
+  if (!match) throw new Error('test setup: could not recover PORT from the generated shim');
+  const token = entry.env?.LLM_BRIDGE_TOKEN;
+  if (!token) throw new Error('test setup: could not recover LLM_BRIDGE_TOKEN from mcp-config');
+  return { port: Number(match[1]), token };
+}
+
+/** Sends one newline-delimited `{id, name, arguments, token}` request
+ * over a FRESH real socket to the bridge's real loopback port — exactly
+ * what the generated shim does on a genuine `tools/call` from `claude`
+ * — and returns the parsed response line. Same wire shape
+ * `mcp-bridge.test.ts`'s own `sendToolCall` exercises standalone. */
+function sendRealToolCall(
+  port: number,
+  request: { id: string; name: string; arguments: Record<string, unknown>; token: string }
+): Promise<{
+  id: string;
+  result?: { content: { type: string; text: string }[]; isError: boolean };
+}> {
+  return new Promise((resolve, reject) => {
+    const socket = createConnection({ port, host: '127.0.0.1' }, () => {
+      socket.write(JSON.stringify(request) + '\n');
+    });
+    let buf = '';
+    socket.on('data', (chunk) => {
+      buf += chunk.toString();
+      const nl = buf.indexOf('\n');
+      if (nl >= 0) {
+        try {
+          resolve(JSON.parse(buf.slice(0, nl)));
+        } catch (err) {
+          reject(err);
+        }
+        socket.end();
+      }
+    });
+    socket.on('error', reject);
+  });
 }
 
 const ECHO_TOOL: ToolDef = {
@@ -402,6 +459,91 @@ describe('claude-cli session lifecycle (wave 2a)', () => {
       // Settle the first turn so it doesn't leak an unhandled rejection warning.
       child.emit('close', 1, null);
       await expect(first).rejects.toThrow();
+    });
+  });
+
+  describe('tool-arming — the real embedded bridge, driven end-to-end', () => {
+    // A prior review REJECTED this wave: every runSessionTurn call in
+    // this file passed tools: [] — the executor-required guard
+    // (session.ts:746), the bridge.arm() call (:771), and the real
+    // armed.toolUses/toolResults return (:877-878) were all completely
+    // unexercised, and undisclosed as a deliberate gap. This closes it —
+    // not with a mock, but by driving the REAL createToolBridge the same
+    // way the 'concurrent first use' tests above already rely on it
+    // being real, and sending a genuine tools/call over its actual
+    // loopback socket, exactly as mcp-bridge.test.ts's own sendToolCall
+    // does standalone.
+    it('arms the real bridge via runSessionTurn, forwards a genuine tools/call through it to the caller executor, and returns the populated toolUses/toolResults', async () => {
+      const { child, emitLine } = fakeChild();
+      mockSpawn.mockImplementationOnce(() => child);
+      const session = createSession();
+
+      // getOrCreateSession first, directly, purely to get a handle on the
+      // REAL (unmocked) ToolBridge createToolBridge builds. runSessionTurn
+      // below reuses this EXACT session (identical binding) rather than
+      // spawning a second one — this is how the test reaches the bridge
+      // runSessionTurn itself is about to arm.
+      const held = await getOrCreateSession(session, {
+        tools: [ECHO_TOOL],
+        systemPrompt: 'sys',
+        model: undefined,
+      });
+      expect(held.bridge).not.toBeNull();
+      const bridge = held.bridge!;
+      const { port, token } = await bridgeConnectionInfo(bridge);
+
+      // Wrap arm() so this test knows the EXACT moment runSessionTurn's
+      // own call arms the bridge, rather than racing a real TCP connection
+      // against an internal step this test has no other way to observe.
+      const originalArm = bridge.arm.bind(bridge);
+      let armedSignal!: () => void;
+      const armed = new Promise<void>((resolve) => {
+        armedSignal = resolve;
+      });
+      bridge.arm = (executor, maxToolCalls) => {
+        const state = originalArm(executor, maxToolCalls);
+        armedSignal();
+        return state;
+      };
+
+      const seenByExecutor: unknown[] = [];
+      const turnPromise = runSessionTurn({
+        session,
+        systemPrompt: 'sys',
+        message: 'call the tool',
+        tools: [ECHO_TOOL],
+        executor: async (use) => {
+          seenByExecutor.push(use);
+          return `echoed: ${JSON.stringify(use.input)}`;
+        },
+        maxToolCalls: 5,
+      });
+
+      await armed;
+
+      // This is what the generated shim would send on a genuine tools/call
+      // from `claude` — proving the bridge armed by THIS runSessionTurn
+      // call is the SAME live bridge that answers it, not a second one.
+      const callResp = await sendRealToolCall(port, {
+        id: 'call-1',
+        name: 'echo',
+        arguments: { text: 'hello' },
+        token,
+      });
+      expect(callResp.result?.isError).toBe(false);
+      expect(callResp.result?.content[0].text).toBe('echoed: {"text":"hello"}');
+
+      // Now let the turn settle, as an ordinary stream-json result would.
+      emitLine({ type: 'result', result: 'done' });
+      const turnResult = await turnPromise;
+
+      expect(seenByExecutor).toEqual([{ id: 'call-1', name: 'echo', input: { text: 'hello' } }]);
+      expect(turnResult.toolUses).toEqual([
+        { id: 'call-1', name: 'echo', input: { text: 'hello' } },
+      ]);
+      expect(turnResult.toolResults).toEqual([
+        { toolUseId: 'call-1', content: 'echoed: {"text":"hello"}', isError: false },
+      ]);
     });
   });
 
