@@ -1,4 +1,4 @@
-import { EventEmitter } from 'node:events';
+import { EventEmitter, getEventListeners } from 'node:events';
 import { readFile } from 'node:fs/promises';
 import { createConnection } from 'node:net';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -308,6 +308,47 @@ describe('claude-cli session lifecycle (wave 2a)', () => {
       await expect(closeSession(session)).resolves.toBeUndefined();
       await expect(closeSession(session)).resolves.toBeUndefined(); // idempotent
     });
+
+    it("closing a session with a turn IN FLIGHT removes that turn's abort listener too, not just its watchdog — the killHeld leak a review caught", async () => {
+      // A prior review REJECTED this wave: killHeld (called by
+      // closeSession, among others) only ever did
+      // `clearTimeout(pending.watchdog)` on a pending turn, never
+      // `pending.teardown()` — so the SAME abort-listener leak
+      // runSessionTurn's own settlement paths were fixed for earlier in
+      // this wave was still reachable from OUTSIDE runSessionTurn,
+      // through closeSession. This proves it's actually gone — not by
+      // inferring it from child.kill's call count (closeSession kills
+      // the process either way), but by asking node:events directly
+      // whether the listener is still attached to the signal.
+      const { child, written } = fakeChild();
+      mockSpawn.mockImplementationOnce(() => child);
+      const session = createSession();
+      const controller = new AbortController();
+
+      const pending = runSessionTurn({
+        session,
+        systemPrompt: 'sys',
+        message: 'a',
+        tools: [],
+        maxToolCalls: 0,
+        signal: controller.signal,
+      });
+      // Let the turn's async setup actually land — stdin written,
+      // session.pending set, abort listener registered — before killing
+      // the session out from under it. Mirrors this file's existing
+      // setImmediate-based "let async setup land first" pattern (see
+      // 'reuses the same process for a second turn').
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(written).toHaveLength(1);
+      expect(getEventListeners(controller.signal, 'abort')).toHaveLength(1);
+
+      await closeSession(session);
+      await expect(pending).rejects.toThrow(/closed\/evicted while a turn was in flight/);
+      expect(child.kill).toHaveBeenCalledTimes(1);
+
+      // THE ACTUAL FIX BEING PROVEN.
+      expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
+    });
   });
 
   describe('turn execution (wave 2b)', () => {
@@ -608,13 +649,55 @@ describe('claude-cli session lifecycle (wave 2a)', () => {
       expect(child.kill).toHaveBeenCalledTimes(1);
     });
 
-    // NOT covered in this wave, deliberately: result-then-abort on a
-    // reused AbortController. See this file's commit message / the
-    // KNOWN LIMITATION comments in session.ts — that scenario currently
-    // DOES incorrectly kill the session, and the regression test proving
-    // both the bug and its fix lands in wave 4 of this split, alongside
-    // the fix itself, rather than being added here to document a defect
-    // this wave isn't fixing.
+    it('does NOT kill an already-resolved session when the same AbortController fires again afterward — the abort-listener-outlives-a-resolved-turn bug, fixed in wave 4', async () => {
+      const { child, emitLine } = fakeChild();
+      mockSpawn.mockImplementationOnce(() => child);
+      const session = createSession();
+      const controller = new AbortController();
+
+      // setImmediate, not a synchronous emitLine call — matching the
+      // established pattern elsewhere in this file (see 'reuses the same
+      // process for a second turn'): a synchronous emitLine here would
+      // race runSessionTurn's own async setup (getOrCreateSession's
+      // await, arming, the stdin write) and arrive before session.pending
+      // is armed, getting silently discarded by handleStreamLine's own
+      // 'no turn waiting' guard — not a defect in the fix, a fixture
+      // ordering issue the existing tests already avoid this same way.
+      setImmediate(() => emitLine({ type: 'result', result: 'done' }));
+      const result = await runSessionTurn({
+        session,
+        systemPrompt: 'sys',
+        message: 'a',
+        tools: [],
+        maxToolCalls: 0,
+        signal: controller.signal,
+      });
+      expect(result.text).toBe('done');
+
+      // The turn already resolved successfully via the normal result-line
+      // path. A LATER abort on the SAME controller must not reach back and
+      // kill the now-healthy session — before the fix, the abort listener
+      // stayed armed past a successful resolution (only the synchronous
+      // stdin-write-error path removed it), so this exact abort() would
+      // have called child.kill() on a session that had nothing wrong with
+      // it.
+      controller.abort(new Error('late abort, unrelated to the already-finished turn'));
+
+      expect(child.kill).not.toHaveBeenCalled();
+
+      // And the session must still be genuinely usable for a second turn —
+      // not just "not killed", but actually still serving.
+      setImmediate(() => emitLine({ type: 'result', result: 'second' }));
+      const r2 = await runSessionTurn({
+        session,
+        systemPrompt: 'sys',
+        message: 'b',
+        tools: [],
+        maxToolCalls: 0,
+      });
+      expect(r2.text).toBe('second');
+      expect(mockSpawn).toHaveBeenCalledTimes(1); // one process served both turns
+    });
   });
 
   describe('the confirmed real envelope shape', () => {
@@ -856,6 +939,56 @@ describe('claude-cli session lifecycle (wave 2a)', () => {
       expect(children[0].child.kill).toHaveBeenCalledTimes(1);
       // The most recently used ones are still live.
       expect(children[children.length - 1].child.kill).not.toHaveBeenCalled();
+    });
+
+    it("evicting a session over capacity while it has a turn IN FLIGHT removes that turn's abort listener too — the same killHeld leak as closeSession's, reached via eviction instead", async () => {
+      // `victim` is created FIRST and never touched again after its own
+      // turn starts — the least-recently-used entry once SESSION_MAX_HELD
+      // more sessions land after it, which is exactly what
+      // evictOverCapacity picks, with NO check for an in-flight turn.
+      const { child: victimChild, written } = fakeChild();
+      mockSpawn.mockImplementationOnce(() => victimChild);
+      const victim = createSession();
+      const controller = new AbortController();
+      const pendingTurn = runSessionTurn({
+        session: victim,
+        systemPrompt: 'victim',
+        message: 'a',
+        tools: [],
+        maxToolCalls: 0,
+        signal: controller.signal,
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(written).toHaveLength(1);
+      expect(getEventListeners(controller.signal, 'abort')).toHaveLength(1);
+
+      // Fill up to (but not over) the cap with idle sessions — `victim`
+      // stays the LRU-oldest throughout, since none of these touch it.
+      for (let i = 0; i < SESSION_MAX_HELD - 1; i++) {
+        const c = fakeChild();
+        mockSpawn.mockImplementationOnce(() => c.child);
+        await getOrCreateSession(createSession(), {
+          tools: [],
+          systemPrompt: `idle ${i}`,
+          model: undefined,
+        });
+      }
+
+      // One more pushes HELD over capacity — evictOverCapacity picks the
+      // LRU-oldest (victim) regardless of its in-flight turn.
+      const overflow = fakeChild();
+      mockSpawn.mockImplementationOnce(() => overflow.child);
+      await getOrCreateSession(createSession(), {
+        tools: [],
+        systemPrompt: 'overflow',
+        model: undefined,
+      });
+
+      expect(victimChild.kill).toHaveBeenCalledTimes(1); // confirms victim really was the one evicted
+      await expect(pendingTurn).rejects.toThrow(/closed\/evicted while a turn was in flight/);
+
+      // THE ACTUAL FIX BEING PROVEN.
+      expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
     });
   });
 });
