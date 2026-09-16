@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.26.8] — 2026-09-16
+
+**Wave 2 of 4, replacing the withdrawn omnibus `#55` (see `0.26.7`'s entry for the split's account). New (internal, no public behaviour change): `claude-cli`'s held-session core, `session.ts`.** `createSession`/`closeSession`, the opaque `ClaudeCliSessionHandle`, dead-handle safety (a handle whose process died/was evicted/was never used starts fresh — the same shape as a 401), the two independent resource-policy bounds (`SESSION_IDLE_TIMEOUT_MS` measuring the gap between turns, never a turn's own length; `SESSION_MAX_HELD`, LRU-evicted), the per-turn watchdog (`SESSION_TURN_TIMEOUT_MS`), and `runSessionTurn` — one process per handle, kept alive across turns, tools exposed through the already-shipped (`0.26.6`) embedded MCP bridge without lifting the built-in-tool denial. Full mechanism and verification history in the file's own header.
+
+**A confirmed leaf, same pattern the MCP bridge landed in at `0.26.6`: nothing on `main` calls anything in this file yet.** `session.ts` imports `env.ts` (`0.26.7`) and the already-shipped `mcp-bridge.ts` (`0.26.6`); nothing imports `session.ts` until wave 3 wires it into `index.ts`. Reviewable and testable entirely on its own — `session.test.ts` exercises it directly, with no caller required.
+
+**A known, disclosed limitation in THIS wave, fixed in the next one — not silently shipped, not silently avoided.** The abort listener `runSessionTurn` attaches is only explicitly removed on the synchronous stdin-write-error path; a turn that resolves via a normal result line or times out leaves it armed against a session that may still be open, so a later abort on a reused `AbortController` would incorrectly kill an already-healthy session. This is the real, original shape of the bug historically fixed as `#53` — landing it here unfixed, with the limitation stated plainly in the file header and at each affected call site, and the fix as its own following wave with its own regression test, rather than folding the fix into this wave the way the withdrawn `#55` did (the exact `pull-requests-carry-what-why-tests` finding that got it rejected: an unrelated bugfix mixed into a feature PR).
+
 ## [0.26.7] — 2026-09-16
 
 **Internal-only refactor, no public behaviour or export change: `claude-cli`'s env allowlist (`ALLOWED_ENV_VARS`/`allowedEnv`/`CLAUDE_CLI_CREDENTIAL_ENV_VAR`) and the `PROVIDER` constant moved from `index.ts` into a new `env.ts`.** Every doc comment carried across verbatim; `index.ts` re-exports all four names under the exact same identifiers, so `@verevoir/llm/claude-cli`'s existing consumers (including this repo's own `chat.test.ts`, unchanged) see no difference.
