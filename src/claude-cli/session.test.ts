@@ -12,8 +12,10 @@ import {
   createSession,
   getOrCreateSession,
   resetClaudeCliSessionsForTests,
+  runSessionTurn,
   SESSION_IDLE_TIMEOUT_MS,
   SESSION_MAX_HELD,
+  SESSION_TURN_TIMEOUT_MS,
 } from './session.js';
 import type { ToolDef } from '../index.js';
 
@@ -44,6 +46,7 @@ function fakeChild() {
     child,
     written,
     emitLine: (obj: unknown) => child.stdout.emit('data', Buffer.from(JSON.stringify(obj) + '\n')),
+    emitRaw: (text: string) => child.stdout.emit('data', Buffer.from(text)),
   };
 }
 
@@ -250,7 +253,429 @@ describe('claude-cli session lifecycle (wave 2a)', () => {
     });
   });
 
+  describe('turn execution (wave 2b)', () => {
+    it('writes the turn as a stream-json user message line', async () => {
+      const { child, written, emitLine } = fakeChild();
+      mockSpawn.mockImplementationOnce(() => {
+        setImmediate(() => emitLine({ type: 'result', result: 'ok' }));
+        return child;
+      });
+      const session = createSession();
+
+      await runSessionTurn({
+        session,
+        systemPrompt: 'sys',
+        message: 'hello',
+        tools: [],
+        maxToolCalls: 0,
+      });
+
+      expect(JSON.parse(written[0])).toEqual({
+        type: 'user',
+        message: { role: 'user', content: 'hello' },
+      });
+    });
+
+    it('reuses the same process for a second turn on the same handle', async () => {
+      const { child, emitLine } = fakeChild();
+      mockSpawn.mockImplementationOnce(() => child);
+      const session = createSession();
+
+      setImmediate(() => emitLine({ type: 'result', result: 'first' }));
+      const r1 = await runSessionTurn({
+        session,
+        systemPrompt: 'sys',
+        message: 'a',
+        tools: [],
+        maxToolCalls: 0,
+      });
+      setImmediate(() => emitLine({ type: 'result', result: 'second' }));
+      const r2 = await runSessionTurn({
+        session,
+        systemPrompt: 'sys',
+        message: 'b',
+        tools: [],
+        maxToolCalls: 0,
+      });
+
+      expect(r1.text).toBe('first');
+      expect(r2.text).toBe('second');
+      expect(mockSpawn).toHaveBeenCalledTimes(1); // one process served both turns
+    });
+
+    it('counts assistant stream events before the terminal result as the iteration proxy', async () => {
+      const { child, emitLine } = fakeChild();
+      mockSpawn.mockImplementationOnce(() => {
+        setImmediate(() => {
+          emitLine({ type: 'assistant' });
+          emitLine({ type: 'assistant' });
+          emitLine({ type: 'result', result: 'done' });
+        });
+        return child;
+      });
+      const session = createSession();
+
+      const r = await runSessionTurn({
+        session,
+        systemPrompt: 'sys',
+        message: 'a',
+        tools: [],
+        maxToolCalls: 0,
+      });
+
+      expect(r.assistantEventCount).toBe(2);
+    });
+
+    it('ignores a malformed stream-json line rather than failing the turn', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const { child, emitRaw, emitLine } = fakeChild();
+      mockSpawn.mockImplementationOnce(() => {
+        setImmediate(() => {
+          emitRaw('not json at all\n');
+          emitLine({ type: 'result', result: 'ok' });
+        });
+        return child;
+      });
+      const session = createSession();
+
+      const r = await runSessionTurn({
+        session,
+        systemPrompt: 'sys',
+        message: 'a',
+        tools: [],
+        maxToolCalls: 0,
+      });
+
+      expect(r.text).toBe('ok');
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('not valid'));
+      warn.mockRestore();
+    });
+
+    it('throws when the terminal envelope reports is_error: true', async () => {
+      const { child, emitLine } = fakeChild();
+      mockSpawn.mockImplementationOnce(() => {
+        setImmediate(() =>
+          emitLine({ type: 'result', is_error: true, subtype: 'error_max_turns', result: 'nope' })
+        );
+        return child;
+      });
+      const session = createSession();
+
+      await expect(
+        runSessionTurn({ session, systemPrompt: 'sys', message: 'a', tools: [], maxToolCalls: 0 })
+      ).rejects.toThrow(/is_error: true.*nope/);
+    });
+
+    it('a process dying WHILE a turn is pending rejects that turn, rather than hanging', async () => {
+      const { child } = fakeChild();
+      mockSpawn.mockImplementationOnce(() => child);
+      const session = createSession();
+
+      const pending = runSessionTurn({
+        session,
+        systemPrompt: 'sys',
+        message: 'a',
+        tools: [],
+        maxToolCalls: 0,
+      });
+      setImmediate(() => child.emit('close', 1, null));
+
+      await expect(pending).rejects.toThrow(/mid-turn/);
+    });
+
+    it('refuses a second turn on a handle that already has one in flight', async () => {
+      const { child } = fakeChild();
+      mockSpawn.mockImplementationOnce(() => child);
+      const session = createSession();
+
+      const first = runSessionTurn({
+        session,
+        systemPrompt: 'sys',
+        message: 'a',
+        tools: [],
+        maxToolCalls: 0,
+      });
+      await expect(
+        runSessionTurn({ session, systemPrompt: 'sys', message: 'b', tools: [], maxToolCalls: 0 })
+      ).rejects.toThrow(/already has a turn in flight/);
+
+      // Settle the first turn so it doesn't leak an unhandled rejection warning.
+      child.emit('close', 1, null);
+      await expect(first).rejects.toThrow();
+    });
+  });
+
+  describe('the per-turn watchdog', () => {
+    it('kills the process and refuses rather than hanging when no terminal result event ever arrives', async () => {
+      vi.useFakeTimers();
+      const { child } = fakeChild();
+      mockSpawn.mockImplementationOnce(() => child);
+      const session = createSession();
+
+      const pending = runSessionTurn({
+        session,
+        systemPrompt: 'sys',
+        message: 'a',
+        tools: [],
+        maxToolCalls: 0,
+      });
+      // Nothing ever arrives on stdout for this turn.
+      const assertion = expect(pending).rejects.toThrow(/timed out/);
+      await vi.advanceTimersByTimeAsync(SESSION_TURN_TIMEOUT_MS + 1);
+      await assertion;
+      expect(child.kill).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('abortSignal', () => {
+    it('throws the signal reason before spawning, when already aborted at entry', async () => {
+      const controller = new AbortController();
+      controller.abort(new Error('budget exceeded'));
+      const session = createSession();
+
+      await expect(
+        runSessionTurn({
+          session,
+          systemPrompt: 'sys',
+          message: 'a',
+          tools: [],
+          maxToolCalls: 0,
+          signal: controller.signal,
+        })
+      ).rejects.toThrow('budget exceeded');
+      expect(mockSpawn).not.toHaveBeenCalled();
+    });
+
+    it('kills the held process and rejects with the signal reason when aborted mid-turn', async () => {
+      const { child } = fakeChild();
+      mockSpawn.mockImplementationOnce(() => child);
+      const session = createSession();
+      const controller = new AbortController();
+
+      const pending = runSessionTurn({
+        session,
+        systemPrompt: 'sys',
+        message: 'a',
+        tools: [],
+        maxToolCalls: 0,
+        signal: controller.signal,
+      });
+      controller.abort(new Error('aborted mid-call'));
+
+      await expect(pending).rejects.toThrow('aborted mid-call');
+      expect(child.kill).toHaveBeenCalledTimes(1);
+    });
+
+    // NOT covered in this wave, deliberately: result-then-abort on a
+    // reused AbortController. See this file's commit message / the
+    // KNOWN LIMITATION comments in session.ts — that scenario currently
+    // DOES incorrectly kill the session, and the regression test proving
+    // both the bug and its fix lands in wave 4 of this split, alongside
+    // the fix itself, rather than being added here to document a defect
+    // this wave isn't fixing.
+  });
+
+  describe('the confirmed real envelope shape', () => {
+    // Taken, field-for-field, from a real operator-run invocation (see
+    // session.ts's WIRE-SHAPE VERIFICATION HISTORY, above the
+    // SESSION_TURN_TIMEOUT_MS declaration) that failed on expired OAuth.
+    // Confirms two things at once: unmodeled fields don't break parsing,
+    // and is_error — never subtype, which reads "success" right alongside
+    // it — is what this file treats as the failure signal.
+    const REAL_AUTH_FAILURE_ENVELOPE = {
+      duration_api_ms: 0,
+      stop_reason: 'stop_sequence',
+      session_id: '71523995-3e20-4996-9149-7f41a76fa5a5',
+      total_cost_usd: 0,
+      usage: {
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+      },
+      modelUsage: {},
+      permission_denials: [],
+      terminal_reason: 'api_error',
+      subagent_stats: { spawned: 0 },
+      is_error: true,
+      num_turns: 1,
+      subtype: 'success',
+      api_error_status: null,
+      result: 'Failed to authenticate: OAuth session expired and could not be refreshed',
+      type: 'result',
+      duration_ms: 430,
+      uuid: 'c321f6ed-ffa8-41b1-bae5-baa548d3940d',
+      queued_turn_count: 0,
+      result_index: 0,
+    };
+
+    it('throws on is_error:true even though subtype reads "success" — subtype is never the failure signal', async () => {
+      const { child, emitLine } = fakeChild();
+      mockSpawn.mockImplementationOnce(() => {
+        setImmediate(() => emitLine(REAL_AUTH_FAILURE_ENVELOPE));
+        return child;
+      });
+      const session = createSession();
+
+      await expect(
+        runSessionTurn({ session, systemPrompt: 'sys', message: 'a', tools: [], maxToolCalls: 0 })
+      ).rejects.toThrow(/is_error: true.*Failed to authenticate/);
+    });
+
+    it('does not choke on the unmodeled fields a real envelope carries alongside the ones this file reads', async () => {
+      const { child, emitLine } = fakeChild();
+      mockSpawn.mockImplementationOnce(() => {
+        setImmediate(() =>
+          emitLine({ ...REAL_AUTH_FAILURE_ENVELOPE, is_error: false, result: 'ok' })
+        );
+        return child;
+      });
+      const session = createSession();
+
+      const r = await runSessionTurn({
+        session,
+        systemPrompt: 'sys',
+        message: 'a',
+        tools: [],
+        maxToolCalls: 0,
+      });
+
+      expect(r.text).toBe('ok');
+      expect(r.stopReason).toBe('stop_sequence');
+    });
+  });
+
+  describe('permissionDenials', () => {
+    it('is an empty array when the envelope has no permission_denials field at all', async () => {
+      const { child, emitLine } = fakeChild();
+      mockSpawn.mockImplementationOnce(() => {
+        setImmediate(() => emitLine({ type: 'result', result: 'ok' }));
+        return child;
+      });
+      const session = createSession();
+
+      const r = await runSessionTurn({
+        session,
+        systemPrompt: 'sys',
+        message: 'a',
+        tools: [],
+        maxToolCalls: 0,
+      });
+
+      expect(r.permissionDenials).toEqual([]);
+    });
+
+    it('keeps a populated entry raw and extracts a best-effort toolName — shape is UNCONFIRMED, never seen non-empty on a real invocation', async () => {
+      const { child, emitLine } = fakeChild();
+      const denial = { tool_name: 'Bash', reason: 'not allowed in this session' };
+      mockSpawn.mockImplementationOnce(() => {
+        setImmediate(() =>
+          emitLine({ type: 'result', result: 'ok', permission_denials: [denial] })
+        );
+        return child;
+      });
+      const session = createSession();
+
+      const r = await runSessionTurn({
+        session,
+        systemPrompt: 'sys',
+        message: 'a',
+        tools: [],
+        maxToolCalls: 0,
+      });
+
+      expect(r.permissionDenials).toEqual([{ raw: denial, toolName: 'Bash' }]);
+    });
+
+    it('leaves toolName undefined — never guessed — when no candidate key holds a string', async () => {
+      const { child, emitLine } = fakeChild();
+      const denial = { code: 'PERMISSION_DENIED' };
+      mockSpawn.mockImplementationOnce(() => {
+        setImmediate(() =>
+          emitLine({ type: 'result', result: 'ok', permission_denials: [denial] })
+        );
+        return child;
+      });
+      const session = createSession();
+
+      const r = await runSessionTurn({
+        session,
+        systemPrompt: 'sys',
+        message: 'a',
+        tools: [],
+        maxToolCalls: 0,
+      });
+
+      expect(r.permissionDenials).toEqual([{ raw: denial, toolName: undefined }]);
+    });
+
+    it('does not throw on a populated permission_denials — surfaced as data, per the is_error-only failure signal', async () => {
+      const { child, emitLine } = fakeChild();
+      mockSpawn.mockImplementationOnce(() => {
+        setImmediate(() =>
+          emitLine({
+            type: 'result',
+            result: 'ok',
+            is_error: false,
+            permission_denials: [{ toolName: 'Bash' }],
+          })
+        );
+        return child;
+      });
+      const session = createSession();
+
+      await expect(
+        runSessionTurn({ session, systemPrompt: 'sys', message: 'a', tools: [], maxToolCalls: 0 })
+      ).resolves.toMatchObject({ text: 'ok' });
+    });
+  });
+
   describe('bounds', () => {
+    it("does not evict a session while a turn is still in flight, even past the idle timeout — only the per-turn watchdog governs a turn's own length", async () => {
+      vi.useFakeTimers();
+      const { child, emitLine } = fakeChild();
+      mockSpawn.mockImplementationOnce(() => child);
+      const session = createSession();
+
+      const pending = runSessionTurn({
+        session,
+        systemPrompt: 'sys',
+        message: 'a',
+        tools: [],
+        maxToolCalls: 0,
+      });
+      // Advance well past the idle timeout while the turn is still pending —
+      // a long single turn must stay safe; only a long GAP between turns
+      // should ever trip the idle timer.
+      await vi.advanceTimersByTimeAsync(SESSION_IDLE_TIMEOUT_MS + 1);
+      expect(child.kill).not.toHaveBeenCalled();
+
+      emitLine({ type: 'result', result: 'done' });
+      const r = await pending;
+      expect(r.text).toBe('done');
+    });
+
+    it('resumes the idle countdown only once a turn settles, so a gap AFTER that point does evict', async () => {
+      vi.useFakeTimers();
+      const { child, emitLine } = fakeChild();
+      mockSpawn.mockImplementationOnce(() => child);
+      const session = createSession();
+
+      const p1 = runSessionTurn({
+        session,
+        systemPrompt: 'sys',
+        message: 'a',
+        tools: [],
+        maxToolCalls: 0,
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      emitLine({ type: 'result', result: 'first' });
+      await p1;
+
+      await vi.advanceTimersByTimeAsync(SESSION_IDLE_TIMEOUT_MS + 1);
+      expect(child.kill).toHaveBeenCalledTimes(1);
+    });
+
     it('kills an idle session after SESSION_IDLE_TIMEOUT_MS and respawns fresh on the next use', async () => {
       vi.useFakeTimers();
       const first = fakeChild();

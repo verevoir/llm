@@ -130,7 +130,9 @@ import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import type { ToolDef } from '../index.js';
 import { allowedEnv } from './env.js';
-import { createToolBridge, type ToolBridge } from './mcp-bridge.js';
+import { createToolBridge, type ArmedTurnState, type ToolBridge } from './mcp-bridge.js';
+import type { BridgeToolResult } from './mcp-bridge.js';
+import type { ToolExecutor, ToolUse } from '../index.js';
 
 /** An opaque handle to a held `claude` session — see index.ts's file
  * header (wave 3) for the full contract. Carries nothing but an id:
@@ -559,4 +561,322 @@ export async function getOrCreateSession(
   } finally {
     INITIALIZING.delete(handle.id);
   }
+}
+
+/** How long a single turn waits for a terminal `result` event before
+ * the held process is killed and the turn refuses. A wire shape this
+ * repository has not independently confirmed must fail loudly, not
+ * hang — see this section's CONFIRMED bullets below for what real
+ * operator-run invocations have actually shown.
+ *
+ * ══════════════════════════════════════════════════════════════════
+ * WIRE-SHAPE VERIFICATION HISTORY — three real operator-run probes.
+ * ══════════════════════════════════════════════════════════════════
+ *
+ * A SECOND PROBE (the first to run to completion, though it failed on
+ * expired OAuth rather than reaching a tool call) CONFIRMED two of this
+ * file's most load-bearing assumptions, by direct observation rather
+ * than documentation:
+ *
+ *   CONFIRMED: one process serves MULTIPLE turns. Two
+ *   `{"type":"result",...}` lines appeared on the same stdout stream,
+ *   sharing one `session_id`, distinguished only by `result_index: 0`
+ *   then `result_index: 1` — a single `claude` invocation, one exit
+ *   code for the whole run, no process exit between the two turns.
+ *
+ *   CONFIRMED: the terminal `result` line's shape matches
+ *   {@link ClaudeCliStreamResultEnvelope} field-for-field — `type`,
+ *   `result`, `is_error`, `subtype`, `stop_reason`, `usage`,
+ *   `modelUsage` were all present, alongside several unmodeled fields
+ *   that this file correctly ignores rather than choking on.
+ *
+ *   A SHARP EDGE THIS RUN SURFACED, ALREADY HANDLED CORRECTLY: the
+ *   observed envelope had `"subtype":"success"` sitting ALONGSIDE
+ *   `"is_error":true`. `subtype` describes how the request/response
+ *   CYCLE ended, not whether the CONTENT is an error — this file's own
+ *   error check (below, in `runSessionTurn`) already reads `is_error`,
+ *   never `subtype`.
+ *
+ *   STILL GENUINELY OPEN from this run: the failure was authentication,
+ *   arriving IN-BAND on stdout's own `result` field, with stderr EMPTY —
+ *   a live illustration of why this file never trusts stderr or exit
+ *   code alone. No model call ever reached the point of deciding
+ *   whether to invoke a tool.
+ *
+ * A THIRD PROBE, authenticated and run to completion, with
+ * `--disallowedTools "*"` and a turn that explicitly asked the model to
+ * ACTUALLY INVOKE Bash and show the raw output — the test the first two
+ * runs were missing. Three turns, one process, one `session_id`,
+ * `result_index: 0, 1, 2` — the multi-turn claim holds a THIRD time.
+ *
+ *   CONFIRMED: `--disallowedTools "*"` genuinely removes every built-in
+ *   tool. All three `init` events reported `"tools":[]` — the CLI's own
+ *   authoritative observable. Corroborating: asked to run `pwd` via
+ *   Bash and show the raw output, the model replied it had no tool
+ *   available and explicitly declined to invent one. Zero `tool_use`
+ *   content blocks appear anywhere in the transcript — the model never
+ *   attempted a call, not merely reported failing one.
+ *
+ *   STILL OPEN, UNCHANGED: `"mcp_servers":[]` on all three `init`
+ *   lines again, and the probe's own MCP server never wrote its
+ *   startup line — the process was never spawned. `--safe-mode`
+ *   remains the leading, unconfirmed hypothesis (see CHANGELOG.md's
+ *   history) — this run neither confirms nor refutes it.
+ *
+ * GETTING A FLAG RIGHT ONCE IS NOT THE FIX — index.ts's `chat()`
+ * (wave 3) verifies `--disallowedTools "*"` against the CLI's own
+ * `init` event `tools` array on every call rather than trusting the
+ * flag by construction. THIS FILE DOES NOT YET DO THE SAME — stated
+ * plainly, not left for a reader to discover by its silence. Building
+ * the real check means an `init` event fixture in very nearly every
+ * existing test in `session.test.ts`, which is real work, sized and
+ * left for its own pass rather than folded in unannounced. */
+export const SESSION_TURN_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
+
+/**
+ * One entry from the terminal envelope's `permission_denials` array — a
+ * field CONFIRMED to exist (the operator's own channel to the CLI; also
+ * observed, always empty, in every real envelope this repo has captured),
+ * but whose shape when POPULATED is UNCONFIRMED: this repository has never
+ * seen a non-empty one. Rather than assume a field name and silently
+ * mis-tag an existing `toolUses`/`toolResults` entry, each denial is kept
+ * as `raw` — exactly what the CLI sent — plus a best-effort `toolName`
+ * extracted by duck-typing over the field names most likely to carry it.
+ * A caller that learns the real shape can read `raw` directly rather than
+ * waiting on this file to model it.
+ *
+ * READ THIS ALONGSIDE `toolUses`, NEVER ALONE — an empty array here does
+ * NOT mean "nothing was denied": a model can decline a tool in plain text
+ * without ever attempting a call, which also leaves `permission_denials`
+ * empty. So: both `toolUses` and this empty means no attempt was ever
+ * made; a non-empty `toolUses` with this empty means every attempt
+ * reached the bridge; a non-empty entry here means at least one attempt
+ * was denied BEFORE it ever reached the bridge/executor — it will not
+ * also appear in `toolUses`, because the bridge never saw it in the
+ * first place.
+ */
+export interface PermissionDenial {
+  /** The denial entry exactly as the CLI reported it. */
+  raw: unknown;
+  /** Best-effort extraction — see this interface's own doc comment.
+   * `undefined` when none of the candidate keys held a non-empty string,
+   * rather than a guessed value. */
+  toolName?: string;
+}
+
+const PERMISSION_DENIAL_NAME_KEYS = ['tool_name', 'toolName', 'tool', 'name'] as const;
+
+/** Turn the envelope's raw `permission_denials` (unknown shape, possibly
+ * absent) into {@link PermissionDenial}s — never throws on a shape that
+ * doesn't match what's expected; a non-array or missing value is simply
+ * no denials, the same as an explicit empty array. */
+function extractPermissionDenials(value: unknown): PermissionDenial[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((entry) => {
+    let toolName: string | undefined;
+    if (entry && typeof entry === 'object') {
+      for (const key of PERMISSION_DENIAL_NAME_KEYS) {
+        const v = (entry as Record<string, unknown>)[key];
+        if (typeof v === 'string' && v !== '') {
+          toolName = v;
+          break;
+        }
+      }
+    }
+    return { raw: entry, toolName };
+  });
+}
+
+function abortReasonLocal(signal: AbortSignal): unknown {
+  if (signal.reason instanceof Error) return signal.reason;
+  if (signal.reason !== undefined) return new Error(String(signal.reason));
+  return new DOMException('Aborted', 'AbortError');
+}
+
+function throwIfAbortedLocal(signal: AbortSignal | undefined): void {
+  if (!signal?.aborted) return;
+  throw abortReasonLocal(signal);
+}
+
+/** Options for one turn on a held session — see `index.ts`'s `chat`
+ * (session branch) / `chatWithToolLoop` (wave 3) for the two callers of
+ * this. */
+export interface SessionTurnOptions {
+  session: ClaudeCliSessionHandle;
+  systemPrompt: string;
+  /** The flattened text of this round's ONE new message — never the
+   * full conversation history (the session already holds that). */
+  message: string;
+  tools: ToolDef[];
+  /** Required when `tools` is non-empty. */
+  executor?: ToolExecutor;
+  maxToolCalls: number;
+  model?: string;
+  signal?: AbortSignal;
+}
+
+/** Result of one turn on a held session. */
+export interface SessionTurnResult {
+  text: string;
+  stopReason: string;
+  usage: ClaudeCliStreamResultEnvelope['usage'];
+  modelUsage: ClaudeCliStreamResultEnvelope['modelUsage'];
+  toolUses: ToolUse[];
+  toolResults: BridgeToolResult[];
+  /** See {@link PermissionDenial}'s own doc comment for what this is and
+   * — just as importantly — what an EMPTY array here does and does not
+   * tell a caller. Never throws on its own; is_error remains the only
+   * failure signal this file reads. */
+  permissionDenials: PermissionDenial[];
+  /** Proxy for "how many model iterations happened" — an observed count
+   * of `assistant` stream events, not a count of separate calls this
+   * function made (it made exactly one). */
+  assistantEventCount: number;
+}
+
+/**
+ * Run one turn on a held session — spawning or reusing the process
+ * behind `options.session` (via `getOrCreateSession`, wave 2a), arming
+ * the tool bridge (if `options.tools` is non-empty) for the caller's
+ * executor, writing the turn, and resolving once a terminal `result`
+ * event arrives (or the per-turn watchdog / an abort fires first).
+ */
+export async function runSessionTurn(options: SessionTurnOptions): Promise<SessionTurnResult> {
+  throwIfAbortedLocal(options.signal);
+  if (options.tools.length > 0 && !options.executor) {
+    throw new Error('claude-cli: runSessionTurn requires an executor when tools are supplied');
+  }
+
+  const session = await getOrCreateSession(options.session, {
+    tools: options.tools,
+    systemPrompt: options.systemPrompt,
+    model: options.model,
+  });
+
+  if (session.pending) {
+    throw new Error(
+      `claude-cli: session ${options.session.id} already has a turn in flight — a held session ` +
+        'serves one turn at a time; await the previous call before starting another on the same handle.'
+    );
+  }
+
+  // A session actively serving a turn is not idle, however long that
+  // turn takes — cancel the idle countdown for its duration so it can
+  // never compete with SESSION_TURN_TIMEOUT_MS (above) for the same
+  // turn. Resumed in the `finally` once the turn settles, one way or
+  // another.
+  clearTimeout(session.idleTimer);
+
+  let armed: ArmedTurnState | null = null;
+  if (session.bridge && options.executor) {
+    armed = session.bridge.arm(options.executor, options.maxToolCalls);
+  }
+
+  let envelope: { raw: ClaudeCliStreamResultEnvelope; assistantEventCount: number };
+  try {
+    envelope = await new Promise<{
+      raw: ClaudeCliStreamResultEnvelope;
+      assistantEventCount: number;
+    }>((resolve, reject) => {
+      const watchdog = setTimeout(() => {
+        // KNOWN LIMITATION (see this commit's message / CHANGELOG): this
+        // path does not remove the abort listener below. Fixed in wave 4.
+        session.pending = null;
+        void killHeld(session);
+        HELD.delete(session.id);
+        reject(
+          new Error(
+            `claude-cli: session ${session.id} timed out after ${SESSION_TURN_TIMEOUT_MS}ms waiting ` +
+              'for a terminal stream-json "result" event. The streaming wire shape this adapter ' +
+              'assumes is relayed from documentation, not confirmed against a real invocation (see ' +
+              "this file's WIRE-SHAPE VERIFICATION HISTORY above) — this may mean the assumption " +
+              "doesn't hold. Refusing rather than hanging; the held process has been killed."
+          )
+        );
+      }, SESSION_TURN_TIMEOUT_MS);
+      if (typeof watchdog.unref === 'function') watchdog.unref();
+
+      const onAbort = () => {
+        clearTimeout(watchdog);
+        session.pending = null;
+        void killHeld(session);
+        HELD.delete(session.id);
+        reject(abortReasonLocal(options.signal!));
+      };
+      // getOrCreateSession, above, crosses an async boundary (an await,
+      // even one that resolves in a single microtask tick) — a signal
+      // aborted DURING that gap fires its 'abort' event before this
+      // listener exists to hear it, and once fired that event never
+      // fires again. Re-checking `.aborted` here, synchronously, before
+      // subscribing is what catches that window; the entry-only
+      // throwIfAbortedLocal call above only catches an abort that had
+      // already happened before runSessionTurn was even called. This is
+      // a DIFFERENT bug from the KNOWN LIMITATION named above (that one
+      // is about the listener outliving a turn that resolved some other
+      // way; this one is about the listener not existing yet when an
+      // abort fires early). Both involve this same `onAbort`, but they
+      // are not the same defect.
+      if (options.signal?.aborted) {
+        onAbort();
+        return;
+      }
+      options.signal?.addEventListener('abort', onAbort, { once: true });
+
+      session.pending = { resolve, reject, assistantEventCount: 0, watchdog };
+
+      const line =
+        JSON.stringify({ type: 'user', message: { role: 'user', content: options.message } }) +
+        '\n';
+      try {
+        session.child.stdin.write(line);
+      } catch (err) {
+        clearTimeout(watchdog);
+        session.pending = null;
+        // The one path in this wave that DOES remove the listener — see
+        // the KNOWN LIMITATION above for why this is not, on its own,
+        // the fix.
+        options.signal?.removeEventListener('abort', onAbort);
+        reject(
+          new Error(
+            `claude-cli: could not write to held session ${session.id}'s stdin — ` +
+              `${err instanceof Error ? err.message : String(err)}`
+          )
+        );
+      }
+    });
+  } finally {
+    // The turn has settled, one way or another. Resume the idle
+    // countdown from now — but only if the session is still the one
+    // registered under this id: the watchdog / abort / process-death
+    // paths inside the promise above already killed it and deleted it
+    // from HELD, and rescheduling a timer nothing will ever look up
+    // again would just leak it.
+    if (HELD.get(session.id) === session && !session.closed) {
+      scheduleIdleEviction(session);
+    }
+  }
+
+  const parsed = envelope.raw;
+  // CONFIRMED failure signal is `is_error`, never `subtype` — a real
+  // observed envelope carried `subtype: "success"` (the CYCLE completed
+  // normally) alongside `is_error: true` (the CONTENT is a failure, e.g.
+  // an auth error). `subtype` is included in the message purely as
+  // diagnostic text; do not read it as a second success/failure signal.
+  if (parsed.is_error) {
+    throw new Error(
+      `claude-cli: session ${session.id} reported is_error: true (subtype=${parsed.subtype ?? 'unknown'})` +
+        (parsed.result ? ` — ${parsed.result}` : '')
+    );
+  }
+
+  return {
+    text: typeof parsed.result === 'string' ? parsed.result : '',
+    stopReason: parsed.stop_reason ?? 'end_turn',
+    usage: parsed.usage,
+    modelUsage: parsed.modelUsage,
+    toolUses: armed ? armed.toolUses : [],
+    toolResults: armed ? armed.toolResults : [],
+    permissionDenials: extractPermissionDenials(parsed.permission_denials),
+    assistantEventCount: envelope.assistantEventCount,
+  };
 }

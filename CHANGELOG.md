@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.26.9] — 2026-09-16
+
+**Wave 2b of 5, on top of wave 2a's lifecycle (`0.26.8`) — the other half of the file review split `#57` into.** New (internal, no public behaviour change): `runSessionTurn` — arms the tool bridge, writes one turn's message, races a per-turn watchdog (`SESSION_TURN_TIMEOUT_MS`) against the terminal `result` event / an abort / the process dying, parses the confirmed envelope shape, and extracts permission denials (`PermissionDenial` — read alongside `toolUses`, never alone; an empty array can mean "nothing denied" or "nothing attempted").
+
+**Still a confirmed leaf: nothing on `main` calls `runSessionTurn` yet** — wave 3 is what wires it (and `createSession`/`closeSession`) into `index.ts`'s public surface.
+
+**KNOWN LIMITATION, disclosed and deliberately unfixed in this wave, same as on the withdrawn `#57`.** The abort listener is only explicitly removed on the synchronous stdin-write-error path — a turn that resolves via a normal result line or the watchdog leaves it armed against a session that may still be open, so a later `abort()` on a REUSED `AbortController` would incorrectly kill an already-healthy session. The fix, with its own regression test proving both the bug and the fix, lands as wave 4. Landing it here unfixed would re-mix an unrelated correctness fix into a feature wave — exactly the omnibus shape review rejected `#55` for in the first place.
+
 ## [0.26.8] — 2026-09-16
 
 **Wave 2a of 5, replacing the withdrawn `#57`.** `#57` (originally "wave 2/4", `session.ts` in full — lifecycle AND turn execution, one file) was REJECTED by review on `pull-requests-carry-what-why-tests`: 1,799 changed lines, nearly double the practical reviewability ceiling, with no override recorded — and the file's own header, plus its own test file's `describe` blocks, already showed an unexercised seam the review named explicitly: lifecycle (`createSession`/`closeSession`/dead-handle/eviction-bounds) vs. turn execution (`runSessionTurn`/watchdog/abort/tool-arming). This PR is that seam, cut for real: the lifecycle half only. The turn-execution half (wave 2b) stacks on top of this.
