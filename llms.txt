@@ -48,6 +48,22 @@ Every provider in the matrix (Anthropic, Google, OpenAI, DeepSeek, SambaNova,
 Mistral) can now drive the tool loop. `claude-cli` is a separate, deliberately
 non-interchangeable substrate and is not part of that matrix.
 
+- `@verevoir/llm/catalog` — registers every catalogued provider's model
+  catalogue (anthropic, mistral, samba) AND connection (env var names only) as
+  an import side effect, with **no SDK import anywhere in its import graph** —
+  unlike the real adapter subpaths above, each of which requires its SDK as a
+  peer dependency. For a consumer that only needs `resolveModelByTerm`, a
+  label, or a rate (never a real call) — e.g. selecting a reviewer model by
+  name — importing this subpath resolves it with zero SDK as a transitive
+  dependency. Also re-exports the raw `ANTHROPIC_CATALOG` / `MISTRAL_CATALOG` /
+  `SAMBA_CATALOG` arrays for a consumer that wants the data directly. The real
+  adapter subpaths are unchanged for an existing consumer — each still
+  registers its own catalogue + connection itself, idempotently, so importing
+  both this subpath and a real adapter is a no-op the second time, not a
+  conflict. `/openai`, `/deepseek`, `/google` are not included — they never
+  used `ModelCatalogEntry`/`registerModelCatalog` in the first place. `/claude-cli`
+  stays deliberately unregistered, per its own design.
+
 ## Install
 
 ```bash

@@ -14,40 +14,9 @@
  */
 
 import { createOpenAICompatAdapter } from '../openai-compat.js';
-import type { ModelCatalogEntry } from '../index.js';
+import { PROVIDER, CATALOG, BASE_URL } from './catalog.js';
 
-/** Provider id reported on every TokenUsage this adapter returns. */
-export const PROVIDER = 'samba';
-
-/** SambaNova's OpenAI-compatible base URL. */
-export const BASE_URL = 'https://api.sambanova.ai/v1';
-
-// Model ids verified against the live SambaNova `/models` catalogue (2026-06):
-// it hosts a small rotating set (Llama-3.3-70B, DeepSeek-V3.x, gpt-oss, gemma,
-// MiniMax). Defaults: reasoning → Llama-3.3-70B, extraction → DeepSeek-V3.2
-// (both tool-capable). Pricing is approximate worst-case USD/Mtok; refresh when
-// SambaNova republishes. Decisions key on provider/family, so the exact id is
-// reporting metadata and a new V3 point-release still normalises via the prefix.
-const CATALOG: ModelCatalogEntry[] = [
-  {
-    provider: PROVIDER,
-    family: 'llama-70b',
-    modelClass: 'reasoning',
-    currentId: 'Meta-Llama-3.3-70B-Instruct',
-    rates: [0.6, 1.2],
-    label: 'Llama 3.3 70B',
-    prefixes: ['Meta-Llama-3.3-70B'],
-  },
-  {
-    provider: PROVIDER,
-    family: 'deepseek-v3',
-    modelClass: 'extraction',
-    currentId: 'DeepSeek-V3.2',
-    rates: [0.6, 1.5],
-    label: 'DeepSeek V3.2',
-    prefixes: ['DeepSeek-V3'],
-  },
-];
+export { PROVIDER, BASE_URL };
 
 const adapter = createOpenAICompatAdapter({
   provider: PROVIDER,

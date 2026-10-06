@@ -1,6 +1,6 @@
 {
   "name": "@verevoir/llm",
-  "version": "0.28.0",
+  "version": "0.29.0",
   "description": "Provider-agnostic LLM call surface with token + cost accounting. SDK adapters in subpaths.",
   "license": "Apache-2.0",
   "type": "module",
@@ -10,6 +10,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./catalog": {
+      "types": "./dist/catalog.d.ts",
+      "import": "./dist/catalog.js"
     },
     "./anthropic": {
       "types": "./dist/anthropic/index.d.ts",

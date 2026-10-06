@@ -9,38 +9,9 @@
  */
 
 import { createOpenAICompatAdapter } from '../openai-compat.js';
-import type { ModelCatalogEntry } from '../index.js';
+import { PROVIDER, CATALOG, BASE_URL } from './catalog.js';
 
-/** Provider id reported on every TokenUsage this adapter returns. */
-export const PROVIDER = 'mistral';
-
-/** Mistral's OpenAI-compatible base URL. */
-export const BASE_URL = 'https://api.mistral.ai/v1';
-
-// Model catalogue — decisions key on provider/family (STDIO-332); the `-latest`
-// aliases are the stable current ids, so a version bump is a one-line change.
-// Pricing is approximate Mistral-published USD/Mtok (worst-case input rate),
-// 2026-06; refresh when Mistral republishes.
-const CATALOG: ModelCatalogEntry[] = [
-  {
-    provider: PROVIDER,
-    family: 'large',
-    modelClass: 'reasoning',
-    currentId: 'mistral-large-latest',
-    rates: [2, 6],
-    label: 'Mistral Large',
-    prefixes: ['mistral-large'],
-  },
-  {
-    provider: PROVIDER,
-    family: 'small',
-    modelClass: 'extraction',
-    currentId: 'mistral-small-latest',
-    rates: [0.2, 0.6],
-    label: 'Mistral Small',
-    prefixes: ['mistral-small'],
-  },
-];
+export { PROVIDER, BASE_URL };
 
 const adapter = createOpenAICompatAdapter({
   provider: PROVIDER,

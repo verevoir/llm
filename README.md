@@ -6,9 +6,10 @@ consumers only pay for the SDK they actually use.
 
 ## Status
 
-**`0.1.0`** — first deliberate release. Pre-stable: the `0.x` line communicates
-that the API surface can shift before `1.0`. Bumps to `1.0` follow validation
-by the first real consumer.
+Pre-stable: the `0.x` line communicates that the API surface can shift before
+`1.0`. Track the current version and release history in the repo's
+[CHANGELOG](./CHANGELOG.md). Bumps to `1.0` follow validation by the first
+real consumer.
 
 ## Install
 
@@ -45,13 +46,17 @@ The core export (`@verevoir/llm`) carries provider-agnostic types — `TokenUsag
 Each adapter lives under its own subpath so the unused provider SDK never
 enters the consumer's bundle:
 
-| Subpath                   | SDK dep             | Status                  |
-| ------------------------- | ------------------- | ----------------------- |
-| `@verevoir/llm`           | none                | shipped                 |
-| `@verevoir/llm/anthropic` | `@anthropic-ai/sdk` | shipped                 |
-| `@verevoir/llm/google`    | `@google/genai`     | `chat()` only (`0.4.0`) |
-| `@verevoir/llm/openai`    | `openai`            | `chat()` only (`0.5.0`) |
-| `@verevoir/llm/deepseek`  | `openai`            | `chat()` only (`0.6.0`) |
+| Subpath                    | SDK dep                   | Status                  |
+| -------------------------- | ------------------------- | ----------------------- |
+| `@verevoir/llm`            | none                      | shipped                 |
+| `@verevoir/llm/anthropic`  | `@anthropic-ai/sdk`       | shipped                 |
+| `@verevoir/llm/google`     | `@google/genai`           | `chat()` only (`0.4.0`) |
+| `@verevoir/llm/openai`     | `openai`                  | `chat()` only (`0.5.0`) |
+| `@verevoir/llm/deepseek`   | `openai`                  | `chat()` only (`0.6.0`) |
+| `@verevoir/llm/samba`      | `openai`                  | shipped                 |
+| `@verevoir/llm/mistral`    | `openai`                  | shipped                 |
+| `@verevoir/llm/claude-cli` | none (spawns `claude -p`) | shipped (`chat()` only) |
+| `@verevoir/llm/catalog`    | none                      | shipped                 |
 
 Multi-provider deployments depend on the same `chat()` contract; consumers
 switch backends by importing a different subpath, not by changing call sites.

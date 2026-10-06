@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.29.0] — 2026-10-06
+
+**New: `@verevoir/llm/catalog` — the model catalogue, with no SDK import.**
+Before this, a provider's catalogue entries were only ever registered as a
+side effect of importing a real adapter subpath (`/anthropic`, `/mistral`,
+`/samba`), each of which requires its SDK as a peer dependency — so a
+consumer that only wants `resolveModelByTerm('opus')`, a label, or a rate
+(never a real call) had to add an SDK dependency solely to trigger that
+import side effect. `@anthropic-ai/sdk`, `openai` and `@google/genai` stayed
+optional peers, but "optional" meant nothing once a consumer needed the data.
+
+Each catalogued provider's `CATALOG` array now lives in its own
+`<provider>/catalog.ts` — pure data, importing only the `ModelCatalogEntry`
+TYPE, no SDK. `@verevoir/llm/catalog` imports those pure files and registers
+all of them; importing it (plus the core package) resolves every known
+family with zero SDK as a transitive dependency. `@verevoir/llm/anthropic`,
+`/mistral` and `/samba` are UNCHANGED for an existing consumer — each still
+imports its own `./catalog.js` and registers it itself (idempotent, so no
+conflict if a consumer imports both this subpath and a real adapter).
+
+MINOR, not patch: this adds new public exported surface (the `./catalog`
+subpath, and `ANTHROPIC_CATALOG`/`MISTRAL_CATALOG`/`SAMBA_CATALOG`) — new
+capability, not a behaviour change to anything existing.
+
+Not touched: `/openai`, `/deepseek`, `/google` never used
+`ModelCatalogEntry`/`registerModelCatalog` in the first place (they register
+plain labels only), so they have nothing for this subpath to extract.
+`/claude-cli` stays deliberately unregistered, per its own design.
+
 ## [0.28.0] — 2026-10-06
 
 **Catalog: Anthropic's `opus` family currentId moves to `claude-opus-5-5`** — the
