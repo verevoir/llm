@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.29.1] — 2026-10-06
+
+**Fixed: `claudeCli.chat()` could crash the HOST process on an EPIPE, instead of rejecting normally (#289).** `runClaudeCli` wrote the prompt to the spawned `claude` process's stdin with no `child.stdin.on('error', ...)` listener of its own — only `child.on('error', ...)`, the whole-process spawn-level failure (e.g. ENOENT), was wired. `child.stdin` is its own stream/EventEmitter: if `claude` exits before ever reading stdin (e.g. an auth failure that exits non-zero immediately) and the written prompt is larger than the OS pipe buffer, the write raises EPIPE as an `'error'` event on that stream specifically. With zero listeners on it, Node throws — an uncaught exception that can bring down the host, not a normal rejection the caller could catch.
+
+**The fix.** `child.stdin.on('error', () => {})` — deliberately swallowed, not forwarded to `reject` directly. The same process exit that broke the pipe also fires its own `'close'` event, which already carries the real exit code and whatever `stderr` the process wrote before exiting — exactly the "one clear failure carrying the exit code and stderr" this adapter already produces for an ordinary non-zero exit. Rejecting from the stdin `'error'` handler instead would race `close` and — observed directly while building this fix's own test — sometimes win that race, replacing the typed, informative "exited with code N: ..." failure with an opaque "write EPIPE" one.
+
+**Proven deterministically, not by hoping for a real race.** The first version of this fix shipped with only a real-subprocess test (a PATH-stubbed `claude`, a >128KB prompt) as its regression proof. Review found that non-deterministic: on at least one real CI container, the identical scenario never raised EPIPE at all, so that test could not tell the fixed code from the broken code there — it passed either way. The actual proof is now a mock-based test (`chat.test.ts`, "stdin EPIPE when the process exits before reading it (#289, deterministic)") whose fake `stdin` is a real `EventEmitter`: it exercises Node's own no-listener-throws rule for an `'error'` event directly, with no dependency on OS pipe-buffer timing, and additionally asserts no uncaught exception is raised. Mutation-tested: removing the listener makes this test fail, deterministically, on every OS and Node version — confirmed directly, then restored. The original real-subprocess test is kept only as a best-effort smoke check, explicitly labelled as not the proof.
+
 ## [0.29.0] — 2026-10-06
 
 **New: `@verevoir/llm/catalog` — the model catalogue, with no SDK import.**

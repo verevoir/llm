@@ -30,7 +30,11 @@ function fakeChild() {
   const child = new EventEmitter() as EventEmitter & {
     stdout: EventEmitter;
     stderr: EventEmitter;
-    stdin: { write: (s: string) => void; end: () => void };
+    stdin: {
+      write: (s: string) => void;
+      end: () => void;
+      on: (event: string, listener: (...args: unknown[]) => void) => void;
+    };
     kill: () => void;
   };
   child.stdout = new EventEmitter();
@@ -45,6 +49,12 @@ function fakeChild() {
       // Emit close on the next tick, after stdout/stderr data + this test's
       // own close() call have had a chance to be scheduled synchronously.
     },
+    // #289: real `child.stdin` is its own stream/EventEmitter — the real
+    // adapter now registers an 'error' listener on it (EPIPE handling).
+    // A no-op here matches the real shape closely enough for every test
+    // in this file, none of which drives a stdin-level error directly
+    // (that is chat.epipe.test.ts's job, against a REAL subprocess).
+    on: () => {},
   };
   return { child, written };
 }
@@ -598,6 +608,79 @@ describe('claudeCli.chat', () => {
     }
     throw new Error('expected the call to reject, and it resolved');
   }
+
+  // THE DETERMINISTIC EPIPE REGRESSION TEST (#289). A review found the
+  // real-subprocess version (chat.epipe.test.ts) non-deterministic across
+  // environments — on at least one real CI container, the identical
+  // >128KB-write-to-an-early-exiting-process scenario never raised EPIPE
+  // at all, so that test could not tell the fixed code from the broken
+  // code there. THIS is the primary regression proof instead: `stdin` is
+  // a real EventEmitter (unlike fakeChild()'s plain write()/end() stub),
+  // so this exercises Node's own, environment-independent rule that
+  // emitting 'error' with zero listeners throws synchronously — the
+  // exact mechanism this fix closes — without depending on the OS
+  // actually hitting a pipe-buffer limit.
+  describe('stdin EPIPE when the process exits before reading it (#289, deterministic)', () => {
+    function fakeChildWithStdinEmitter() {
+      const child = new EventEmitter() as EventEmitter & {
+        stdout: EventEmitter;
+        stderr: EventEmitter;
+        stdin: EventEmitter & { write: (s: string) => void; end: () => void };
+        kill: ReturnType<typeof vi.fn>;
+      };
+      child.stdout = new EventEmitter();
+      child.stderr = new EventEmitter();
+      child.kill = vi.fn();
+      const stdin = new EventEmitter() as EventEmitter & {
+        write: (s: string) => void;
+        end: () => void;
+      };
+      // Scheduled on the next tick, AFTER runClaudeCli has synchronously
+      // registered its own stdin 'error' listener (if the fix under test
+      // is present) — mirroring a real `claude` that has already exited,
+      // closing its end of the pipe, before this write ever reaches it.
+      stdin.write = () => {
+        queueMicrotask(() => {
+          stdin.emit(
+            'error',
+            Object.assign(new Error('write EPIPE'), { code: 'EPIPE', errno: -32, syscall: 'write' })
+          );
+        });
+      };
+      stdin.end = () => {
+        queueMicrotask(() => child.emit('close', 1, null));
+      };
+      child.stdin = stdin;
+      return child;
+    }
+
+    it('rejects with the early-exit failure (exit code + stderr), and raises no uncaught exception, when the stdin write raises EPIPE', async () => {
+      const child = fakeChildWithStdinEmitter();
+      mockSpawn.mockImplementationOnce(() => {
+        queueMicrotask(() => {
+          child.stderr.emit('data', Buffer.from('stub: simulated early exit before reading stdin'));
+        });
+        return child;
+      });
+
+      const uncaught: unknown[] = [];
+      const onUncaught = (err: unknown) => uncaught.push(err);
+      process.on('uncaughtException', onUncaught);
+      try {
+        await expect(
+          chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] })
+        ).rejects.toThrow(/exited with code 1.*simulated early exit before reading stdin/s);
+      } finally {
+        process.off('uncaughtException', onUncaught);
+      }
+      // The mutation this guards against: delete the production
+      // `child.stdin.on('error', () => {})` handler and this fails here —
+      // Node's EventEmitter throws synchronously for an 'error' event
+      // with zero listeners, which this captures regardless of whether
+      // the rejection above also happened to come out right.
+      expect(uncaught).toEqual([]);
+    });
+  });
 
   describe('exit signal', () => {
     it('reports a signal-terminated close distinguishably from a null exit carrying no signal', async () => {

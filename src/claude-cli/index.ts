@@ -852,6 +852,16 @@ function runClaudeCli(args: string[], input: string, signal?: AbortSignal): Prom
     child.on('close', (exitCode, signal) =>
       finish(() => resolve({ stdout, stderr, exitCode, signal }))
     );
+    // #289: `child.stdin` is its own stream — a write failure on it
+    // (EPIPE, when claude exits before reading stdin) emits 'error'
+    // THERE, not on `child`; with no listener, Node throws. Swallowed
+    // deliberately, not forwarded to reject(): the same exit also fires
+    // 'close' below, carrying the real exit code/stderr chat()'s
+    // non-zero-exit path already reports — rejecting here instead would
+    // race 'close' and can lose, surfacing a bare "write EPIPE" instead
+    // of that typed failure. Full rationale + regression test design:
+    // CHANGELOG.md (0.29.1).
+    child.stdin.on('error', () => {});
     child.stdin.write(input);
     child.stdin.end();
   });
