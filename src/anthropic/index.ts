@@ -4,11 +4,19 @@
  * Wraps `@anthropic-ai/sdk` in the provider-agnostic surface defined in
  * the core. Importing this subpath requires `@anthropic-ai/sdk` as a
  * peer dependency on the consumer.
+ *
+ * The model catalogue itself (PROVIDER, CATALOG) lives in `./catalog.js`,
+ * which has no SDK import — a consumer that only needs to resolve a model
+ * term (not place a real call) can import `@verevoir/llm/catalog` instead
+ * and never pull in `@anthropic-ai/sdk` at all. This file still imports and
+ * registers it exactly as before, so nothing here changes for an existing
+ * consumer of this subpath.
  */
 
 import Anthropic from '@anthropic-ai/sdk';
 import { fireUsageHook } from '../audit-hook.js';
 import { isAuthError, noteOAuthRejected, oauthSystemIdentity, resolveClient } from './client.js';
+import { PROVIDER, CATALOG, CONNECTION } from './catalog.js';
 import {
   type ChatOptions,
   type ChatReply,
@@ -19,7 +27,6 @@ import {
   type ChatWithToolsResult,
   type ContentBlock,
   type CredentialRoute,
-  type ModelCatalogEntry,
   type ModelClass,
   type ProgressInfo,
   type RatesTable,
@@ -35,77 +42,7 @@ import {
 // Public model table
 // ────────────────────────────────────────────────────────────────────
 
-/** Provider id reported on every {@link TokenUsage} this adapter returns. */
-export const PROVIDER = 'anthropic';
-
-/**
- * The Anthropic model catalog — the **single source of truth**. Each family
- * declares the class it serves, the concrete versioned id used for the call,
- * its pricing (at the family level), a label, and the alias / prefix rules
- * that let any version of the family normalise back to it. `models`, `rates`
- * and the labels below all derive from this, so a version bump is a one-line
- * `currentId` change — and **decisions key on `provider/family`, never on the
- * version string** (the version is reporting metadata only).
- *
- * Pricing is Anthropic-published rates as of 2026-07-23; each tuple is
- * `[input_per_million_USD, output_per_million_USD]`. Refresh `rates` here when
- * Anthropic publishes new pricing — and pin the new numbers in the catalog test:
- * a stale rate is silent, and it scales every cost this system reports.
- *
- * RATES ARE PROVISIONAL FOR OPUS AND SONNET (STDIO-681). Their `currentId`s
- * moved to the Claude 5 generation so the tiers resolve to a current model; the
- * TUPLES below are still the Claude 4.x published numbers, carried over
- * UNVERIFIED. So every cost figure this system reports for opus or sonnet is an
- * estimate against the PREVIOUS generation's pricing and must not be quoted as
- * spend until the published Claude 5 rates are pinned here and in the catalog
- * test. That is exactly the defect the paragraph above describes — taken on
- * deliberately and briefly, with a card, rather than shipped as a guess wearing
- * the costume of a number.
- *
- * `currentId` being a BUILD-TIME constant is itself the deeper problem, and it
- * is what let opus sit a generation behind: a new model cannot be reached until
- * this package, then accelerator, then capabilities are each released in order.
- * Anthropic serves `GET /v1/models`, so the ids are discoverable at RUNTIME
- * against the calling credential. Pricing and `modelClass` are not — no provider
- * publishes the first, and the second is our judgement — so those stay here,
- * keyed by FAMILY, which is already how every decision keys. See STDIO-682.
- */
-const CATALOG: readonly ModelCatalogEntry[] = [
-  {
-    provider: PROVIDER,
-    family: 'opus',
-    modelClass: 'reasoning',
-    currentId: 'claude-opus-5-5',
-    rates: [5, 25], // PROVISIONAL — Claude 4.8 pricing; see the note above.
-    label: 'Opus',
-    // Superseded ids stay ALIASES rather than being dropped: a transcript, a
-    // ledger or a stored cost row naming claude-opus-5 (or claude-opus-4-8,
-    // claude-opus-4-7) must still normalise to this family, or historical
-    // data silently stops pricing and labelling.
-    aliases: ['claude-opus-5', 'claude-opus-4-8', 'claude-opus-4-7'],
-    prefixes: ['claude-opus-'],
-  },
-  {
-    provider: PROVIDER,
-    family: 'sonnet',
-    modelClass: 'drafting',
-    currentId: 'claude-sonnet-5',
-    rates: [3, 15], // PROVISIONAL — Claude 4.6 pricing; see the note above.
-    label: 'Sonnet',
-    aliases: ['claude-sonnet-4-6'],
-    prefixes: ['claude-sonnet-'],
-  },
-  {
-    provider: PROVIDER,
-    family: 'haiku',
-    modelClass: 'extraction',
-    currentId: 'claude-haiku-4-5-20251001',
-    rates: [1, 5],
-    label: 'Haiku',
-    aliases: ['claude-haiku-4-5'],
-    prefixes: ['claude-haiku-'],
-  },
-];
+export { PROVIDER };
 
 // Register the catalog into the core so normalisation, family-level pricing,
 // and labels work for any consumer (and any future version of these families).
@@ -132,13 +69,7 @@ export const rates: RatesTable = Object.fromEntries(CATALOG.map((e) => [e.curren
 // Internal
 // ────────────────────────────────────────────────────────────────────
 
-registerProviderConnection({
-  provider: PROVIDER,
-  apiKeyEnv: 'ANTHROPIC_API_KEY',
-  // Why: see `ProviderConnection.altKeyEnvs`.
-  altKeyEnvs: ['CLAUDE_CODE_OAUTH_TOKEN'],
-  baseUrlEnv: 'ANTHROPIC_BASE_URL',
-});
+registerProviderConnection(CONNECTION);
 
 // Credential resolution, client construction, and the OAuth→API-key fallback live
 // in ./client.js (internal — off the public surface): `resolveClient`,
