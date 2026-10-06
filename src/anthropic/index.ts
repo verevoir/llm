@@ -75,13 +75,14 @@ const CATALOG: readonly ModelCatalogEntry[] = [
     provider: PROVIDER,
     family: 'opus',
     modelClass: 'reasoning',
-    currentId: 'claude-opus-5',
+    currentId: 'claude-opus-5-5',
     rates: [5, 25], // PROVISIONAL — Claude 4.8 pricing; see the note above.
     label: 'Opus',
     // Superseded ids stay ALIASES rather than being dropped: a transcript, a
-    // ledger or a stored cost row naming claude-opus-4-8 must still normalise
-    // to this family, or historical data silently stops pricing and labelling.
-    aliases: ['claude-opus-4-8', 'claude-opus-4-7'],
+    // ledger or a stored cost row naming claude-opus-5 (or claude-opus-4-8,
+    // claude-opus-4-7) must still normalise to this family, or historical
+    // data silently stops pricing and labelling.
+    aliases: ['claude-opus-5', 'claude-opus-4-8', 'claude-opus-4-7'],
     prefixes: ['claude-opus-'],
   },
   {

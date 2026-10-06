@@ -61,7 +61,7 @@ describe('@verevoir/llm/anthropic — exported model table', () => {
   });
 
   it('maps the three model classes to concrete model ids', () => {
-    expect(models.reasoning).toBe('claude-opus-5');
+    expect(models.reasoning).toBe('claude-opus-5-5');
     expect(models.drafting).toBe('claude-sonnet-5');
     expect(models.extraction).toBe('claude-haiku-4-5-20251001');
   });
@@ -86,7 +86,7 @@ describe('@verevoir/llm/anthropic — exported model table', () => {
     // across the Claude 5 id bump UNVERIFIED (STDIO-681). They are pinned here
     // anyway — precisely so that correcting them BREAKS this test rather than
     // slipping in silently, which is the failure this test exists to stop.
-    expect(rates['claude-opus-5']).toEqual([5, 25]);
+    expect(rates['claude-opus-5-5']).toEqual([5, 25]);
     expect(rates['claude-sonnet-5']).toEqual([3, 15]);
     expect(rates['claude-haiku-4-5-20251001']).toEqual([1, 5]);
   });
@@ -109,6 +109,8 @@ describe('@verevoir/llm/anthropic — exported model table', () => {
     // by the time this test runs, those labels are live on the core
     // helper. The label registry is the consumer-visible affordance —
     // tile UI calls modelLabel(id) and expects "Opus" / "Haiku".
+    expect(modelLabel('claude-opus-5-5')).toBe('Opus');
+    // the superseded currentId, now an alias, still labels and normalises
     expect(modelLabel('claude-opus-5')).toBe('Opus');
     expect(modelLabel('claude-sonnet-5')).toBe('Sonnet');
     expect(modelLabel('claude-haiku-4-5-20251001')).toBe('Haiku');
@@ -124,6 +126,8 @@ describe('@verevoir/llm/anthropic — de-brittled model identity', () => {
     });
     // an older alias still resolves
     expect(normalizeModelId('claude-opus-4-7')).toEqual({ provider: 'anthropic', family: 'opus' });
+    // the immediately-prior currentId is kept as an alias too, same as 4-8/4-7
+    expect(normalizeModelId('claude-opus-5')).toEqual({ provider: 'anthropic', family: 'opus' });
   });
 
   it('normalises a future, unseen Haiku version to the haiku family (prefix-forward)', () => {
