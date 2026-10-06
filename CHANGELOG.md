@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.27.2] — 2026-10-06
+
+**Catalog: Anthropic's `opus` family currentId moves to `claude-opus-5-5`** — the
+prior `currentId`, `claude-opus-5`, is kept as an alias (alongside the existing
+`claude-opus-4-8` / `claude-opus-4-7`), so a transcript, ledger or stored cost
+row naming any of the three still normalises, prices and labels correctly.
+Driven by a real consumer (`aigency-governance`) switching its reviewer model
+from a hand-pinned concrete id to this package's own `resolveModelByTerm`
+registry, so its judge model tracks the catalog's current Opus rather than a
+literal a maintainer has to remember to bump by hand.
+
 ## [0.27.1] — 2026-09-16
 
 **Wave 4 of 5, the last wave of the split replacing the withdrawn `#55` — fixes the abort-listener-outlives-a-resolved-turn bug that every prior wave (`#57`, `#61`) disclosed and deliberately deferred.**
