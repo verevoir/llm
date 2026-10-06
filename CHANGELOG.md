@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.27.2] — 2026-10-06
+## [0.28.0] — 2026-10-06
 
 **Catalog: Anthropic's `opus` family currentId moves to `claude-opus-5-5`** — the
 prior `currentId`, `claude-opus-5`, is kept as an alias (alongside the existing
@@ -9,7 +9,13 @@ row naming any of the three still normalises, prices and labels correctly.
 Driven by a real consumer (`aigency-governance`) switching its reviewer model
 from a hand-pinned concrete id to this package's own `resolveModelByTerm`
 registry, so its judge model tracks the catalog's current Opus rather than a
-literal a maintainer has to remember to bump by hand.
+literal a maintainer has to remember to bump by hand. **Bumped MINOR, not
+patch** — a currentId change alters exported behaviour (`models.reasoning`'s
+literal value, the `rates` table key), and this project's own precedent treats
+that shape of change as minor: commit `5b9e382` bumped 0.22.0 → 0.23.0 for the
+identical kind of currentId move, and the 0.26.6 entry states the rule
+directly — a patch is for internal surface with "zero change to any exported
+behavior", which this is not.
 
 ## [0.27.1] — 2026-09-16
 
