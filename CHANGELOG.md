@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.29.1] — 2026-10-06
+
+**Fixed: `claudeCli.chat()` could crash the HOST process on an EPIPE, instead of rejecting normally (#289).** `runClaudeCli` wrote the prompt to the spawned `claude` process's stdin with no `child.stdin.on('error', ...)` listener of its own — only `child.on('error', ...)`, the whole-process spawn-level failure (e.g. ENOENT), was wired. `child.stdin` is its own stream/EventEmitter: if `claude` exits before ever reading stdin (e.g. an auth failure that exits non-zero immediately) and the written prompt is larger than the OS pipe buffer, the write raises EPIPE as an `'error'` event on that stream specifically. With zero listeners on it, Node throws — an uncaught exception that can bring down the host, not a normal rejection the caller could catch.
+
+**The fix.** `child.stdin.on('error', () => {})` — deliberately swallowed, not forwarded to `reject` directly. The same process exit that broke the pipe also fires its own `'close'` event, which already carries the real exit code and whatever `stderr` the process wrote before exiting — exactly the "one clear failure carrying the exit code and stderr" this adapter already produces for an ordinary non-zero exit. Rejecting from the stdin `'error'` handler instead would race `close` and — observed directly while building this fix's own test — sometimes win that race, replacing the typed, informative "exited with code N: ..." failure with an opaque "write EPIPE" one.
+
+**Proven both ways.** A real-subprocess test (a PATH-stubbed `claude` that exits 1 without reading stdin, given a prompt larger than 128KB so EPIPE is deterministic on every OS) now asserts `chat()` rejects with the typed, named failure rather than crashing. Mutation-tested: removing the listener reproduces the exact uncaught `EPIPE` exception this fix exists to close, confirmed directly before restoring the fix.
+
 ## [0.29.0] — 2026-10-06
 
 **New: `@verevoir/llm/catalog` — the model catalogue, with no SDK import.**

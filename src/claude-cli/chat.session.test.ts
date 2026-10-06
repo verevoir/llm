@@ -45,13 +45,24 @@ function fakeVersionChild() {
   const child = new EventEmitter() as EventEmitter & {
     stdout: EventEmitter;
     stderr: EventEmitter;
-    stdin: { write: (s: string) => void; end: () => void };
+    stdin: {
+      write: (s: string) => void;
+      end: () => void;
+      on: (event: string, listener: (...args: unknown[]) => void) => void;
+    };
     kill: () => void;
   };
   child.stdout = new EventEmitter();
   child.stderr = new EventEmitter();
   child.kill = vi.fn();
-  child.stdin = { write: () => {}, end: () => {} };
+  // #289: the real adapter now registers an 'error' listener on
+  // `child.stdin` (EPIPE handling) — this fake must have an `.on` or the
+  // version spawn this file drives through resolveCliVersion() throws
+  // synchronously inside runClaudeCli's Promise executor, which the
+  // Promise constructor turns into a silent rejection, caught by
+  // resolveCliVersion()'s own try/catch and reported as `undefined` —
+  // exactly the failure this comment would otherwise leave unexplained.
+  child.stdin = { write: () => {}, end: () => {}, on: () => {} };
   return child;
 }
 

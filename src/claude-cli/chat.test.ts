@@ -30,7 +30,11 @@ function fakeChild() {
   const child = new EventEmitter() as EventEmitter & {
     stdout: EventEmitter;
     stderr: EventEmitter;
-    stdin: { write: (s: string) => void; end: () => void };
+    stdin: {
+      write: (s: string) => void;
+      end: () => void;
+      on: (event: string, listener: (...args: unknown[]) => void) => void;
+    };
     kill: () => void;
   };
   child.stdout = new EventEmitter();
@@ -45,6 +49,12 @@ function fakeChild() {
       // Emit close on the next tick, after stdout/stderr data + this test's
       // own close() call have had a chance to be scheduled synchronously.
     },
+    // #289: real `child.stdin` is its own stream/EventEmitter — the real
+    // adapter now registers an 'error' listener on it (EPIPE handling).
+    // A no-op here matches the real shape closely enough for every test
+    // in this file, none of which drives a stdin-level error directly
+    // (that is chat.epipe.test.ts's job, against a REAL subprocess).
+    on: () => {},
   };
   return { child, written };
 }

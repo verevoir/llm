@@ -852,6 +852,34 @@ function runClaudeCli(args: string[], input: string, signal?: AbortSignal): Prom
     child.on('close', (exitCode, signal) =>
       finish(() => resolve({ stdout, stderr, exitCode, signal }))
     );
+    // #289: EPIPE. `child.on('error', ...)` above covers a SPAWN-level
+    // failure (the process itself never starting), but `child.stdin` is
+    // its OWN EventEmitter/stream — a write failure on it (e.g. EPIPE,
+    // when `claude` exits before ever reading stdin, which a large
+    // enough `input` makes a real race rather than a theoretical one)
+    // emits 'error' on THAT stream, not on `child`. With no listener
+    // here, Node has zero listeners for that 'error' event and THROWS —
+    // an uncaught exception that can crash the host process.
+    //
+    // DELIBERATELY SWALLOWED, not forwarded to `reject` directly: a
+    // process that exits before reading stdin ALSO fires its own
+    // 'close' event (the exit itself is what broke the pipe in the
+    // first place) — that 'close' handler, a few lines below, already
+    // carries the real exit code/signal and whatever `stderr` this
+    // process wrote before exiting, and is what feeds `chat()`'s
+    // existing non-zero-exit path (`describeExit` +
+    // `describeNonZeroExitReason`) — "one clear failure carrying the
+    // exit code and stderr", exactly as a non-zero exit without this
+    // problem already produces. Rejecting HERE instead, with the bare
+    // EPIPE error, would race `close` and — observed directly in this
+    // fix's own test — sometimes WIN that race, replacing the typed,
+    // informative "exited with code N: ..." failure with an opaque
+    // "write EPIPE" one. `settled`'s guard means whichever of 'error'
+    // or 'close' is observed by `finish` first still only fires once;
+    // swallowing here, rather than settling, lets 'close' be that one
+    // observation whenever it fires at all — which, since the write
+    // only fails because the process already exited, it always will.
+    child.stdin.on('error', () => {});
     child.stdin.write(input);
     child.stdin.end();
   });
