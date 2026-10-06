@@ -6,29 +6,21 @@ import process from 'node:process';
 import { chat } from './index.js';
 
 /**
- * #289: a real EPIPE crash hypothesis in claude-cli's `chat()`.
+ * #289: a BEST-EFFORT SMOKE TEST, NOT the regression proof.
  *
- * `runClaudeCli` (index.ts) calls `child.stdin.write(input)` /
- * `child.stdin.end()` with NO `child.stdin.on('error', ...)` handler of
- * its own — only `child.on('error', ...)` (the whole-process spawn-level
- * failure, e.g. ENOENT) is wired. If the spawned `claude` process exits
- * BEFORE it ever reads stdin (e.g. an auth failure that exits non-zero
- * immediately), writing a payload LARGER than the OS pipe buffer
- * (commonly 64KB on Linux — this uses >128KB so EPIPE is deterministic
- * on every OS, not timing-dependent) raises EPIPE on the write. Node
- * emits that as an 'error' event on the `stdin` STREAM itself, distinct
- * from the child's own 'error' event — with zero listeners on it, Node
- * throws rather than swallows, an UNCAUGHT exception that can crash the
- * host process instead of giving `chat()` a normal, typed rejection.
- *
- * A REAL subprocess, not a mock: `chat.test.ts` mocks `node:child_process`
- * throughout, which cannot reproduce a genuine OS-level EPIPE at all — a
- * mocked `child.stdin.write()` never touches a real pipe. This test
- * instead PATH-prepends a real, tiny stub `claude` script that exits
- * non-zero without ever reading its own stdin, so the write genuinely
- * races a closed pipe.
+ * This spawns a real `claude` stub and writes a >128KB prompt to it,
+ * hoping to hit a genuine OS-level EPIPE on a closed pipe. A review
+ * found this non-deterministic across environments: on at least one
+ * real CI container, this exact scenario never raised EPIPE at all, so
+ * it could not tell the fixed code from the broken code there — the
+ * opposite of a regression test. The actual, environment-independent
+ * proof is `chat.test.ts`'s "stdin EPIPE when the process exits before
+ * reading it (#289, deterministic)" block, which exercises Node's own
+ * no-listener-throws rule for EventEmitter directly, via a mock, rather
+ * than hoping a real pipe-buffer race lands. This file is kept only as
+ * an opportunistic real-process sanity check, allowed to be silent.
  */
-describe('claudeCli.chat — EPIPE when the real CLI exits before reading stdin (#289)', () => {
+describe('claudeCli.chat — EPIPE when the real CLI exits before reading stdin (#289, best-effort smoke, NOT the regression proof — see chat.test.ts)', () => {
   let stubDir: string | undefined;
   let originalPath: string | undefined;
 
