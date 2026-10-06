@@ -4,8 +4,9 @@
 `chat()` / `chatWithTools` / `chatWithToolLoop` contract, token + cost accounting, the model
 catalog + provider-routing registries, the model-span audit hook, and the advisor-pair
 primitive. Provider SDK adapters live in subpaths (`@verevoir/llm/anthropic`, `/google`,
-`/openai`, `/deepseek`, `/samba`, `/mistral`), so a consumer only pays for the SDK it
-imports.
+`/openai`, `/deepseek`, `/samba`, `/mistral`, `/claude-cli`), so a consumer only pays for
+the SDK it imports. `/catalog` registers every catalogued provider's model data with no
+SDK import at all.
 
 ## Stack & layout
 
