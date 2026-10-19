@@ -1,8 +1,12 @@
 # Changelog
 
-## [Unreleased]
+## [0.30.0] — 2026-10-18
 
 **BREAKING: `ContentBlock` gains `image` and `document` members; `ToolExecutor` may now return `ContentBlock[]`, not only `string`.** A tool result or a user-turn message can now carry an inline-base64 `image` (`image/png` | `image/jpeg` | `image/gif` | `image/webp`) or `document` (`application/pdf`) block, mirroring Anthropic's own wire shape. `@verevoir/llm/anthropic` passes both through unchanged — in `tool_result.content` and in user-turn content alike — since its `ContentBlock` already mirrors the real Anthropic API shape. Every OTHER adapter (`/google`, `/openai`, `/openai-compat` and its consumers `/deepseek` + `/samba` + `/mistral`, `/claude-cli`) can only carry text: a non-text block reaching any of them now throws the new, named `UnsupportedContentBlockError` (`provider` + `blockType`) via the new `collapseContentToText(provider, content)` helper, instead of being silently dropped or stringified into an opaque object. A plain `string` `TurnContent`/`ToolExecutor` return behaves exactly as it did before this widening — nothing changes for an existing text-only consumer.
+
+**Migration:** code that implements `ToolExecutor` and returns a `string` is unchanged. Code that CALLS one and treats the result as a `string` must now handle the `ContentBlock[]` case too.
+
+**The refusal rule, by location.** A `ToolExecutor`'s own result reaching an adapter that cannot carry its block type (every adapter except Anthropic, for `image`/`document`) becomes a NAMED `is_error: true` tool_result — the thrown `UnsupportedContentBlockError`'s message (naming the provider and the block type) is what the model sees, and the tool loop continues. An unsupported block in a USER TURN the caller built directly still THROWS `UnsupportedContentBlockError` — that is caller error, not a tool failure the model should see and react to.
 
 - `ContentBlock`'s existing `text` / `tool_use` / `tool_result` members are unchanged; `tool_result.content` widens from `string` to `string | ContentBlock[]`.
 - `ToolExecutor`'s return type widens from `Promise<string>` to `Promise<string | ContentBlock[]>`.

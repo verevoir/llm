@@ -19,7 +19,7 @@
 
 import OpenAI from 'openai';
 import { fireUsageHook } from './audit-hook.js';
-import { collapseContentToText, UnsupportedContentBlockError } from './index.js';
+import { collapseContentToText } from './index.js';
 import {
   type ChatOptions,
   type ChatReply,
@@ -466,7 +466,13 @@ export function createOpenAICompatAdapter(config: OpenAICompatConfig): OpenAICom
         try {
           content = collapseContentToText(provider, await options.executor(use));
         } catch (err) {
-          if (err instanceof UnsupportedContentBlockError) throw err;
+          // An UnsupportedContentBlockError from the executor (an image/document
+          // block this provider cannot carry) becomes a named is_error
+          // tool_result, same as every other executor failure and the same
+          // rule mcp-bridge.ts already follows -- the model sees the named
+          // refusal and the loop continues. An unsupported block in a USER
+          // TURN the caller built is a different case (collapseContentToText
+          // called outside this try/catch, on turn content) and still throws.
           content = err instanceof Error ? err.message : String(err);
           isError = true;
         }
