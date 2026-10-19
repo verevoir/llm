@@ -119,6 +119,7 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { collapseContentToText } from '../index.js';
 import type { ToolDef, ToolExecutor, ToolUse } from '../index.js';
 
 /** One recorded tool result — matches {@link ChatWithToolLoopResult.toolResults}'s
@@ -330,8 +331,20 @@ export async function createToolBridge(tools: ToolDef[]): Promise<ToolBridge> {
     let content: string;
     let isError = false;
     try {
-      content = await current.executor(toolUse);
+      // This transport's MCP reply to `claude` is hardcoded text-only (see
+      // `respond`'s own type below) — unlike the Anthropic/Google/OpenAI-
+      // compatible adapters, there is no richer wire shape to pass an
+      // image/document block through to here, so a non-text result is a
+      // named refusal, not a silent stringification.
+      // A non-text result is a named refusal surfaced to `claude` as an
+      // error tool-result (below), not rethrown: handleRequest runs
+      // detached (`void handleRequest(...)`, above), so a throw here
+      // would be an unhandled rejection rather than something a caller
+      // catches.
+      content = collapseContentToText('claude-cli', await current.executor(toolUse));
     } catch (err) {
+      // UnsupportedContentBlockError extends Error, so its named message
+      // (provider + blockType) is already what reaches the model here.
       content = err instanceof Error ? err.message : String(err);
       isError = true;
     }

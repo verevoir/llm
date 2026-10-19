@@ -746,7 +746,10 @@ export async function chatWithToolLoop(
     // Execute each tool_use; collect tool_result blocks.
     const toolResultBlocks: ContentBlock[] = [];
     for (const use of streamed.toolUses) {
-      let content: string;
+      // Never collapsed: this adapter's ContentBlock already mirrors
+      // Anthropic's own wire shape, so an image/document block the
+      // executor returns passes through unchanged into tool_result.content.
+      let content: string | ContentBlock[];
       let isError = false;
       try {
         content = await options.executor(use);

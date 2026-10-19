@@ -13,6 +13,7 @@
 
 import { GoogleGenAI } from '@google/genai';
 import { fireUsageHook } from '../audit-hook.js';
+import { collapseContentToText, UnsupportedContentBlockError } from '../index.js';
 import {
   type ChatOptions,
   type ChatReply,
@@ -133,7 +134,7 @@ async function callGenerateContent(
   // 'assistant' in our surface maps to 'model' in Gemini.
   const contents = turns.map((t) => ({
     role: t.role === 'assistant' ? 'model' : 'user',
-    parts: [{ text: t.content as string }],
+    parts: [{ text: collapseContentToText('google', t.content) }],
   }));
 
   const response = await client.models.generateContent({
@@ -347,7 +348,7 @@ function toGeminiTools(tools: ToolDef[]) {
 function turnsToContents(turns: ChatOptions['turns']): GeminiContent[] {
   return turns.map((t) => ({
     role: t.role === 'assistant' ? 'model' : 'user',
-    parts: [{ text: t.content as string }],
+    parts: [{ text: collapseContentToText('google', t.content) }],
   }));
 }
 
@@ -546,8 +547,9 @@ export async function chatWithToolLoop(
       let content: string;
       let isError = false;
       try {
-        content = await options.executor(use);
+        content = collapseContentToText('google', await options.executor(use));
       } catch (err) {
+        if (err instanceof UnsupportedContentBlockError) throw err;
         content = err instanceof Error ? err.message : String(err);
         isError = true;
       }
