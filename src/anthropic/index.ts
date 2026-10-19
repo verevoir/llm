@@ -44,6 +44,12 @@ import {
 
 export { PROVIDER };
 
+// Re-exported so a caller can write `import { chatWithToolLoop, type
+// ContentBlock } from '@verevoir/llm/anthropic'` without reaching back
+// into the core package — ContentBlock is only ever imported, never
+// re-exported, otherwise.
+export type { ContentBlock };
+
 // Register the catalog into the core so normalisation, family-level pricing,
 // and labels work for any consumer (and any future version of these families).
 // Import side-effect; idempotent. Also registers currentId + aliases as labels.
@@ -746,7 +752,10 @@ export async function chatWithToolLoop(
     // Execute each tool_use; collect tool_result blocks.
     const toolResultBlocks: ContentBlock[] = [];
     for (const use of streamed.toolUses) {
-      let content: string;
+      // Never collapsed: this adapter's ContentBlock already mirrors
+      // Anthropic's own wire shape, so an image/document block the
+      // executor returns passes through unchanged into tool_result.content.
+      let content: string | ContentBlock[];
       let isError = false;
       try {
         content = await options.executor(use);

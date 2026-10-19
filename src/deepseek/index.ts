@@ -25,6 +25,7 @@ import {
   registerModelLabels,
   registerProviderConnection,
   resolveBaseUrl,
+  collapseContentToText,
 } from '../index.js';
 
 // ────────────────────────────────────────────────────────────────────
@@ -138,7 +139,7 @@ async function callChatCompletionsCreate(
     { role: 'system' as const, content: systemPrompt },
     ...turns.map((t) => ({
       role: t.role as 'user' | 'assistant',
-      content: t.content as string,
+      content: collapseContentToText(PROVIDER, t.content),
     })),
   ];
 

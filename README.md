@@ -168,6 +168,38 @@ const result = await chatWithToolLoop({
 });
 ```
 
+### Content blocks: images and PDF documents
+
+`ToolExecutor` may return `Promise<string | ContentBlock[]>`, not only a plain
+string. Returning `ContentBlock[]` lets a tool hand back an `image` or
+`document` block (e.g. a screenshot, a generated PDF) instead of text.
+`@verevoir/llm/anthropic` passes both through to the model unchanged, in
+`tool_result.content` and in user-turn content alike. Every other adapter can
+only carry text: a non-text block reaching one of them throws the named
+`UnsupportedContentBlockError` (`provider` + `blockType`) instead of being
+silently dropped or stringified.
+
+```ts
+import { chatWithToolLoop, type ContentBlock } from '@verevoir/llm/anthropic';
+
+const screenshotTool = {
+  name: 'screenshot',
+  description: 'Capture the current screen as an image.',
+  input_schema: { type: 'object', properties: {} },
+};
+
+const result = await chatWithToolLoop({
+  systemPrompt: 'Diagnose the UI bug from the screenshot.',
+  turns: [{ role: 'user', content: 'What is wrong with this page?' }],
+  apiKey: process.env.ANTHROPIC_API_KEY,
+  tools: [screenshotTool],
+  executor: async (toolUse): Promise<ContentBlock[]> => {
+    const png = await captureScreenshot(); // base64 PNG data
+    return [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: png } }];
+  },
+});
+```
+
 The input `tools` array is never mutated; a name collision with the consult
 tool throws at wrap time (`toolName` renames it). A failing advisor never kills
 the work — the executor gets a legible "advisor unavailable" result and

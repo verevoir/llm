@@ -19,6 +19,7 @@
 
 import OpenAI from 'openai';
 import { fireUsageHook } from './audit-hook.js';
+import { collapseContentToText } from './index.js';
 import {
   type ChatOptions,
   type ChatReply,
@@ -189,7 +190,10 @@ export function createOpenAICompatAdapter(config: OpenAICompatConfig): OpenAICom
   ): Promise<RawResult> {
     const messages = [
       { role: 'system' as const, content: systemPrompt },
-      ...turns.map((t) => ({ role: t.role as 'user' | 'assistant', content: t.content as string })),
+      ...turns.map((t) => ({
+        role: t.role as 'user' | 'assistant',
+        content: collapseContentToText(provider, t.content),
+      })),
     ];
     const response = await client.chat.completions.create({ model: modelId, messages });
     const choice = response.choices?.[0];
@@ -313,7 +317,7 @@ export function createOpenAICompatAdapter(config: OpenAICompatConfig): OpenAICom
   function baseMessages(systemPrompt: string, turns: ChatOptions['turns']): unknown[] {
     return [
       { role: 'system', content: systemPrompt },
-      ...turns.map((t) => ({ role: t.role, content: t.content as string })),
+      ...turns.map((t) => ({ role: t.role, content: collapseContentToText(provider, t.content) })),
     ];
   }
 
@@ -460,8 +464,15 @@ export function createOpenAICompatAdapter(config: OpenAICompatConfig): OpenAICom
         let content: string;
         let isError = false;
         try {
-          content = await options.executor(use);
+          content = collapseContentToText(provider, await options.executor(use));
         } catch (err) {
+          // An UnsupportedContentBlockError from the executor (an image/document
+          // block this provider cannot carry) becomes a named is_error
+          // tool_result, same as every other executor failure and the same
+          // rule mcp-bridge.ts already follows -- the model sees the named
+          // refusal and the loop continues. An unsupported block in a USER
+          // TURN the caller built is a different case (collapseContentToText
+          // called outside this try/catch, on turn content) and still throws.
           content = err instanceof Error ? err.message : String(err);
           isError = true;
         }

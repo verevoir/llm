@@ -264,4 +264,26 @@ describe('claude-cli mcp-bridge', () => {
     await bridge.close();
     await expect(bridge.close()).resolves.toBeUndefined();
   });
+
+  it('an executor returning an unsupported image block becomes a named is_error tool result, not a crash', async () => {
+    const bridge = await bridgeFor([ECHO_TOOL]);
+    const port = await bridgePort(bridge);
+    const token = await bridgeToken(bridge);
+    const state = bridge.arm(
+      async () => [
+        {
+          type: 'image' as const,
+          source: { type: 'base64' as const, media_type: 'image/png' as const, data: 'abc' },
+        },
+      ],
+      5
+    );
+
+    const resp = await sendToolCall(port, { id: 'img1', name: 'echo', arguments: {}, token });
+
+    expect(resp.result?.isError).toBe(true);
+    expect(resp.result?.content[0].text).toContain('claude-cli');
+    expect(resp.result?.content[0].text).toContain('image');
+    expect(state.toolResults[0].isError).toBe(true);
+  });
 });

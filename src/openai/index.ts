@@ -24,6 +24,7 @@ import {
   registerProviderConnection,
   resolveBaseUrl,
   localEndpointKey,
+  collapseContentToText,
 } from '../index.js';
 
 // ────────────────────────────────────────────────────────────────────
@@ -125,7 +126,7 @@ async function callResponsesCreate(
   // conversation). 'assistant' / 'user' roles pass through unchanged.
   const input = turns.map((t) => ({
     role: t.role as 'user' | 'assistant',
-    content: t.content as string,
+    content: collapseContentToText(PROVIDER, t.content),
   }));
 
   const response = await client.responses.create({

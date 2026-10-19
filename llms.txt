@@ -98,12 +98,19 @@ Each adapter exposes, alongside `chat()`:
 - `chatWithTools(options)` — single-shot; surfaces the model's `ToolUse[]` for
   the caller to execute.
 - `chatWithToolLoop(options)` — runs model → execute tools → feed results back →
-  repeat, to a `maxIterations` cap. Takes a `ToolExecutor` (`(toolUse) => Promise<string>`)
-  plus per-iteration `onUsage` / `onIteration` hooks; usage is summed across the loop.
+  repeat, to a `maxIterations` cap. Takes a `ToolExecutor`
+  (`(toolUse) => Promise<string | ContentBlock[]>`) plus per-iteration
+  `onUsage` / `onIteration` hooks; usage is summed across the loop.
 
 Provider-agnostic types `ToolDef`, `ToolUse`, `ToolExecutor`, `ContentBlock`
-(`text` | `tool_use` | `tool_result`), and the `ChatWithTools*` /
-`ChatWithToolLoop*` option/result shapes live on the core export.
+(`text` | `tool_use` | `tool_result` | `image` | `document`), plus
+`UnsupportedContentBlockError` and `collapseContentToText(provider, content)`:
+a provider that cannot carry a block type (only `@verevoir/llm/anthropic`
+carries `image`/`document`) throws this error, naming the provider and
+block type. Inside a tool executor's result it becomes a named `is_error`
+tool_result; inside a user turn the caller built, it throws. The
+`ChatWithTools*` / `ChatWithToolLoop*` option/result shapes live on the
+core export.
 
 ## Cost accounting
 

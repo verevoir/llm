@@ -17,7 +17,13 @@ vi.mock('openai', () => ({
 
 // Import AFTER vi.mock so the mocked constructor is the one captured.
 import { chat } from './index.js';
-import { setModelSpanSink, type ModelSpan, type TokenUsage } from '../index.js';
+import {
+  setModelSpanSink,
+  UnsupportedContentBlockError,
+  type ContentBlock,
+  type ModelSpan,
+  type TokenUsage,
+} from '../index.js';
 
 interface FakeUsage {
   input_tokens: number;
@@ -212,5 +218,26 @@ describe('openai.chat', () => {
 
     expect(result.content).toBe('finally');
     expect(mockCreate).toHaveBeenCalledTimes(2);
+  });
+
+  it('a user turn carrying an image block throws UnsupportedContentBlockError naming the provider and "image" — caller error, never a silent drop', async () => {
+    const imageBlock: ContentBlock = {
+      type: 'image',
+      source: { type: 'base64', media_type: 'image/png', data: 'abc' },
+    };
+    try {
+      await chat({
+        systemPrompt: 'sys',
+        turns: [{ role: 'user', content: [imageBlock] }],
+        apiKey: 'sk-test',
+      });
+      throw new Error('expected to throw');
+    } catch (err) {
+      expect(err).toBeInstanceOf(UnsupportedContentBlockError);
+      expect((err as UnsupportedContentBlockError).provider).toBe('openai');
+      expect((err as UnsupportedContentBlockError).blockType).toBe('image');
+    }
+    // Thrown before the SDK is ever called — not a provider-side rejection.
+    expect(mockCreate).not.toHaveBeenCalled();
   });
 });

@@ -10,7 +10,7 @@ vi.mock('@google/genai', () => ({
 }));
 
 import { chatWithTools, chatWithToolLoop } from './index.js';
-import { setModelSpanSink, type ModelSpan } from '../index.js';
+import { setModelSpanSink, type ContentBlock, type ModelSpan } from '../index.js';
 
 const TOOL = {
   name: 'record_step',
@@ -299,5 +299,27 @@ describe('@verevoir/llm/google — tool calling', () => {
     expect(r.iterations).toBe(2);
     expect(r.text).toBe('');
     expect(generateMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('an executor returning an unsupported image block becomes a named is_error tool result, not a crash', async () => {
+    generateMock
+      .mockResolvedValueOnce(fnCallReply({ step: 'x' }))
+      .mockResolvedValueOnce(textReply('ok'));
+    const executor = vi.fn(async (): Promise<ContentBlock[]> => [
+      { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'abc' } },
+    ]);
+    const r = await chatWithToolLoop({
+      systemPrompt: 's',
+      turns: [{ role: 'user', content: 'go' }],
+      tools: [TOOL],
+      executor,
+      apiKey: 'k',
+    });
+    expect(r.toolResults[0].isError).toBe(true);
+    expect(r.toolResults[0].content).toContain('google');
+    expect(r.toolResults[0].content).toContain('image');
+    // The loop still reaches the final text reply — the refusal is a named
+    // tool_result, not a thrown error that aborts the loop.
+    expect(r.text).toBe('ok');
   });
 });

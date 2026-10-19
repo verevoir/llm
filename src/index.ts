@@ -60,12 +60,30 @@ export type TurnContent = string | ContentBlock[];
 
 /**
  * Discriminated union of message-content blocks. Mirrors Anthropic's
- * native shape so the adapter doesn't have to translate. Adapters that
- * don't support a given block kind (e.g. Google for `tool_result`)
- * should surface a typed error rather than silently dropping content.
+ * native shape so the adapter doesn't have to translate. `image` and
+ * `document` carry inline base64 data the same way Anthropic's own
+ * SDK does, so `@verevoir/llm/anthropic` passes them through unchanged
+ * — both as user-turn content and inside a `tool_result`'s own
+ * `content`. Adapters that don't support a given block kind (every
+ * adapter except Anthropic, for `image`/`document`; Google for
+ * `tool_result`, etc.) surface {@link UnsupportedContentBlockError}
+ * rather than silently dropping or stringifying it — see {@link
+ * collapseContentToText}.
  */
 export type ContentBlock =
   | { type: 'text'; text: string }
+  | {
+      type: 'image';
+      source: {
+        type: 'base64';
+        media_type: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp';
+        data: string;
+      };
+    }
+  | {
+      type: 'document';
+      source: { type: 'base64'; media_type: 'application/pdf'; data: string };
+    }
   | {
       type: 'tool_use';
       id: string;
@@ -76,13 +94,65 @@ export type ContentBlock =
       type: 'tool_result';
       tool_use_id: string;
       /**
-       * Result returned by the tool, serialised as a string the model
-       * can read. Use JSON for structured results.
+       * Result returned by the tool. A plain `string` behaves exactly
+       * as before this field widened — use JSON for structured text
+       * results. `ContentBlock[]` lets a tool return an `image` or
+       * `document` (or `text`) block straight through on an adapter
+       * that can carry it (currently only `@verevoir/llm/anthropic` —
+       * see {@link ToolExecutor}); an adapter that cannot carry a
+       * block found here throws {@link UnsupportedContentBlockError}
+       * rather than silently dropping or stringifying it.
        */
-      content: string;
+      content: string | ContentBlock[];
       /** True when the tool errored; the model treats it as a failure. */
       is_error?: boolean;
     };
+
+/**
+ * Thrown by {@link collapseContentToText} when a provider that can
+ * only carry text content — every adapter except
+ * `@verevoir/llm/anthropic` — is handed a {@link ContentBlock} it
+ * cannot represent (an `image`, `document`, `tool_use`, or
+ * `tool_result` block appearing where only `text` is meaningful).
+ * Named by `provider` and `blockType` so the failure is attributable,
+ * never a silent drop or a stringified block object.
+ */
+export class UnsupportedContentBlockError extends Error {
+  constructor(
+    public readonly provider: string,
+    public readonly blockType: string
+  ) {
+    super(`${provider} cannot carry a '${blockType}' content block here`);
+    this.name = 'UnsupportedContentBlockError';
+  }
+}
+
+/**
+ * Collapse {@link TurnContent} — or a {@link ContentBlock}'s own
+ * `tool_result.content` — to the plain string a text-only provider
+ * needs. A `string` passes through unchanged. A `ContentBlock[]`
+ * collapses to its concatenated `text` when EVERY block is `type:
+ * 'text'`; the first block of any other type throws {@link
+ * UnsupportedContentBlockError} naming `provider` and that block's
+ * type, rather than silently dropping it or stringifying the block
+ * object.
+ *
+ * Used by every adapter except `@verevoir/llm/anthropic`, whose own
+ * native wire shape already mirrors `ContentBlock` — it passes
+ * `image` and `document` blocks through unchanged instead of calling
+ * this.
+ */
+export function collapseContentToText(provider: string, content: TurnContent): string {
+  if (typeof content === 'string') return content;
+  const parts: string[] = [];
+  for (const block of content) {
+    if (block.type !== 'text') {
+      throw new UnsupportedContentBlockError(provider, block.type);
+    }
+    parts.push(block.text);
+  }
+  return parts.join('');
+}
 
 /** A single message in a conversation. */
 export interface Turn {
@@ -322,13 +392,20 @@ export interface ChatWithToolsResult {
 
 /**
  * Caller-supplied function that executes a single tool_use the model
- * emitted, returning a string the model will see as the matching
- * `tool_result`. Throw to indicate a tool failure — the loop will
- * surface it to the model with `is_error: true` so the model can
- * react (apologise, try a different approach, etc.) rather than
- * crashing the entire conversation.
+ * emitted, returning what the model will see as the matching
+ * `tool_result`. A plain `string` behaves exactly as before this type
+ * widened. Returning `ContentBlock[]` lets a tool hand back an
+ * `image` or `document` (e.g. a screenshot, a generated PDF) instead
+ * of text — `@verevoir/llm/anthropic` passes it through to the model
+ * unchanged; an adapter that cannot carry the block throws {@link
+ * UnsupportedContentBlockError} (via {@link collapseContentToText})
+ * naming the provider and the block type, rather than silently
+ * dropping it or stringifying it. Throw to indicate a tool FAILURE —
+ * the loop will surface it to the model with `is_error: true` so the
+ * model can react (apologise, try a different approach, etc.) rather
+ * than crashing the entire conversation.
  */
-export type ToolExecutor = (toolUse: ToolUse) => Promise<string>;
+export type ToolExecutor = (toolUse: ToolUse) => Promise<string | ContentBlock[]>;
 
 /** Options for {@link chatWithToolLoop}. */
 export interface ChatWithToolLoopOptions extends ChatWithToolsOptions {
@@ -359,8 +436,12 @@ export interface ChatWithToolLoopResult {
   text: string;
   /** All tool_uses across every iteration of the loop, in order. */
   toolUses: ToolUse[];
-  /** Per-tool-use, the string the executor returned (or the error message). */
-  toolResults: { toolUseId: string; content: string; isError: boolean }[];
+  /** Per-tool-use, what the executor returned (or the error message as a
+   * plain string) — {@link ContentBlock}[] only ever appears here on
+   * `@verevoir/llm/anthropic`; every other adapter has already collapsed
+   * it to text via {@link collapseContentToText} by this point, or thrown
+   * {@link UnsupportedContentBlockError}. */
+  toolResults: { toolUseId: string; content: string | ContentBlock[]; isError: boolean }[];
   /** How many model calls happened (1 = pure text, no tools used). */
   iterations: number;
   /** Aggregated usage across all iterations of the loop. */
