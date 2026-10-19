@@ -44,6 +44,12 @@ import {
 
 export { PROVIDER };
 
+// Re-exported so a caller can write `import { chatWithToolLoop, type
+// ContentBlock } from '@verevoir/llm/anthropic'` without reaching back
+// into the core package — ContentBlock is only ever imported, never
+// re-exported, otherwise.
+export type { ContentBlock };
+
 // Register the catalog into the core so normalisation, family-level pricing,
 // and labels work for any consumer (and any future version of these families).
 // Import side-effect; idempotent. Also registers currentId + aliases as labels.
