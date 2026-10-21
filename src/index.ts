@@ -33,6 +33,11 @@
  */
 export type ModelClass = 'reasoning' | 'drafting' | 'extraction';
 
+// Price book (STDIO-pricing) — USD-per-token lookup, fetched at start-up and
+// refreshed periodically by the caller. See src/pricing.ts for the full
+// design note; this package does no cost arithmetic beyond that lookup.
+export * from './pricing.js';
+
 // Model-span hook (STDIO-500) — optional, fail-soft per-call instrumentation so
 // a consumer can audit every model call, not only delegated ones.
 export {
