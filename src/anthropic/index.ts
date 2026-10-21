@@ -15,6 +15,7 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import { fireUsageHook } from '../audit-hook.js';
+import { withGenAISpan } from '../otel.js';
 import { isAuthError, noteOAuthRejected, oauthSystemIdentity, resolveClient } from './client.js';
 import { PROVIDER, CATALOG, CONNECTION } from './catalog.js';
 import {
@@ -266,8 +267,20 @@ interface StreamedResult {
     outputTokens: number;
     cacheCreationInputTokens: number;
     cacheReadInputTokens: number;
+    /** The extended-cache-TTL split, when Anthropic's beta reports it —
+     * see {@link TokenUsage.cacheCreationEphemeral5mInputTokens}. */
+    cacheCreationEphemeral5mInputTokens?: number;
+    cacheCreationEphemeral1hInputTokens?: number;
   };
   stopReason: string;
+}
+
+/** The extended-cache-TTL breakdown Anthropic's beta usage shape carries as
+ * `usage.cache_creation.{ephemeral_5m,ephemeral_1h}_input_tokens`. Not on
+ * every SDK type version, hence the cast at the one call site that reads it. */
+interface CacheCreationBreakdown {
+  ephemeral_5m_input_tokens?: number;
+  ephemeral_1h_input_tokens?: number;
 }
 
 async function callStreamed(
@@ -275,71 +288,97 @@ async function callStreamed(
   request: Record<string, unknown>,
   onProgress?: (info: ProgressInfo) => Promise<void>
 ): Promise<StreamedResult> {
-  // The cast goes through `unknown` because the SDK's MessageStreamParams
-  // is a structural shape we can't match without pinning to its full
-  // generic. `buildRequest` is the source of truth for valid payloads.
-  const stream = client.messages.stream(
-    request as unknown as Parameters<typeof client.messages.stream>[0]
-  );
+  const requestModel = typeof request.model === 'string' ? request.model : 'unknown';
+  return withGenAISpan({ provider: PROVIDER, requestModel }, async () => {
+    // The cast goes through `unknown` because the SDK's MessageStreamParams
+    // is a structural shape we can't match without pinning to its full
+    // generic. `buildRequest` is the source of truth for valid payloads.
+    const stream = client.messages.stream(
+      request as unknown as Parameters<typeof client.messages.stream>[0]
+    );
 
-  if (onProgress) {
-    stream.on('contentBlock', (block) => {
-      if (block.type !== 'tool_use' || block.name !== 'report_progress') {
-        return;
-      }
-      const input = block.input as { percent?: number; message?: string };
-      const info: ProgressInfo = {
-        percent: typeof input.percent === 'number' ? input.percent : 50,
-        message: typeof input.message === 'string' ? input.message : '…',
-      };
-      void (async () => {
-        try {
-          await onProgress(info);
-        } catch (err) {
-          console.warn('callStreamed: onProgress callback threw', err);
+    if (onProgress) {
+      stream.on('contentBlock', (block) => {
+        if (block.type !== 'tool_use' || block.name !== 'report_progress') {
+          return;
         }
-      })();
-    });
-  }
-
-  const final = await stream.finalMessage();
-
-  const texts: string[] = [];
-  const toolUses: ToolUse[] = [];
-  const progressToolUses: { id: string; input: Record<string, unknown> }[] = [];
-  for (const block of final.content) {
-    if (block.type === 'text') {
-      texts.push(block.text);
-    } else if (block.type === 'tool_use' && block.name === 'report_progress') {
-      progressToolUses.push({
-        id: block.id,
-        input: (block.input ?? {}) as Record<string, unknown>,
-      });
-    } else if (block.type === 'tool_use') {
-      toolUses.push({
-        id: block.id,
-        name: block.name,
-        input: (block.input ?? {}) as Record<string, unknown>,
+        const input = block.input as { percent?: number; message?: string };
+        const info: ProgressInfo = {
+          percent: typeof input.percent === 'number' ? input.percent : 50,
+          message: typeof input.message === 'string' ? input.message : '…',
+        };
+        void (async () => {
+          try {
+            await onProgress(info);
+          } catch (err) {
+            console.warn('callStreamed: onProgress callback threw', err);
+          }
+        })();
       });
     }
-  }
 
-  // The SDK's stable Usage type has cache fields as `number | null`;
-  // the beta variants have them as plain numbers. Null-coalesce to 0
-  // either way so the rollup is well-formed.
-  const u = final.usage;
-  return {
-    text: texts.join('\n'),
-    toolUses,
-    progressToolUses,
-    rawUsage: {
-      inputTokens: u.input_tokens ?? 0,
-      outputTokens: u.output_tokens ?? 0,
-      cacheCreationInputTokens: u.cache_creation_input_tokens ?? 0,
-      cacheReadInputTokens: u.cache_read_input_tokens ?? 0,
-    },
-    stopReason: final.stop_reason ?? '',
-  };
+    const final = await stream.finalMessage();
+
+    const texts: string[] = [];
+    const toolUses: ToolUse[] = [];
+    const progressToolUses: { id: string; input: Record<string, unknown> }[] = [];
+    for (const block of final.content) {
+      if (block.type === 'text') {
+        texts.push(block.text);
+      } else if (block.type === 'tool_use' && block.name === 'report_progress') {
+        progressToolUses.push({
+          id: block.id,
+          input: (block.input ?? {}) as Record<string, unknown>,
+        });
+      } else if (block.type === 'tool_use') {
+        toolUses.push({
+          id: block.id,
+          name: block.name,
+          input: (block.input ?? {}) as Record<string, unknown>,
+        });
+      }
+    }
+
+    // The SDK's stable Usage type has cache fields as `number | null`;
+    // the beta variants have them as plain numbers. Null-coalesce to 0
+    // either way so the rollup is well-formed.
+    const u = final.usage;
+    const cacheCreation = (u as unknown as { cache_creation?: CacheCreationBreakdown })
+      .cache_creation;
+    const result: StreamedResult = {
+      text: texts.join('\n'),
+      toolUses,
+      progressToolUses,
+      rawUsage: {
+        inputTokens: u.input_tokens ?? 0,
+        outputTokens: u.output_tokens ?? 0,
+        cacheCreationInputTokens: u.cache_creation_input_tokens ?? 0,
+        cacheReadInputTokens: u.cache_read_input_tokens ?? 0,
+        cacheCreationEphemeral5mInputTokens: cacheCreation?.ephemeral_5m_input_tokens,
+        cacheCreationEphemeral1hInputTokens: cacheCreation?.ephemeral_1h_input_tokens,
+      },
+      stopReason: final.stop_reason ?? '',
+    };
+
+    return {
+      result,
+      outcome: {
+        // Not captured here: the provider's own request-id header. The
+        // Anthropic SDK's streaming surface (`messages.stream`) doesn't
+        // expose the raw HTTP response in a typed way the way `.create()
+        // .withResponse()` does — left undefined per this field's own
+        // "undefined when absent" contract rather than guessed.
+        responseModel: final.model,
+        responseId: final.id,
+        inputTokens: result.rawUsage.inputTokens,
+        outputTokens: result.rawUsage.outputTokens,
+        cacheReadInputTokens: result.rawUsage.cacheReadInputTokens,
+        cacheCreationInputTokens: result.rawUsage.cacheCreationInputTokens,
+        cacheCreationEphemeral5mInputTokens: result.rawUsage.cacheCreationEphemeral5mInputTokens,
+        cacheCreationEphemeral1hInputTokens: result.rawUsage.cacheCreationEphemeral1hInputTokens,
+      },
+    };
+  });
 }
 
 // Anthropic outages of ~1 hour are real. Single-shot retry isn't

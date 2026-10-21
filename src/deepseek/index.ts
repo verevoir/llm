@@ -15,6 +15,7 @@
 
 import OpenAI from 'openai';
 import { fireUsageHook } from '../audit-hook.js';
+import { withGenAISpan } from '../otel.js';
 import {
   type ChatOptions,
   type ChatReply,
@@ -132,37 +133,50 @@ async function callChatCompletionsCreate(
   systemPrompt: string,
   turns: ChatOptions['turns']
 ): Promise<RawResult> {
-  // Chat Completions takes a single `messages` array with the system
-  // prompt as the leading 'system' message. 'user' / 'assistant' roles
-  // pass through unchanged.
-  const messages = [
-    { role: 'system' as const, content: systemPrompt },
-    ...turns.map((t) => ({
-      role: t.role as 'user' | 'assistant',
-      content: collapseContentToText(PROVIDER, t.content),
-    })),
-  ];
+  return withGenAISpan({ provider: PROVIDER, requestModel: modelId }, async () => {
+    // Chat Completions takes a single `messages` array with the system
+    // prompt as the leading 'system' message. 'user' / 'assistant' roles
+    // pass through unchanged.
+    const messages = [
+      { role: 'system' as const, content: systemPrompt },
+      ...turns.map((t) => ({
+        role: t.role as 'user' | 'assistant',
+        content: collapseContentToText(PROVIDER, t.content),
+      })),
+    ];
 
-  const response = await client.chat.completions.create({
-    model: modelId,
-    messages,
+    const response = await client.chat.completions.create({
+      model: modelId,
+      messages,
+    });
+
+    const choice = response.choices?.[0];
+    const text = choice?.message?.content ?? '';
+    const u = (response.usage ?? {}) as DeepSeekUsage;
+    const cachedInputTokens =
+      u.prompt_cache_hit_tokens ?? u.prompt_tokens_details?.cached_tokens ?? 0;
+
+    const result: RawResult = {
+      text,
+      rawUsage: {
+        inputTokens: u.prompt_tokens ?? 0,
+        outputTokens: u.completion_tokens ?? 0,
+        cachedInputTokens,
+      },
+      finishReason: choice?.finish_reason ?? '',
+    };
+
+    return {
+      result,
+      outcome: {
+        responseModel: response.model ?? modelId,
+        responseId: response.id,
+        inputTokens: result.rawUsage.inputTokens,
+        outputTokens: result.rawUsage.outputTokens,
+        cacheReadInputTokens: cachedInputTokens || undefined,
+      },
+    };
   });
-
-  const choice = response.choices?.[0];
-  const text = choice?.message?.content ?? '';
-  const u = (response.usage ?? {}) as DeepSeekUsage;
-  const cachedInputTokens =
-    u.prompt_cache_hit_tokens ?? u.prompt_tokens_details?.cached_tokens ?? 0;
-
-  return {
-    text,
-    rawUsage: {
-      inputTokens: u.prompt_tokens ?? 0,
-      outputTokens: u.completion_tokens ?? 0,
-      cachedInputTokens,
-    },
-    finishReason: choice?.finish_reason ?? '',
-  };
 }
 
 // DeepSeek outages and rate limits are handled with the same exponential-

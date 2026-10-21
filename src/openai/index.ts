@@ -13,6 +13,7 @@
 
 import OpenAI from 'openai';
 import { fireUsageHook } from '../audit-hook.js';
+import { withGenAISpan } from '../otel.js';
 import {
   type ChatOptions,
   type ChatReply,
@@ -122,32 +123,45 @@ async function callResponsesCreate(
   systemPrompt: string,
   turns: ChatOptions['turns']
 ): Promise<RawResult> {
-  // The Responses API takes `instructions` (system) + `input` (the
-  // conversation). 'assistant' / 'user' roles pass through unchanged.
-  const input = turns.map((t) => ({
-    role: t.role as 'user' | 'assistant',
-    content: collapseContentToText(PROVIDER, t.content),
-  }));
+  return withGenAISpan({ provider: PROVIDER, requestModel: modelId }, async () => {
+    // The Responses API takes `instructions` (system) + `input` (the
+    // conversation). 'assistant' / 'user' roles pass through unchanged.
+    const input = turns.map((t) => ({
+      role: t.role as 'user' | 'assistant',
+      content: collapseContentToText(PROVIDER, t.content),
+    }));
 
-  const response = await client.responses.create({
-    model: modelId,
-    instructions: systemPrompt,
-    input,
+    const response = await client.responses.create({
+      model: modelId,
+      instructions: systemPrompt,
+      input,
+    });
+
+    const text = response.output_text ?? '';
+    const u = response.usage;
+    const cachedInputTokens = u?.input_tokens_details?.cached_tokens ?? 0;
+
+    const result: RawResult = {
+      text,
+      rawUsage: {
+        inputTokens: u?.input_tokens ?? 0,
+        outputTokens: u?.output_tokens ?? 0,
+        cachedInputTokens,
+      },
+      status: response.status ?? '',
+    };
+
+    return {
+      result,
+      outcome: {
+        responseModel: response.model ?? modelId,
+        responseId: response.id,
+        inputTokens: result.rawUsage.inputTokens,
+        outputTokens: result.rawUsage.outputTokens,
+        cacheReadInputTokens: cachedInputTokens || undefined,
+      },
+    };
   });
-
-  const text = response.output_text ?? '';
-  const u = response.usage;
-  const cachedInputTokens = u?.input_tokens_details?.cached_tokens ?? 0;
-
-  return {
-    text,
-    rawUsage: {
-      inputTokens: u?.input_tokens ?? 0,
-      outputTokens: u?.output_tokens ?? 0,
-      cachedInputTokens,
-    },
-    status: response.status ?? '',
-  };
 }
 
 // OpenAI outages and rate limits are handled with the same exponential-
