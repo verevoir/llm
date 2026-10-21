@@ -356,9 +356,24 @@ describe('createPriceBook — snapshot', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it('returns unpriced for every model with no snapshot and no fetch', () => {
+  // The bundled default (src/pricing-snapshot.ts) ships in THIS PR as an
+  // unpopulated placeholder (payload: {}) — a later, non-belt step
+  // regenerates it with real data. This test exercises the REAL,
+  // unmocked module exactly as it ships: falling back to it (because no
+  // explicit snapshot and no fetch were supplied) resolves to an empty
+  // table, so every model stays unpriced — never priced at 0 — which is
+  // exactly the pre-default-snapshot behaviour this fallback must not
+  // silently change. See pricing-default-snapshot.test.ts for the same
+  // fallback exercised against a MOCKED, populated default snapshot.
+  it('falls back to the bundled default snapshot (currently an unpopulated placeholder) when no snapshot and no fetch are supplied — empty, so unpriced, never 0', () => {
     const book = createPriceBook({ fetch: vi.fn() });
     expect(book.size).toBe(0);
+    expect(book.source).toEqual({
+      kind: 'snapshot',
+      asOf: 'unpopulated',
+      sha256: '',
+      url: expect.any(String),
+    });
     const r = book.costOf({ provider: 'x', model: 'm1', inputTokens: 1, outputTokens: 1 });
     expect(r).toEqual({ unpriced: expect.any(String) });
   });

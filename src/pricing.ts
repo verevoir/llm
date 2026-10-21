@@ -19,6 +19,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { PRICING_SNAPSHOT } from './pricing-snapshot.js';
 
 // ── Public types ────────────────────────────────────────────────────────
 
@@ -65,13 +66,21 @@ export type PriceTable = Readonly<Record<string, ModelPriceEntry>>;
 
 /** Where the table currently in effect came from. `fetchedAt` is epoch ms
  * from the caller-injected `now()`. `sha256` is the hash of the raw JSON
- * (fetched) or of the snapshot's `JSON.stringify` (snapshot) — not a
- * guarantee of upstream integrity, just a stable fingerprint for logs. */
+ * (fetched), of an explicitly-injected snapshot's `JSON.stringify`, or of
+ * the bundled default snapshot's own `sha256` field — not a guarantee of
+ * upstream integrity, just a stable fingerprint for logs. */
 export interface PriceSource {
   kind: 'fetched' | 'snapshot';
   url?: string;
   fetchedAt?: number;
   sha256?: string;
+  /** Set only when this source is the BUNDLED DEFAULT snapshot
+   * ({@link PRICING_SNAPSHOT}) — never for a fetched source, and never
+   * for an explicitly-injected {@link PriceBookOptions.snapshot}, which
+   * carries no `asOf` of its own. Verbatim from that snapshot's `asOf`
+   * field, so a caller can tell a default-snapshot cost apart from one
+   * priced off a caller-supplied table, and see how stale it is. */
+  asOf?: string;
 }
 
 /**
@@ -235,6 +244,17 @@ const RATIO_FIELDS: readonly (keyof ModelPriceEntry)[] = [
  * key, moved by more than 10x in either direction — the refresh circuit
  * breaker against a corrupted or malicious upstream payload. A model
  * present in only one table is not compared (nothing to compare against).
+ *
+ * Deliberately applies to the FIRST live fetch too, when the table it
+ * would replace is a snapshot — the bundled default, or a
+ * caller-injected one — rather than a previously-fetched table. A 10x
+ * jump against even an old, static snapshot is exactly as suspicious as
+ * one against yesterday's live fetch, and a corrupted or malicious feed
+ * is just as capable of being the very first response this process ever
+ * sees as it is of being the hundredth. On rejection the snapshot stays
+ * in effect — `refresh()` simply returns without replacing `table` or
+ * `source` — and the rejection is logged loudly via the injected
+ * `logger`, never silently swallowed.
  */
 function has10xMove(
   oldTable: Record<string, ModelPriceEntry>,
@@ -275,18 +295,54 @@ function sha256Hex(text: string): string {
 
 // ── Public factory ───────────────────────────────────────────────────────
 
+/**
+ * The table + source in effect before any fetch has ever succeeded, and
+ * the fallback {@link createPriceBook.refresh} returns to if every fetch
+ * fails. An explicitly-injected {@link PriceBookOptions.snapshot} wins
+ * outright — it is already a trusted {@link PriceTable}, used as-is,
+ * exactly as before this default-fallback existed. Otherwise this falls
+ * back to the bundled default, {@link PRICING_SNAPSHOT} — parsed through
+ * the SAME {@link parsePayload} a live fetch's body goes through, because
+ * it is the same raw LiteLLM shape, just trimmed to the fields this
+ * module reads.
+ *
+ * The bundled default ships in this PR as an unpopulated placeholder
+ * (`payload: {}`) — a later, non-belt step regenerates
+ * `src/pricing-snapshot.ts` with real data. Until then this resolves to
+ * an empty table, which is exactly the pre-this-PR behaviour for a caller
+ * supplying neither a snapshot nor a successful fetch: every model
+ * `unpriced`, never `0`.
+ */
+function defaultTableAndSource(
+  options: PriceBookOptions,
+  logger: PriceBookLogger
+): { table: Record<string, ModelPriceEntry>; source: PriceSource } {
+  if (options.snapshot) {
+    return {
+      table: { ...options.snapshot },
+      source: { kind: 'snapshot', sha256: sha256Hex(JSON.stringify(options.snapshot)) },
+    };
+  }
+  return {
+    table: parsePayload(PRICING_SNAPSHOT.payload, logger) ?? {},
+    source: {
+      kind: 'snapshot',
+      asOf: PRICING_SNAPSHOT.asOf,
+      sha256: PRICING_SNAPSHOT.sha256,
+      url: PRICING_SNAPSHOT.sourceUrl,
+    },
+  };
+}
+
 export function createPriceBook(options: PriceBookOptions): PriceBook {
   const url = options.url ?? DEFAULT_PRICE_BOOK_URL;
   const refreshMs = options.refreshMs ?? DEFAULT_REFRESH_MS;
   const now = options.now ?? Date.now;
   const logger = options.logger ?? noopLogger;
 
-  // Invariant maintained everywhere below: `table` is non-empty if and
-  // only if `source` is set — both are always assigned together.
-  let table: Record<string, ModelPriceEntry> = options.snapshot ? { ...options.snapshot } : {};
-  let source: PriceSource | undefined = options.snapshot
-    ? { kind: 'snapshot', sha256: sha256Hex(JSON.stringify(options.snapshot)) }
-    : undefined;
+  const initial = defaultTableAndSource(options, logger);
+  let table: Record<string, ModelPriceEntry> = initial.table;
+  let source: PriceSource | undefined = initial.source;
   let timer: ReturnType<typeof setInterval> | null = null;
 
   async function refresh(): Promise<void> {
