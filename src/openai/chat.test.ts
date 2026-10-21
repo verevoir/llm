@@ -43,6 +43,42 @@ function fakeResponse(
   };
 }
 
+describe('openai.chat — providerRequestId (#70 honesty fix)', () => {
+  beforeEach(() => {
+    mockCreate.mockReset();
+    mockClientCtor.mockReset();
+  });
+
+  it("reports providerRequestId from the response object's own id field", async () => {
+    mockCreate.mockResolvedValueOnce({
+      id: 'resp_honest123',
+      output_text: 'ok',
+      status: 'completed',
+      usage: { input_tokens: 10, output_tokens: 5 },
+    });
+
+    const reply = await chat({
+      systemPrompt: 's',
+      turns: [{ role: 'user', content: 'q' }],
+      apiKey: 'sk-test',
+    });
+
+    expect(reply.usage.providerRequestId).toBe('resp_honest123');
+  });
+
+  it('leaves providerRequestId undefined when the response has no id', async () => {
+    mockCreate.mockResolvedValueOnce(fakeResponse('ok'));
+
+    const reply = await chat({
+      systemPrompt: 's',
+      turns: [{ role: 'user', content: 'q' }],
+      apiKey: 'sk-test',
+    });
+
+    expect(reply.usage.providerRequestId).toBeUndefined();
+  });
+});
+
 describe('openai.chat', () => {
   beforeEach(() => {
     mockCreate.mockReset();

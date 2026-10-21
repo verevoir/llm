@@ -215,6 +215,55 @@ describe('chat — model pinning (ChatOptions.model)', () => {
   });
 });
 
+describe('chat — providerRequestId + 5m/1h cache-write split (#70 honesty fix)', () => {
+  beforeEach(() => {
+    mockStream.mockReset();
+    mockClientCtor.mockReset();
+  });
+
+  it('reports providerRequestId (the message id) and the cache-write 5m/1h split when the response carries them', async () => {
+    mockStream.mockReturnValue({
+      on: () => {},
+      finalMessage: async () => ({
+        id: 'msg_01Honest123',
+        content: [{ type: 'text', text: 'ok' }],
+        stop_reason: 'end_turn',
+        usage: {
+          input_tokens: 10,
+          output_tokens: 5,
+          cache_creation_input_tokens: 30,
+          cache_read_input_tokens: 0,
+          cache_creation: { ephemeral_5m_input_tokens: 10, ephemeral_1h_input_tokens: 20 },
+        },
+      }),
+    });
+
+    const reply = await chat({
+      systemPrompt: 's',
+      turns: [{ role: 'user', content: 'q' }],
+      apiKey: 'sk-test',
+    });
+
+    expect(reply.usage.providerRequestId).toBe('msg_01Honest123');
+    expect(reply.usage.cacheCreationEphemeral5mInputTokens).toBe(10);
+    expect(reply.usage.cacheCreationEphemeral1hInputTokens).toBe(20);
+  });
+
+  it('leaves providerRequestId and the cache-write split undefined when the response has neither', async () => {
+    mockStream.mockReturnValue(fakeStream([{ type: 'text', text: 'ok' }], 'end_turn'));
+
+    const reply = await chat({
+      systemPrompt: 's',
+      turns: [{ role: 'user', content: 'q' }],
+      apiKey: 'sk-test',
+    });
+
+    expect(reply.usage.providerRequestId).toBeUndefined();
+    expect(reply.usage.cacheCreationEphemeral5mInputTokens).toBeUndefined();
+    expect(reply.usage.cacheCreationEphemeral1hInputTokens).toBeUndefined();
+  });
+});
+
 describe('chat — maxTokens override (ChatOptions.maxTokens)', () => {
   beforeEach(() => mockStream.mockReset());
 

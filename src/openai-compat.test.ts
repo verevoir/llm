@@ -112,6 +112,33 @@ describe('createOpenAICompatAdapter', () => {
     expect(result.usage.route).toBe('api-key');
   });
 
+  it("reports providerRequestId from the response object's own id field (#70 honesty fix)", async () => {
+    chatCreateMock.mockResolvedValueOnce({
+      id: 'chatcmpl-honest123',
+      choices: [{ message: { content: 'hi' }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 10, completion_tokens: 5 },
+    });
+    const result = await a.chat({
+      systemPrompt: 's',
+      turns: [{ role: 'user', content: 'go' }],
+      apiKey: 'k',
+    });
+    expect(result.usage.providerRequestId).toBe('chatcmpl-honest123');
+  });
+
+  it('leaves providerRequestId undefined when the response has no id (#70 honesty fix)', async () => {
+    chatCreateMock.mockResolvedValueOnce({
+      choices: [{ message: { content: 'hi' }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 10, completion_tokens: 5 },
+    });
+    const result = await a.chat({
+      systemPrompt: 's',
+      turns: [{ role: 'user', content: 'go' }],
+      apiKey: 'k',
+    });
+    expect(result.usage.providerRequestId).toBeUndefined();
+  });
+
   it('throws when the catalogue declares no modelClass anywhere', () => {
     expect(() =>
       createOpenAICompatAdapter({
