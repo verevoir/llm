@@ -59,8 +59,11 @@ describe('withGenAISpan — recorded via an in-memory span exporter', () => {
 
   beforeAll(() => {
     exporter = new InMemorySpanExporter();
-    provider = new BasicTracerProvider();
-    provider.addSpanProcessor(new SimpleSpanProcessor(exporter));
+    // sdk-trace-base 2.x: span processors are passed to the constructor —
+    // addSpanProcessor() is gone.
+    provider = new BasicTracerProvider({
+      spanProcessors: [new SimpleSpanProcessor(exporter)],
+    });
     trace.setGlobalTracerProvider(provider);
   });
 
