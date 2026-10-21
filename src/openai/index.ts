@@ -115,6 +115,9 @@ interface RawResult {
     cachedInputTokens: number;
   };
   status: string;
+  /** The response's own id (`resp_...`) — the SDK object's id field, not an
+   * HTTP header. See {@link TokenUsage.providerRequestId}. */
+  responseId?: string;
 }
 
 async function callResponsesCreate(
@@ -149,6 +152,7 @@ async function callResponsesCreate(
         cachedInputTokens,
       },
       status: response.status ?? '',
+      responseId: response.id,
     };
 
     return {
@@ -228,7 +232,11 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function shapeUsage(raw: RawResult['rawUsage'], direction: ModelClass): TokenUsage {
+function shapeUsage(
+  raw: RawResult['rawUsage'],
+  direction: ModelClass,
+  responseId?: string
+): TokenUsage {
   return {
     provider: PROVIDER,
     model: models[direction],
@@ -244,6 +252,9 @@ function shapeUsage(raw: RawResult['rawUsage'], direction: ModelClass): TokenUsa
     outputTokens: raw.outputTokens,
     cacheCreationInputTokens: 0,
     cacheReadInputTokens: raw.cachedInputTokens,
+    // The response object's own id (not an HTTP header) — see RawResult's
+    // own doc comment on `responseId`.
+    providerRequestId: responseId,
   };
 }
 
@@ -291,7 +302,7 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
     );
   }
 
-  const usage = shapeUsage(raw.rawUsage, modelClass);
+  const usage = shapeUsage(raw.rawUsage, modelClass, raw.responseId);
   await fireUsageHook(options.onUsage, usage, 'openai.chat');
 
   if (!raw.text) {

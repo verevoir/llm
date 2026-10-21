@@ -273,6 +273,12 @@ interface StreamedResult {
     cacheCreationEphemeral1hInputTokens?: number;
   };
   stopReason: string;
+  /** The message id (`msg_...`). The closest thing to a provider request id
+   * this adapter can get: the streaming surface (`messages.stream`) doesn't
+   * expose the raw HTTP response the way `.create().withResponse()` does,
+   * so there's no `request-id` header reachable here. Real, just not a
+   * header — see {@link TokenUsage.providerRequestId}. */
+  responseId?: string;
 }
 
 /** The extended-cache-TTL breakdown Anthropic's beta usage shape carries as
@@ -358,18 +364,21 @@ async function callStreamed(
         cacheCreationEphemeral1hInputTokens: cacheCreation?.ephemeral_1h_input_tokens,
       },
       stopReason: final.stop_reason ?? '',
+      responseId: final.id,
     };
 
     return {
       result,
       outcome: {
-        // Not captured here: the provider's own request-id header. The
-        // Anthropic SDK's streaming surface (`messages.stream`) doesn't
-        // expose the raw HTTP response in a typed way the way `.create()
-        // .withResponse()` does — left undefined per this field's own
-        // "undefined when absent" contract rather than guessed.
+        // providerRequestId: the request-id HTTP header isn't reachable here —
+        // the Anthropic SDK's streaming surface (`messages.stream`) doesn't
+        // expose the raw HTTP response the way `.create().withResponse()`
+        // does. Falling back to the message id (`final.id`, same value as
+        // `responseId`/gen_ai.response.id) as the next-best "the provider's
+        // own id for this call" — real, just not the header.
         responseModel: final.model,
         responseId: final.id,
+        providerRequestId: final.id,
         inputTokens: result.rawUsage.inputTokens,
         outputTokens: result.rawUsage.outputTokens,
         cacheReadInputTokens: result.rawUsage.cacheReadInputTokens,
@@ -450,7 +459,10 @@ function shapeUsage(
   raw: StreamedResult['rawUsage'],
   direction: ModelClass,
   route: CredentialRoute,
-  modelId: string
+  modelId: string,
+  // Only chat()'s call sites pass this today — see chat()'s own call sites
+  // for why chatWithTools / chatWithToolLoop don't yet report it.
+  responseId?: string
 ): TokenUsage {
   return {
     provider: PROVIDER,
@@ -458,6 +470,7 @@ function shapeUsage(
     direction,
     route,
     ...raw,
+    providerRequestId: responseId,
   };
 }
 
@@ -546,7 +559,7 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
     aggregate.cacheReadInputTokens += streamed.rawUsage.cacheReadInputTokens;
     await fireUsageHook(
       options.onUsage,
-      shapeUsage(streamed.rawUsage, modelClass, streamed.route, modelId),
+      shapeUsage(streamed.rawUsage, modelClass, streamed.route, modelId, streamed.responseId),
       'anthropic.chat'
     );
 
@@ -558,7 +571,13 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
       }
       return {
         content: streamed.text,
-        usage: shapeUsage(aggregate, modelClass, combineRoutes(routesSeen), modelId),
+        usage: shapeUsage(
+          aggregate,
+          modelClass,
+          combineRoutes(routesSeen),
+          modelId,
+          streamed.responseId
+        ),
         stopReason: streamed.stopReason,
       };
     }

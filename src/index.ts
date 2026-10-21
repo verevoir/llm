@@ -236,11 +236,14 @@ export interface TokenUsage {
    */
   cacheCreationEphemeral1hInputTokens?: number;
   /**
-   * The provider's own request id — its `request-id` (or `x-request-id`)
-   * response header, when the adapter's transport exposes response headers
-   * and captured it for this call. `undefined` when the call path doesn't
-   * expose response headers (e.g. a streaming call), or the provider sent
-   * none.
+   * The provider's own id for this call, when `chat()`'s adapter can get
+   * one — real, but not always a literal HTTP `request-id` header: the
+   * Anthropic adapter uses the message id (its streaming surface doesn't
+   * expose response headers); the OpenAI, DeepSeek and OpenAI-compatible
+   * adapters use the SDK response object's own `id` field. `undefined`
+   * when the adapter has none to offer (currently: Google), and on every
+   * adapter's `chatWithTools` / `chatWithToolLoop` paths, which don't yet
+   * wire this through.
    */
   providerRequestId?: string;
 }

@@ -76,9 +76,10 @@ export const ATTR_VEREVOIR_CACHE_CREATION_EPHEMERAL_5M_INPUT_TOKENS =
 /** Anthropic's 1-hour-TTL slice of the cache-write tokens — see above. */
 export const ATTR_VEREVOIR_CACHE_CREATION_EPHEMERAL_1H_INPUT_TOKENS =
   'verevoir.llm.cache_creation.ephemeral_1h_input_tokens';
-/** The provider's own request id (its `request-id` / `x-request-id`
- * response header), when the adapter's transport exposed it. Custom: no
- * `gen_ai.*` attribute for this exists in v1.37.0. */
+/** The provider's own id for this call — an HTTP `request-id` header where
+ * reachable, or the SDK response object's own id field otherwise (see
+ * `TokenUsage.providerRequestId` in src/index.ts for which adapters set
+ * which). Custom: no `gen_ai.*` attribute for this exists in v1.37.0. */
 export const ATTR_VEREVOIR_PROVIDER_REQUEST_ID = 'verevoir.llm.provider_request_id';
 
 const tracer = trace.getTracer('@verevoir/llm');

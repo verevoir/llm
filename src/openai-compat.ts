@@ -106,6 +106,9 @@ interface RawResult {
   text: string;
   rawUsage: { inputTokens: number; outputTokens: number; cachedInputTokens: number };
   finishReason: string;
+  /** The response's own id (`chatcmpl-...`) — the SDK object's id field, not
+   * an HTTP header. See {@link TokenUsage.providerRequestId}. */
+  responseId?: string;
 }
 
 /** OpenAI-compatible usage shape, including the cache fields some providers
@@ -210,6 +213,7 @@ export function createOpenAICompatAdapter(config: OpenAICompatConfig): OpenAICom
           cachedInputTokens,
         },
         finishReason: choice?.finish_reason ?? '',
+        responseId: response.id,
       };
       return {
         result,
@@ -254,7 +258,11 @@ export function createOpenAICompatAdapter(config: OpenAICompatConfig): OpenAICom
     throw new Error('callWithRetries: exited loop without return or throw');
   }
 
-  function shapeUsage(raw: RawResult['rawUsage'], direction: ModelClass): TokenUsage {
+  function shapeUsage(
+    raw: RawResult['rawUsage'],
+    direction: ModelClass,
+    responseId?: string
+  ): TokenUsage {
     return {
       provider,
       model: models[direction],
@@ -267,6 +275,9 @@ export function createOpenAICompatAdapter(config: OpenAICompatConfig): OpenAICom
       outputTokens: raw.outputTokens,
       cacheCreationInputTokens: 0,
       cacheReadInputTokens: raw.cachedInputTokens,
+      // The response object's own id (not an HTTP header) — see RawResult's
+      // own doc comment on `responseId`.
+      providerRequestId: responseId,
     };
   }
 
@@ -290,7 +301,7 @@ export function createOpenAICompatAdapter(config: OpenAICompatConfig): OpenAICom
       );
     }
 
-    const usage = shapeUsage(raw.rawUsage, modelClass);
+    const usage = shapeUsage(raw.rawUsage, modelClass, raw.responseId);
     await fireUsageHook(options.onUsage, usage, `${provider}.chat`);
 
     if (!raw.text) {
