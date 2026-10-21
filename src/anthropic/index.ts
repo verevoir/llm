@@ -530,6 +530,13 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
     outputTokens: 0,
     cacheCreationInputTokens: 0,
     cacheReadInputTokens: 0,
+    // Left undefined unless at least one attempt actually reports a value —
+    // see TokenUsage.cacheCreationEphemeral5mInputTokens's own "undefined
+    // when absent" contract. A plain running sum defaulting to 0 would
+    // report 0 (a claim of "reported zero") for a call that never saw
+    // this field at all.
+    cacheCreationEphemeral5mInputTokens: undefined as number | undefined,
+    cacheCreationEphemeral1hInputTokens: undefined as number | undefined,
   };
   const routesSeen: CredentialRoute[] = [];
 
@@ -557,6 +564,16 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
     aggregate.outputTokens += streamed.rawUsage.outputTokens;
     aggregate.cacheCreationInputTokens += streamed.rawUsage.cacheCreationInputTokens;
     aggregate.cacheReadInputTokens += streamed.rawUsage.cacheReadInputTokens;
+    if (streamed.rawUsage.cacheCreationEphemeral5mInputTokens !== undefined) {
+      aggregate.cacheCreationEphemeral5mInputTokens =
+        (aggregate.cacheCreationEphemeral5mInputTokens ?? 0) +
+        streamed.rawUsage.cacheCreationEphemeral5mInputTokens;
+    }
+    if (streamed.rawUsage.cacheCreationEphemeral1hInputTokens !== undefined) {
+      aggregate.cacheCreationEphemeral1hInputTokens =
+        (aggregate.cacheCreationEphemeral1hInputTokens ?? 0) +
+        streamed.rawUsage.cacheCreationEphemeral1hInputTokens;
+    }
     await fireUsageHook(
       options.onUsage,
       shapeUsage(streamed.rawUsage, modelClass, streamed.route, modelId, streamed.responseId),
