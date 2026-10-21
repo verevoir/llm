@@ -93,7 +93,13 @@ describe('createPriceBook — bundled default snapshot (populated, mocked)', () 
     book.stop();
   });
 
-  it('the 10x breaker rejects a first live fetch that moves a snapshot price more than 10x, keeping the snapshot', async () => {
+  // Policy: the breaker compares LIVE → LIVE only, never snapshot → first
+  // live table. A stale snapshot can legitimately be 10x off by its
+  // asOf date; rejecting the first live fetch against it would pin the
+  // book to that stale snapshot forever. So this transition is accepted
+  // once the payload parses and validates — with a WARNING logged for
+  // each price that moved more than 10x, not a rejection.
+  it('accepts a first live fetch that moves a snapshot price more than 10x, logging a warning rather than rejecting', async () => {
     const logger = fakeLogger();
     const moved = {
       'snapshot-model': {
@@ -106,9 +112,20 @@ describe('createPriceBook — bundled default snapshot (populated, mocked)', () 
     const book = createPriceBook({ fetch: vi.fn(async () => okResponse(moved)), logger });
     book.start();
     await flush();
-    expect(book.source?.kind).toBe('snapshot');
+    expect(book.source?.kind).toBe('fetched');
+    const r = book.costOf({
+      provider: 'anthropic',
+      model: 'snapshot-model',
+      inputTokens: 1,
+      outputTokens: 0,
+    });
+    expect(r).toEqual({
+      usdMicros: Math.round(0.000003 * 50 * 1_000_000),
+      complete: true,
+      source: book.source,
+    });
     expect(logger.warn).toHaveBeenCalledWith(
-      expect.stringContaining('moved more than 10x'),
+      expect.stringContaining('moving more than 10x since the snapshot'),
       expect.anything()
     );
     book.stop();
