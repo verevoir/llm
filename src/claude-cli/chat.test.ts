@@ -1,4 +1,19 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
+import { trace, SpanStatusCode } from '@opentelemetry/api';
+import {
+  BasicTracerProvider,
+  InMemorySpanExporter,
+  SimpleSpanProcessor,
+} from '@opentelemetry/sdk-trace-base';
+import {
+  ATTR_GEN_AI_PROVIDER_NAME,
+  ATTR_GEN_AI_USAGE_INPUT_TOKENS,
+  ATTR_GEN_AI_USAGE_OUTPUT_TOKENS,
+  ATTR_VEREVOIR_CACHE_CREATION_EPHEMERAL_5M_INPUT_TOKENS,
+  ATTR_VEREVOIR_CACHE_CREATION_EPHEMERAL_1H_INPUT_TOKENS,
+  ATTR_VEREVOIR_COST_USD_REPORTED,
+  ATTR_VEREVOIR_PROVIDER_REQUEST_ID,
+} from '../otel.js';
 import { EventEmitter } from 'node:events';
 import { tmpdir } from 'node:os';
 
@@ -180,6 +195,109 @@ function mockSuccessfulCall(mainStdout: string, opts: { versionOutput?: string }
   queueCall(opts.versionOutput ?? DEFAULT_VERSION_OUTPUT);
   return { written: main.written };
 }
+
+// ── GenAI spans (stacked on #70's withGenAISpan) ────────────────────────
+// Registered once for this block, mirroring src/otel.test.ts's own
+// lifecycle — `@opentelemetry/api`'s global tracer provider accepts one
+// registration per process, so each test resets the in-memory exporter
+// rather than re-registering a provider.
+describe('claudeCli.chat — GenAI spans', () => {
+  let exporter: InMemorySpanExporter;
+  let provider: BasicTracerProvider;
+
+  beforeAll(() => {
+    exporter = new InMemorySpanExporter();
+    provider = new BasicTracerProvider({ spanProcessors: [new SimpleSpanProcessor(exporter)] });
+    trace.setGlobalTracerProvider(provider);
+  });
+
+  afterAll(async () => {
+    await provider.shutdown();
+  });
+
+  beforeEach(() => {
+    exporter.reset();
+  });
+
+  it('records a CLIENT span with the GenAI + cache-split + cost attributes on a success that reports them', async () => {
+    mockSuccessfulCall(
+      streamOutput({
+        result: 'ok',
+        usage: {
+          input_tokens: 10,
+          output_tokens: 5,
+          cache_read_input_tokens: 0,
+          cache_creation_input_tokens: 30,
+          cache_creation: { ephemeral_5m_input_tokens: 10, ephemeral_1h_input_tokens: 20 },
+        },
+        total_cost_usd: 0.0042,
+        session_id: 'sess_abc123',
+      })
+    );
+
+    const reply = await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] });
+
+    expect(reply.usage.cacheCreationEphemeral5mInputTokens).toBe(10);
+    expect(reply.usage.cacheCreationEphemeral1hInputTokens).toBe(20);
+    expect(reply.usage.costUsdReported).toBe(0.0042);
+    expect(reply.usage.providerRequestId).toBe('sess_abc123');
+
+    const spans = exporter.getFinishedSpans();
+    expect(spans).toHaveLength(1);
+    const span = spans[0];
+    expect(span.name).toMatch(/^chat /);
+    expect(span.attributes[ATTR_GEN_AI_PROVIDER_NAME]).toBe('anthropic');
+    expect(span.attributes[ATTR_GEN_AI_USAGE_INPUT_TOKENS]).toBe(10);
+    expect(span.attributes[ATTR_GEN_AI_USAGE_OUTPUT_TOKENS]).toBe(5);
+    expect(span.attributes[ATTR_VEREVOIR_CACHE_CREATION_EPHEMERAL_5M_INPUT_TOKENS]).toBe(10);
+    expect(span.attributes[ATTR_VEREVOIR_CACHE_CREATION_EPHEMERAL_1H_INPUT_TOKENS]).toBe(20);
+    expect(span.attributes[ATTR_VEREVOIR_COST_USD_REPORTED]).toBe(0.0042);
+    expect(span.attributes[ATTR_VEREVOIR_PROVIDER_REQUEST_ID]).toBe('sess_abc123');
+  });
+
+  it('omits the cache-split + cost + request-id span attributes on a success that does not report them', async () => {
+    mockSuccessfulCall(
+      streamOutput({
+        result: 'ok',
+        usage: {
+          input_tokens: 10,
+          output_tokens: 5,
+          cache_read_input_tokens: 0,
+          cache_creation_input_tokens: 0,
+        },
+      })
+    );
+
+    const reply = await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] });
+
+    expect(reply.usage.cacheCreationEphemeral5mInputTokens).toBeUndefined();
+    expect(reply.usage.cacheCreationEphemeral1hInputTokens).toBeUndefined();
+    expect(reply.usage.costUsdReported).toBeUndefined();
+    expect(reply.usage.providerRequestId).toBeUndefined();
+
+    const span = exporter.getFinishedSpans()[0];
+    expect(Object.keys(span.attributes)).not.toContain(
+      ATTR_VEREVOIR_CACHE_CREATION_EPHEMERAL_5M_INPUT_TOKENS
+    );
+    expect(Object.keys(span.attributes)).not.toContain(
+      ATTR_VEREVOIR_CACHE_CREATION_EPHEMERAL_1H_INPUT_TOKENS
+    );
+    expect(Object.keys(span.attributes)).not.toContain(ATTR_VEREVOIR_COST_USD_REPORTED);
+    expect(Object.keys(span.attributes)).not.toContain(ATTR_VEREVOIR_PROVIDER_REQUEST_ID);
+  });
+
+  it('marks the span ERROR and rethrows unchanged when the CLI call fails', async () => {
+    queueFailingCall('unknown flag', 2);
+
+    await expect(
+      chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] })
+    ).rejects.toThrow();
+
+    const spans = exporter.getFinishedSpans();
+    expect(spans).toHaveLength(1);
+    expect(spans[0].status.code).toBe(SpanStatusCode.ERROR);
+  });
+});
 
 describe('claudeCli.chat', () => {
   const originalApiKey = process.env.ANTHROPIC_API_KEY;

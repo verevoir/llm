@@ -471,11 +471,26 @@ interface ClaudeCliResultEvent {
   subtype?: string;
   /** Maps directly to {@link ChatReply.stopReason}. */
   stop_reason?: string;
+  /** The CLI's own session id for this call — real on the terminal result
+   * event (confirmed in session.test.ts's own REAL_AUTH_FAILURE_ENVELOPE
+   * fixture), never surfaced onto TokenUsage before now. See
+   * shapeUsage()'s `providerRequestId` field below. */
+  session_id?: string;
   usage?: {
     input_tokens?: number;
     output_tokens?: number;
     cache_read_input_tokens?: number;
     cache_creation_input_tokens?: number;
+    /** The extended-cache-TTL breakdown — mirrors the Anthropic SDK's own
+     * `usage.cache_creation.{ephemeral_5m,ephemeral_1h}_input_tokens` beta
+     * shape (see anthropic/index.ts's `CacheCreationBreakdown`), since
+     * Claude Code relays the same underlying Messages API usage block.
+     * Not on every payload — see shapeUsage()'s own "left undefined,
+     * never assumed" comment. */
+    cache_creation?: {
+      ephemeral_5m_input_tokens?: number;
+      ephemeral_1h_input_tokens?: number;
+    };
   };
   /** Per-model usage breakdown — see the file header's PAYLOAD CONTRACT
    * paragraph. Keyed by the model id as the CLI names
@@ -662,10 +677,34 @@ export function resetClaudeCliVersionCacheForTests(): void {
   cachedCliVersionPromise = null;
 }
 
+import { withGenAISpan, type GenAISpanOutcome } from '../otel.js';
+
+/** Builds the span outcome for {@link chat} / {@link chatWithToolLoop}'s
+ * wrappers from an already-computed {@link TokenUsage} — every field this
+ * adapter's `shapeUsage()` populates maps straight across; `responseId`
+ * has no claude-cli equivalent (no separate response id in the payload,
+ * distinct from the session id used for `providerRequestId`) and is left
+ * unset. */
+function genAIOutcomeFromUsage(usage: TokenUsage): GenAISpanOutcome {
+  return {
+    responseModel: usage.model,
+    inputTokens: usage.inputTokens,
+    outputTokens: usage.outputTokens,
+    cacheReadInputTokens: usage.cacheReadInputTokens,
+    cacheCreationInputTokens: usage.cacheCreationInputTokens,
+    cacheCreationEphemeral5mInputTokens: usage.cacheCreationEphemeral5mInputTokens,
+    cacheCreationEphemeral1hInputTokens: usage.cacheCreationEphemeral1hInputTokens,
+    providerRequestId: usage.providerRequestId,
+    costUsdReported: usage.costUsdReported,
+  };
+}
+
 function shapeUsage(
   usage: ClaudeCliResultEvent['usage'],
   model: string,
-  substrateVersion: string | undefined
+  substrateVersion: string | undefined,
+  totalCostUsd: number | undefined,
+  sessionId: string | undefined
 ): TokenUsage {
   // Constant, never computed — see the file header's PAYLOAD CONTRACT
   // paragraph for why this is safe to assert rather than derive.
@@ -680,6 +719,21 @@ function shapeUsage(
     outputTokens: usage?.output_tokens ?? 0,
     cacheCreationInputTokens: usage?.cache_creation_input_tokens ?? 0,
     cacheReadInputTokens: usage?.cache_read_input_tokens ?? 0,
+    // Real fields on the terminal result event (see the file header's
+    // PAYLOAD CONTRACT paragraph) this adapter never surfaced before now.
+    // Left undefined — never 0 or an assumed shape — when the payload
+    // doesn't carry them, matching every other optional TokenUsage field.
+    cacheCreationEphemeral5mInputTokens: usage?.cache_creation?.ephemeral_5m_input_tokens,
+    cacheCreationEphemeral1hInputTokens: usage?.cache_creation?.ephemeral_1h_input_tokens,
+    // Provider-reported only — never computed from a price table (see
+    // decisions/023, aigency-governance, cited in this file's header, for
+    // why a billed/notional split is deliberate, separate, out-of-scope
+    // work).
+    costUsdReported: totalCostUsd,
+    // The CLI's own session id — the closest thing to a provider request
+    // id this transport exposes (no HTTP response header to read, unlike
+    // the direct API adapters).
+    providerRequestId: sessionId,
   };
 }
 
@@ -959,7 +1013,13 @@ async function chatOnSession(
   warnIfMultipleModels(sawMultipleModels, breakdown, 'claudeCli.chat');
 
   const substrateVersion = await resolveCliVersion();
-  const usageRecord = shapeUsage(result.usage, model, substrateVersion);
+  const usageRecord = shapeUsage(
+    result.usage,
+    model,
+    substrateVersion,
+    result.totalCostUsd,
+    result.sessionId
+  );
   await fireUsageHook(options.onUsage, usageRecord, 'claudeCli.chat');
 
   return {
@@ -976,6 +1036,18 @@ async function chatOnSession(
  * refuse-rather-than-substitute mechanism.
  */
 export async function chat(options: ClaudeCliChatOptions): Promise<ChatReply> {
+  const requestModel = options.model ?? 'default';
+  return withGenAISpan({ provider: 'anthropic', requestModel }, async () => {
+    const reply = await chatImpl(options);
+    return { result: reply, outcome: genAIOutcomeFromUsage(reply.usage) };
+  });
+}
+
+/** {@link chat}'s original body, wrapped by the export above in a GenAI
+ * CLIENT span (#70's `withGenAISpan`) — covering BOTH the fresh-spawn path
+ * below and the held-session turn via `chatOnSession`, since from a
+ * caller's perspective both are the same `chat()` call. */
+async function chatImpl(options: ClaudeCliChatOptions): Promise<ChatReply> {
   if (options.session) {
     return chatOnSession(options.session, options);
   }
@@ -1080,7 +1152,13 @@ export async function chat(options: ClaudeCliChatOptions): Promise<ChatReply> {
   }
 
   const substrateVersion = await resolveCliVersion();
-  const usageRecord = shapeUsage(parsed?.usage, model, substrateVersion);
+  const usageRecord = shapeUsage(
+    parsed?.usage,
+    model,
+    substrateVersion,
+    parsed?.total_cost_usd,
+    parsed?.session_id
+  );
   await fireUsageHook(options.onUsage, usageRecord, 'claudeCli.chat');
 
   return {
@@ -1116,6 +1194,18 @@ export async function chatWithTools(
  * turn, not a loop of separate model calls).
  */
 export async function chatWithToolLoop(
+  options: ClaudeCliChatWithToolLoopOptions
+): Promise<ClaudeCliChatWithToolLoopResult> {
+  const requestModel = options.model ?? 'default';
+  return withGenAISpan({ provider: 'anthropic', requestModel }, async () => {
+    const result = await chatWithToolLoopImpl(options);
+    return { result, outcome: genAIOutcomeFromUsage(result.usage) };
+  });
+}
+
+/** {@link chatWithToolLoop}'s original body, wrapped by the export above
+ * in a GenAI CLIENT span (#70's `withGenAISpan`). */
+async function chatWithToolLoopImpl(
   options: ClaudeCliChatWithToolLoopOptions
 ): Promise<ClaudeCliChatWithToolLoopResult> {
   if (options.turns.length === 0) {
@@ -1162,7 +1252,13 @@ export async function chatWithToolLoop(
     warnIfMultipleModels(sawMultipleModels, breakdown, 'claudeCli.chatWithToolLoop');
 
     const substrateVersion = await resolveCliVersion();
-    const usageRecord = shapeUsage(result.usage, model, substrateVersion);
+    const usageRecord = shapeUsage(
+      result.usage,
+      model,
+      substrateVersion,
+      result.totalCostUsd,
+      result.sessionId
+    );
     await fireUsageHook(options.onUsage, usageRecord, 'claudeCli.chatWithToolLoop');
 
     if (options.onIteration) {

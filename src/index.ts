@@ -246,6 +246,14 @@ export interface TokenUsage {
    * wire this through.
    */
   providerRequestId?: string;
+  /**
+   * The provider's own reported cost for this call, in USD, when the
+   * provider's payload carries one (e.g. Claude Code's terminal result
+   * event's `total_cost_usd`). NEVER COMPUTED from a price table — this
+   * is the provider's own figure, relayed as-is, or `undefined` when the
+   * adapter's transport doesn't see one.
+   */
+  costUsdReported?: number;
 }
 
 /** Live-progress narration emitted by the model during a long call. */

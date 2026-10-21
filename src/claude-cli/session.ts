@@ -205,11 +205,20 @@ interface ClaudeCliStreamResultEnvelope {
   is_error?: boolean;
   subtype?: string;
   stop_reason?: string;
+  /** The CLI's own session id for this turn — same field, same shape, as
+   * index.ts's `ClaudeCliResultEvent.session_id`. */
+  session_id?: string;
   usage?: {
     input_tokens?: number;
     output_tokens?: number;
     cache_read_input_tokens?: number;
     cache_creation_input_tokens?: number;
+    /** The extended-cache-TTL breakdown — same field, same shape, as
+     * index.ts's `ClaudeCliResultEvent.usage.cache_creation`. */
+    cache_creation?: {
+      ephemeral_5m_input_tokens?: number;
+      ephemeral_1h_input_tokens?: number;
+    };
   };
   modelUsage?: Record<
     string,
@@ -228,6 +237,8 @@ interface ClaudeCliStreamResultEnvelope {
    * on the envelope; extraction into a typed `PermissionDenial[]` is
    * wave 2b's own concern, since only `runSessionTurn` reads it. */
   permission_denials?: unknown[];
+  /** Same field, same shape, as index.ts's `ClaudeCliResultEvent.total_cost_usd`. */
+  total_cost_usd?: number;
 }
 
 const HELD = new Map<string, HeldSession>();
@@ -737,6 +748,10 @@ export interface SessionTurnResult {
   stopReason: string;
   usage: ClaudeCliStreamResultEnvelope['usage'];
   modelUsage: ClaudeCliStreamResultEnvelope['modelUsage'];
+  /** See {@link ClaudeCliStreamResultEnvelope.total_cost_usd}. */
+  totalCostUsd: ClaudeCliStreamResultEnvelope['total_cost_usd'];
+  /** See {@link ClaudeCliStreamResultEnvelope.session_id}. */
+  sessionId: ClaudeCliStreamResultEnvelope['session_id'];
   toolUses: ToolUse[];
   toolResults: BridgeToolResult[];
   /** See {@link PermissionDenial}'s own doc comment for what this is and
@@ -893,6 +908,8 @@ export async function runSessionTurn(options: SessionTurnOptions): Promise<Sessi
     stopReason: parsed.stop_reason ?? 'end_turn',
     usage: parsed.usage,
     modelUsage: parsed.modelUsage,
+    totalCostUsd: parsed.total_cost_usd,
+    sessionId: parsed.session_id,
     toolUses: armed ? armed.toolUses : [],
     toolResults: armed ? armed.toolResults : [],
     permissionDenials: extractPermissionDenials(parsed.permission_denials),
