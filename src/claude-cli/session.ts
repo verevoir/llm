@@ -206,8 +206,17 @@ interface ClaudeCliStreamResultEnvelope {
   subtype?: string;
   stop_reason?: string;
   /** The CLI's own session id for this turn — same field, same shape, as
-   * index.ts's `ClaudeCliResultEvent.session_id`. */
+   * index.ts's `ClaudeCliResultEvent.session_id`. Reused across EVERY
+   * turn on a held session — never unique per call, so never used as a
+   * provider request id (see `uuid`, below). */
   session_id?: string;
+  /** A real, per-turn-unique id on the terminal result event — confirmed
+   * on a real invocation (this file's own `REAL_AUTH_FAILURE_ENVELOPE`
+   * fixture in session.test.ts carries it, until now an unmodeled
+   * field). Unlike `session_id`, this changes every turn, which is why
+   * `SessionTurnResult.uuid` / `providerRequestId` is built from this,
+   * not `session_id` (#73 review fix). */
+  uuid?: string;
   usage?: {
     input_tokens?: number;
     output_tokens?: number;
@@ -750,8 +759,16 @@ export interface SessionTurnResult {
   modelUsage: ClaudeCliStreamResultEnvelope['modelUsage'];
   /** See {@link ClaudeCliStreamResultEnvelope.total_cost_usd}. */
   totalCostUsd: ClaudeCliStreamResultEnvelope['total_cost_usd'];
-  /** See {@link ClaudeCliStreamResultEnvelope.session_id}. */
+  /** See {@link ClaudeCliStreamResultEnvelope.session_id}. Shared across
+   * every turn on this held session — surfaced for correlation only,
+   * never used as `providerRequestId` (see `uuid`, below). */
   sessionId: ClaudeCliStreamResultEnvelope['session_id'];
+  /** See {@link ClaudeCliStreamResultEnvelope.uuid} — the real per-turn-
+   * unique id, when the CLI supplies one. This is what index.ts's
+   * `shapeUsage()` uses for `providerRequestId` on the held-session
+   * path; `undefined` when a particular turn's envelope doesn't carry
+   * one, rather than falling back to the shared `sessionId`. */
+  uuid: ClaudeCliStreamResultEnvelope['uuid'];
   toolUses: ToolUse[];
   toolResults: BridgeToolResult[];
   /** See {@link PermissionDenial}'s own doc comment for what this is and
@@ -910,6 +927,7 @@ export async function runSessionTurn(options: SessionTurnOptions): Promise<Sessi
     modelUsage: parsed.modelUsage,
     totalCostUsd: parsed.total_cost_usd,
     sessionId: parsed.session_id,
+    uuid: parsed.uuid,
     toolUses: armed ? armed.toolUses : [],
     toolResults: armed ? armed.toolResults : [],
     permissionDenials: extractPermissionDenials(parsed.permission_denials),

@@ -254,6 +254,15 @@ export interface TokenUsage {
    * adapter's transport doesn't see one.
    */
   costUsdReported?: number;
+  /**
+   * claude-cli only: the CLI's own session id for this call, kept purely
+   * for correlation. Reused across EVERY turn on a held session, so —
+   * unlike {@link providerRequestId} — it is never unique per call, and
+   * must never be read as one. `undefined` on every other adapter, and
+   * on claude-cli's own one-shot path too (there it would just duplicate
+   * `providerRequestId`'s own value).
+   */
+  sessionId?: string;
 }
 
 /** Live-progress narration emitted by the model during a long call. */

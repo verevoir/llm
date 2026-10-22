@@ -584,3 +584,80 @@ describe('claudeCli.chatWithToolLoop — GenAI spans', () => {
     expect(spans[0].status.code).toBe(SpanStatusCode.ERROR);
   });
 });
+
+// ── providerRequestId on the held-session path (#73 review finding:
+// session_id is shared across every turn on a held session, so it
+// cannot serve as a per-call id — see index.ts's shapeUsage() for the
+// fix) ───────────────────────────────────────────────────────────────
+describe('providerRequestId on a held session must not repeat session_id across turns', () => {
+  it('chat() reports a distinct providerRequestId per turn on the same held session, never the shared session_id', async () => {
+    queueVersionSpawn();
+    mockRunSessionTurn.mockResolvedValueOnce(
+      baseSessionTurnResult({ sessionId: 'sess_shared', uuid: 'turn-uuid-1' })
+    );
+    const first = await chat({
+      systemPrompt: 'sys',
+      turns: [{ role: 'user', content: 'q1' }],
+      session: SESSION_HANDLE,
+    });
+
+    mockRunSessionTurn.mockResolvedValueOnce(
+      baseSessionTurnResult({ sessionId: 'sess_shared', uuid: 'turn-uuid-2' })
+    );
+    const second = await chat({
+      systemPrompt: 'sys',
+      turns: [{ role: 'user', content: 'q2' }],
+      session: SESSION_HANDLE,
+    });
+
+    expect(first.usage.providerRequestId).toBe('turn-uuid-1');
+    expect(second.usage.providerRequestId).toBe('turn-uuid-2');
+    expect(first.usage.providerRequestId).not.toBe(second.usage.providerRequestId);
+    expect(first.usage.providerRequestId).not.toBe('sess_shared');
+    expect(second.usage.providerRequestId).not.toBe('sess_shared');
+  });
+
+  it('chat() leaves providerRequestId undefined on a held session when the envelope carries no uuid, rather than falling back to session_id', async () => {
+    queueVersionSpawn();
+    mockRunSessionTurn.mockResolvedValueOnce(
+      baseSessionTurnResult({ sessionId: 'sess_shared', uuid: undefined })
+    );
+
+    const result = await chat({
+      systemPrompt: 'sys',
+      turns: [{ role: 'user', content: 'q' }],
+      session: SESSION_HANDLE,
+    });
+
+    expect(result.usage.providerRequestId).toBeUndefined();
+  });
+
+  it('chatWithToolLoop reports a distinct providerRequestId per turn on the same held session too', async () => {
+    queueVersionSpawn();
+    mockRunSessionTurn.mockResolvedValueOnce(
+      baseSessionTurnResult({ sessionId: 'sess_shared', uuid: 'loop-uuid-1' })
+    );
+    const first = await chatWithToolLoop({
+      systemPrompt: 'sys',
+      turns: [{ role: 'user', content: 'q1' }],
+      tools: [ECHO_TOOL],
+      executor: async () => 'x',
+      session: SESSION_HANDLE,
+    });
+
+    mockRunSessionTurn.mockResolvedValueOnce(
+      baseSessionTurnResult({ sessionId: 'sess_shared', uuid: 'loop-uuid-2' })
+    );
+    const second = await chatWithToolLoop({
+      systemPrompt: 'sys',
+      turns: [{ role: 'user', content: 'q2' }],
+      tools: [ECHO_TOOL],
+      executor: async () => 'x',
+      session: SESSION_HANDLE,
+    });
+
+    expect(first.usage.providerRequestId).toBe('loop-uuid-1');
+    expect(second.usage.providerRequestId).toBe('loop-uuid-2');
+    expect(first.usage.providerRequestId).not.toBe(second.usage.providerRequestId);
+  });
+});

@@ -681,10 +681,13 @@ import { withGenAISpan, type GenAISpanOutcome } from '../otel.js';
 
 /** Builds the span outcome for {@link chat} / {@link chatWithToolLoop}'s
  * wrappers from an already-computed {@link TokenUsage} — every field this
- * adapter's `shapeUsage()` populates maps straight across; `responseId`
- * has no claude-cli equivalent (no separate response id in the payload,
- * distinct from the session id used for `providerRequestId`) and is left
- * unset. */
+ * adapter's `shapeUsage()` populates maps straight across, including the
+ * now-distinct `sessionId` (correlation only — a held session reuses one
+ * across every turn) and `providerRequestId` (the real per-turn-unique
+ * id: held-session `uuid`, or one-shot `session_id`, which genuinely IS
+ * unique per call there — see `shapeUsage()`'s own doc comment for why
+ * these stopped being the same field, a #73 review fix). `responseId`
+ * has no claude-cli equivalent and is left unset. */
 function genAIOutcomeFromUsage(usage: TokenUsage): GenAISpanOutcome {
   return {
     responseModel: usage.model,
@@ -694,6 +697,7 @@ function genAIOutcomeFromUsage(usage: TokenUsage): GenAISpanOutcome {
     cacheCreationInputTokens: usage.cacheCreationInputTokens,
     cacheCreationEphemeral5mInputTokens: usage.cacheCreationEphemeral5mInputTokens,
     cacheCreationEphemeral1hInputTokens: usage.cacheCreationEphemeral1hInputTokens,
+    sessionId: usage.sessionId,
     providerRequestId: usage.providerRequestId,
     costUsdReported: usage.costUsdReported,
   };
@@ -704,6 +708,18 @@ function shapeUsage(
   model: string,
   substrateVersion: string | undefined,
   totalCostUsd: number | undefined,
+  // The real per-turn-unique id, already resolved by the caller: the
+  // held-session envelope's own `uuid` (session.ts), or — for the
+  // one-shot path — `session_id`, which genuinely IS unique there (a
+  // fresh `claude` process, and therefore a fresh session, per call).
+  // `undefined` when neither is available. NEVER the held-session
+  // `session_id` passed below as `sessionId` — that id is shared across
+  // every turn on the same session, so it cannot serve as a per-call id
+  // (#73 review fix: it used to, incorrectly).
+  providerRequestId: string | undefined,
+  // The CLI's session id, kept only for correlation (see
+  // `TokenUsage.sessionId`'s own doc comment) — never used as
+  // `providerRequestId` above.
   sessionId: string | undefined
 ): TokenUsage {
   // Constant, never computed — see the file header's PAYLOAD CONTRACT
@@ -730,10 +746,8 @@ function shapeUsage(
     // why a billed/notional split is deliberate, separate, out-of-scope
     // work).
     costUsdReported: totalCostUsd,
-    // The CLI's own session id — the closest thing to a provider request
-    // id this transport exposes (no HTTP response header to read, unlike
-    // the direct API adapters).
-    providerRequestId: sessionId,
+    sessionId,
+    providerRequestId,
   };
 }
 
@@ -1018,6 +1032,10 @@ async function chatOnSession(
     model,
     substrateVersion,
     result.totalCostUsd,
+    // Held session: `session_id` is shared across every turn, so `uuid`
+    // (the envelope's real per-turn-unique field, when present) is what
+    // becomes `providerRequestId` here — never `session_id` itself.
+    result.uuid,
     result.sessionId
   );
   await fireUsageHook(options.onUsage, usageRecord, 'claudeCli.chat');
@@ -1157,7 +1175,14 @@ async function chatImpl(options: ClaudeCliChatOptions): Promise<ChatReply> {
     model,
     substrateVersion,
     parsed?.total_cost_usd,
-    parsed?.session_id
+    // One-shot: this path spawns a fresh `claude` process — and
+    // therefore a fresh session — every call, so `session_id` genuinely
+    // IS unique per call here (unlike the held-session path, where the
+    // same id is reused across every turn — see chatOnSession's own
+    // call site). No separate `sessionId` is passed: it would just
+    // duplicate this same value.
+    parsed?.session_id,
+    undefined
   );
   await fireUsageHook(options.onUsage, usageRecord, 'claudeCli.chat');
 
@@ -1257,6 +1282,10 @@ async function chatWithToolLoopImpl(
       model,
       substrateVersion,
       result.totalCostUsd,
+      // Held session: `session_id` is shared across every turn, so
+      // `uuid` (the envelope's real per-turn-unique field, when
+      // present) is what becomes `providerRequestId` here.
+      result.uuid,
       result.sessionId
     );
     await fireUsageHook(options.onUsage, usageRecord, 'claudeCli.chatWithToolLoop');
