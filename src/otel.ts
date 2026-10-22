@@ -81,6 +81,16 @@ export const ATTR_VEREVOIR_CACHE_CREATION_EPHEMERAL_1H_INPUT_TOKENS =
  * `TokenUsage.providerRequestId` in src/index.ts for which adapters set
  * which). Custom: no `gen_ai.*` attribute for this exists in v1.37.0. */
 export const ATTR_VEREVOIR_PROVIDER_REQUEST_ID = 'verevoir.llm.provider_request_id';
+/** claude-cli only: the CLI's own session id, kept for correlation — NOT
+ * a per-call request id. A held session reuses this across every turn;
+ * see `TokenUsage.sessionId`'s own doc comment for why it is a separate
+ * field from {@link ATTR_VEREVOIR_PROVIDER_REQUEST_ID}. */
+export const ATTR_VEREVOIR_SESSION_ID = 'verevoir.llm.session_id';
+/** The provider's own reported cost for this call, in USD. Custom: no
+ * `gen_ai.*` cost attribute exists in v1.37.0, and this is deliberately
+ * the provider's own relayed figure, never a value this library computed
+ * from a price table. */
+export const ATTR_VEREVOIR_COST_USD_REPORTED = 'verevoir.llm.cost_usd_reported';
 
 const tracer = trace.getTracer('@verevoir/llm');
 
@@ -104,7 +114,14 @@ export interface GenAISpanOutcome {
   cacheCreationInputTokens?: number;
   cacheCreationEphemeral5mInputTokens?: number;
   cacheCreationEphemeral1hInputTokens?: number;
+  /** claude-cli only: session id for correlation, not a per-call id —
+   * see {@link ATTR_VEREVOIR_SESSION_ID}. */
+  sessionId?: string;
   providerRequestId?: string;
+  /** The provider's own reported cost for this call, in USD — never
+   * computed, only ever relayed from the provider's payload when present.
+   * See {@link ATTR_VEREVOIR_COST_USD_REPORTED}. */
+  costUsdReported?: number;
 }
 
 /**
@@ -171,5 +188,7 @@ function applyOutcome(span: Span, outcome: GenAISpanOutcome): void {
     ATTR_VEREVOIR_CACHE_CREATION_EPHEMERAL_1H_INPUT_TOKENS,
     outcome.cacheCreationEphemeral1hInputTokens
   );
+  set(ATTR_VEREVOIR_SESSION_ID, outcome.sessionId);
   set(ATTR_VEREVOIR_PROVIDER_REQUEST_ID, outcome.providerRequestId);
+  set(ATTR_VEREVOIR_COST_USD_REPORTED, outcome.costUsdReported);
 }

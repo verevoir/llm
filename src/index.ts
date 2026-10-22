@@ -246,6 +246,23 @@ export interface TokenUsage {
    * wire this through.
    */
   providerRequestId?: string;
+  /**
+   * The provider's own reported cost for this call, in USD, when the
+   * provider's payload carries one (e.g. Claude Code's terminal result
+   * event's `total_cost_usd`). NEVER COMPUTED from a price table — this
+   * is the provider's own figure, relayed as-is, or `undefined` when the
+   * adapter's transport doesn't see one.
+   */
+  costUsdReported?: number;
+  /**
+   * claude-cli only: the CLI's own session id for this call, kept purely
+   * for correlation. Reused across EVERY turn on a held session, so —
+   * unlike {@link providerRequestId} — it is never unique per call, and
+   * must never be read as one. `undefined` on every other adapter, and
+   * on claude-cli's own one-shot path too (there it would just duplicate
+   * `providerRequestId`'s own value).
+   */
+  sessionId?: string;
 }
 
 /** Live-progress narration emitted by the model during a long call. */
