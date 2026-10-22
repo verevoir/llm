@@ -87,7 +87,9 @@ describe('createPriceBook — parsing', () => {
     const bad = {
       'infinite-model': { input_cost_per_token: Infinity, output_cost_per_token: 0.001 },
     };
-    const book = createPriceBook({ fetch: vi.fn(async () => okResponse(bad)) });
+    // Explicit empty snapshot — otherwise this would fall back to the now-
+    // populated bundled default and not test what its name says.
+    const book = createPriceBook({ fetch: vi.fn(async () => okResponse(bad)), snapshot: {} });
     book.start();
     await flush();
     expect(book.size).toBe(0);
@@ -95,7 +97,13 @@ describe('createPriceBook — parsing', () => {
 
   it('rejects a payload that is not a JSON object, keeping the last good (empty) table', async () => {
     const logger = fakeLogger();
-    const book = createPriceBook({ fetch: vi.fn(async () => textResponse('[]')), logger });
+    // Explicit empty snapshot — otherwise this would fall back to the now-
+    // populated bundled default and not test what its name says.
+    const book = createPriceBook({
+      fetch: vi.fn(async () => textResponse('[]')),
+      logger,
+      snapshot: {},
+    });
     book.start();
     await flush();
     expect(book.size).toBe(0);
@@ -356,26 +364,29 @@ describe('createPriceBook — snapshot', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  // The bundled default (src/pricing-snapshot.ts) ships in THIS PR as an
-  // unpopulated placeholder (payload: {}) — a later, non-belt step
-  // regenerates it with real data. This test exercises the REAL,
-  // unmocked module exactly as it ships: falling back to it (because no
-  // explicit snapshot and no fetch were supplied) resolves to an empty
-  // table, so every model stays unpriced — never priced at 0 — which is
-  // exactly the pre-default-snapshot behaviour this fallback must not
-  // silently change. See pricing-default-snapshot.test.ts for the same
-  // fallback exercised against a MOCKED, populated default snapshot.
-  it('falls back to the bundled default snapshot (currently an unpopulated placeholder) when no snapshot and no fetch are supplied — empty, so unpriced, never 0', () => {
+  // The bundled default (src/pricing-snapshot.ts) is now populated with
+  // real LiteLLM data (asOf 2026-10-22T12:59:18Z, raw upstream sha256
+  // 91da1a98…). This test exercises the REAL, unmocked module exactly as
+  // it ships: falling back to it (because no explicit snapshot and no
+  // fetch were supplied) prices a known model straight from that real
+  // data. See pricing-default-snapshot.test.ts for the same fallback
+  // exercised against a MOCKED snapshot, including the empty-table edge
+  // cases this file used to cover against the (now-stale) placeholder.
+  it('falls back to the bundled default snapshot and prices a known model — claude-sonnet-4-5 — from the real, unmocked data', () => {
     const book = createPriceBook({ fetch: vi.fn() });
-    expect(book.size).toBe(0);
-    expect(book.source).toEqual({
-      kind: 'snapshot',
-      asOf: 'unpopulated',
-      sha256: '',
-      url: expect.any(String),
+    expect(book.source?.kind).toBe('snapshot');
+    expect(book.source?.sha256).toMatch(/^91da1a98/);
+    const r = book.costOf({
+      provider: 'anthropic',
+      model: 'claude-sonnet-4-5',
+      inputTokens: 1_000_000,
+      outputTokens: 1_000_000,
     });
-    const r = book.costOf({ provider: 'x', model: 'm1', inputTokens: 1, outputTokens: 1 });
-    expect(r).toEqual({ unpriced: expect.any(String) });
+    expect(r).toEqual({
+      usdMicros: 18_000_000,
+      complete: true,
+      source: book.source,
+    });
   });
 });
 

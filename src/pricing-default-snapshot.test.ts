@@ -1,13 +1,12 @@
 import { describe, it, expect, vi } from 'vitest';
 
-// src/pricing.test.ts exercises the REAL bundled default snapshot — which
-// ships in this PR as an unpopulated placeholder (payload: {}), so it can
-// only prove "empty in, unpriced out". To exercise the actual fallback
-// BEHAVIOUR (a populated default snapshot used before the first fetch,
-// kept on fetch failure, replaced on fetch success, and the 10x breaker
-// applying to it) this file mocks './pricing-snapshot.js' with a small,
-// fully-controlled payload — entirely separate from, and not a substitute
-// for, the day the real file is regenerated with LiteLLM data.
+// src/pricing.test.ts exercises the REAL bundled default snapshot, which
+// is now populated with real LiteLLM data. This file instead mocks
+// './pricing-snapshot.js' with a small, fully-controlled payload to
+// exercise the fallback BEHAVIOUR deterministically — used before the
+// first fetch, kept on fetch failure, replaced on fetch success, and the
+// 10x breaker applying to it — independent of whatever the real bundled
+// data happens to contain.
 const { MOCK_SNAPSHOT } = vi.hoisted(() => ({
   MOCK_SNAPSHOT: {
     asOf: '2026-01-01T00:00:00.000Z',
