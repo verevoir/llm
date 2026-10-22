@@ -1,9 +1,10 @@
 # Changelog
 
-## Unreleased
+## [0.34.1] — 2026-10-22
 
 - **The Anthropic, OpenAI, Google and DeepSeek adapters' exported `rates` tables are now `@deprecated`.** Each doc comment points at `createPriceBook(...)` / `book.costOf(...)` as the successor (the 0.33.0 operator decision, below) instead of the old `estimateCostUSD`. No behaviour change — nothing removed, nothing renamed.
 - **Correction to the 0.33.0 entry below:** it said "all 5 provider adapters still call `estimateCostUSD`" — that was inaccurate. No provider adapter calls `estimateCostUSD` at runtime; each adapter only _exports_ a `RatesTable` (`rates`) for a _consumer_ to pass to `estimateCostUSD` itself. The only runtime caller found in this repo was `examples/anthropic-chat.ts`, which this change moves onto `createPriceBook` / `book.costOf(...)` instead.
+- **README's "Cost accounting" section now names `createPriceBook` / `book.costOf(...)` as the cost API**, states the bundled snapshot is the fallback and an unknown model is `unpriced` (never `$0`), and marks the adapters' `rates` tables and `estimateCostUSD` as deprecated — matching `llms.txt`.
 
 ## [0.34.0] — 2026-10-22
 
