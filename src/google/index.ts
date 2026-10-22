@@ -13,6 +13,7 @@
 
 import { GoogleGenAI } from '@google/genai';
 import { fireUsageHook } from '../audit-hook.js';
+import { withGenAISpan } from '../otel.js';
 import { collapseContentToText } from '../index.js';
 import {
   type ChatOptions,
@@ -129,36 +130,53 @@ async function callGenerateContent(
   systemPrompt: string,
   turns: ChatOptions['turns']
 ): Promise<RawResult> {
-  // Gemini doesn't use a separate `messages` channel; we feed turns
-  // as a `contents` array of {role, parts}. User and model alternate;
-  // 'assistant' in our surface maps to 'model' in Gemini.
-  const contents = turns.map((t) => ({
-    role: t.role === 'assistant' ? 'model' : 'user',
-    parts: [{ text: collapseContentToText('google', t.content) }],
-  }));
+  return withGenAISpan({ provider: PROVIDER, requestModel: modelId }, async () => {
+    // Gemini doesn't use a separate `messages` channel; we feed turns
+    // as a `contents` array of {role, parts}. User and model alternate;
+    // 'assistant' in our surface maps to 'model' in Gemini.
+    const contents = turns.map((t) => ({
+      role: t.role === 'assistant' ? 'model' : 'user',
+      parts: [{ text: collapseContentToText('google', t.content) }],
+    }));
 
-  const response = await client.models.generateContent({
-    model: modelId,
-    contents,
-    config: {
-      systemInstruction: systemPrompt,
-    },
+    const response = await client.models.generateContent({
+      model: modelId,
+      contents,
+      config: {
+        systemInstruction: systemPrompt,
+      },
+    });
+
+    const text = response.text ?? '';
+    const u = response.usageMetadata ?? {};
+    const candidates = response.candidates ?? [];
+    const finishReason = candidates[0]?.finishReason ?? '';
+
+    const result: RawResult = {
+      text,
+      rawUsage: {
+        inputTokens: u.promptTokenCount ?? 0,
+        outputTokens: u.candidatesTokenCount ?? 0,
+        cachedInputTokens: u.cachedContentTokenCount ?? 0,
+      },
+      finishReason: String(finishReason),
+    };
+
+    return {
+      result,
+      // responseModel/responseId/provider-request-id are left undefined: the
+      // `@google/genai` response shape this adapter reads doesn't carry a
+      // documented equivalent the way the Anthropic/OpenAI SDKs do, so
+      // guessing a field name here would risk reporting the wrong thing
+      // rather than reporting nothing — see this field's own "undefined
+      // when absent" contract.
+      outcome: {
+        inputTokens: result.rawUsage.inputTokens,
+        outputTokens: result.rawUsage.outputTokens,
+        cacheReadInputTokens: result.rawUsage.cachedInputTokens || undefined,
+      },
+    };
   });
-
-  const text = response.text ?? '';
-  const u = response.usageMetadata ?? {};
-  const candidates = response.candidates ?? [];
-  const finishReason = candidates[0]?.finishReason ?? '';
-
-  return {
-    text,
-    rawUsage: {
-      inputTokens: u.promptTokenCount ?? 0,
-      outputTokens: u.candidatesTokenCount ?? 0,
-      cachedInputTokens: u.cachedContentTokenCount ?? 0,
-    },
-    finishReason: String(finishReason),
-  };
 }
 
 // Google outages and rate limits are handled with the same exponential-
@@ -392,36 +410,46 @@ async function callGenerateWithTools(
   contents: GeminiContent[],
   tools: ReturnType<typeof toGeminiTools>
 ): Promise<GeminiToolResult> {
-  const response = await client.models.generateContent({
-    model: modelId,
-    contents: contents as never,
-    config: {
-      systemInstruction: systemPrompt,
-      // Omit tools when empty (a no-tools finalise call), like the other
-      // adapters — an empty tools array would be a malformed request.
-      tools: Array.isArray(tools) && tools.length > 0 ? (tools as never) : undefined,
-    },
+  return withGenAISpan({ provider: PROVIDER, requestModel: modelId }, async () => {
+    const response = await client.models.generateContent({
+      model: modelId,
+      contents: contents as never,
+      config: {
+        systemInstruction: systemPrompt,
+        // Omit tools when empty (a no-tools finalise call), like the other
+        // adapters — an empty tools array would be a malformed request.
+        tools: Array.isArray(tools) && tools.length > 0 ? (tools as never) : undefined,
+      },
+    });
+    const u = response.usageMetadata ?? {};
+    const candidates = response.candidates ?? [];
+    const fcs = (response.functionCalls ?? []) as {
+      id?: string;
+      name?: string;
+      args?: Record<string, unknown>;
+    }[];
+    const result: GeminiToolResult = {
+      text: response.text ?? '',
+      functionCalls: fcs
+        .filter((f): f is { id?: string; name: string; args?: Record<string, unknown> } => !!f.name)
+        .map((f) => ({ id: f.id, name: f.name, args: f.args ?? {} })),
+      modelContent: (candidates[0]?.content as GeminiContent | undefined) ?? null,
+      rawUsage: {
+        inputTokens: u.promptTokenCount ?? 0,
+        outputTokens: u.candidatesTokenCount ?? 0,
+        cachedInputTokens: u.cachedContentTokenCount ?? 0,
+      },
+      finishReason: String(candidates[0]?.finishReason ?? ''),
+    };
+    return {
+      result,
+      outcome: {
+        inputTokens: result.rawUsage.inputTokens,
+        outputTokens: result.rawUsage.outputTokens,
+        cacheReadInputTokens: result.rawUsage.cachedInputTokens || undefined,
+      },
+    };
   });
-  const u = response.usageMetadata ?? {};
-  const candidates = response.candidates ?? [];
-  const fcs = (response.functionCalls ?? []) as {
-    id?: string;
-    name?: string;
-    args?: Record<string, unknown>;
-  }[];
-  return {
-    text: response.text ?? '',
-    functionCalls: fcs
-      .filter((f): f is { id?: string; name: string; args?: Record<string, unknown> } => !!f.name)
-      .map((f) => ({ id: f.id, name: f.name, args: f.args ?? {} })),
-    modelContent: (candidates[0]?.content as GeminiContent | undefined) ?? null,
-    rawUsage: {
-      inputTokens: u.promptTokenCount ?? 0,
-      outputTokens: u.candidatesTokenCount ?? 0,
-      cachedInputTokens: u.cachedContentTokenCount ?? 0,
-    },
-    finishReason: String(candidates[0]?.finishReason ?? ''),
-  };
 }
 
 /** Single-shot tool-calling: surface the model's functionCalls for the caller

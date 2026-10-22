@@ -13,6 +13,7 @@
 
 import OpenAI from 'openai';
 import { fireUsageHook } from '../audit-hook.js';
+import { withGenAISpan } from '../otel.js';
 import {
   type ChatOptions,
   type ChatReply,
@@ -114,6 +115,9 @@ interface RawResult {
     cachedInputTokens: number;
   };
   status: string;
+  /** The response's own id (`resp_...`) — the SDK object's id field, not an
+   * HTTP header. See {@link TokenUsage.providerRequestId}. */
+  responseId?: string;
 }
 
 async function callResponsesCreate(
@@ -122,32 +126,46 @@ async function callResponsesCreate(
   systemPrompt: string,
   turns: ChatOptions['turns']
 ): Promise<RawResult> {
-  // The Responses API takes `instructions` (system) + `input` (the
-  // conversation). 'assistant' / 'user' roles pass through unchanged.
-  const input = turns.map((t) => ({
-    role: t.role as 'user' | 'assistant',
-    content: collapseContentToText(PROVIDER, t.content),
-  }));
+  return withGenAISpan({ provider: PROVIDER, requestModel: modelId }, async () => {
+    // The Responses API takes `instructions` (system) + `input` (the
+    // conversation). 'assistant' / 'user' roles pass through unchanged.
+    const input = turns.map((t) => ({
+      role: t.role as 'user' | 'assistant',
+      content: collapseContentToText(PROVIDER, t.content),
+    }));
 
-  const response = await client.responses.create({
-    model: modelId,
-    instructions: systemPrompt,
-    input,
+    const response = await client.responses.create({
+      model: modelId,
+      instructions: systemPrompt,
+      input,
+    });
+
+    const text = response.output_text ?? '';
+    const u = response.usage;
+    const cachedInputTokens = u?.input_tokens_details?.cached_tokens ?? 0;
+
+    const result: RawResult = {
+      text,
+      rawUsage: {
+        inputTokens: u?.input_tokens ?? 0,
+        outputTokens: u?.output_tokens ?? 0,
+        cachedInputTokens,
+      },
+      status: response.status ?? '',
+      responseId: response.id,
+    };
+
+    return {
+      result,
+      outcome: {
+        responseModel: response.model ?? modelId,
+        responseId: response.id,
+        inputTokens: result.rawUsage.inputTokens,
+        outputTokens: result.rawUsage.outputTokens,
+        cacheReadInputTokens: cachedInputTokens || undefined,
+      },
+    };
   });
-
-  const text = response.output_text ?? '';
-  const u = response.usage;
-  const cachedInputTokens = u?.input_tokens_details?.cached_tokens ?? 0;
-
-  return {
-    text,
-    rawUsage: {
-      inputTokens: u?.input_tokens ?? 0,
-      outputTokens: u?.output_tokens ?? 0,
-      cachedInputTokens,
-    },
-    status: response.status ?? '',
-  };
 }
 
 // OpenAI outages and rate limits are handled with the same exponential-
@@ -214,7 +232,11 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function shapeUsage(raw: RawResult['rawUsage'], direction: ModelClass): TokenUsage {
+function shapeUsage(
+  raw: RawResult['rawUsage'],
+  direction: ModelClass,
+  responseId?: string
+): TokenUsage {
   return {
     provider: PROVIDER,
     model: models[direction],
@@ -230,6 +252,9 @@ function shapeUsage(raw: RawResult['rawUsage'], direction: ModelClass): TokenUsa
     outputTokens: raw.outputTokens,
     cacheCreationInputTokens: 0,
     cacheReadInputTokens: raw.cachedInputTokens,
+    // The response object's own id (not an HTTP header) — see RawResult's
+    // own doc comment on `responseId`.
+    providerRequestId: responseId,
   };
 }
 
@@ -277,7 +302,7 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
     );
   }
 
-  const usage = shapeUsage(raw.rawUsage, modelClass);
+  const usage = shapeUsage(raw.rawUsage, modelClass, raw.responseId);
   await fireUsageHook(options.onUsage, usage, 'openai.chat');
 
   if (!raw.text) {

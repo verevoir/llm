@@ -222,6 +222,30 @@ export interface TokenUsage {
   cacheCreationInputTokens: number;
   /** Tokens read from provider cache on this call. */
   cacheReadInputTokens: number;
+  /**
+   * Anthropic's 5-minute-TTL cache-write tokens, when the call used extended
+   * cache TTLs and the provider reported the split. `undefined` on every
+   * other call — most calls don't use extended TTLs, and no adapter besides
+   * Anthropic's reports this split. See `src/otel.ts` for the matching span
+   * attribute (not part of the GenAI semconv, so it's a custom one there).
+   */
+  cacheCreationEphemeral5mInputTokens?: number;
+  /**
+   * Anthropic's 1-hour-TTL cache-write tokens — see
+   * {@link cacheCreationEphemeral5mInputTokens}.
+   */
+  cacheCreationEphemeral1hInputTokens?: number;
+  /**
+   * The provider's own id for this call, when `chat()`'s adapter can get
+   * one — real, but not always a literal HTTP `request-id` header: the
+   * Anthropic adapter uses the message id (its streaming surface doesn't
+   * expose response headers); the OpenAI, DeepSeek and OpenAI-compatible
+   * adapters use the SDK response object's own `id` field. `undefined`
+   * when the adapter has none to offer (currently: Google), and on every
+   * adapter's `chatWithTools` / `chatWithToolLoop` paths, which don't yet
+   * wire this through.
+   */
+  providerRequestId?: string;
 }
 
 /** Live-progress narration emitted by the model during a long call. */

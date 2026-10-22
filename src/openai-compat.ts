@@ -19,6 +19,7 @@
 
 import OpenAI from 'openai';
 import { fireUsageHook } from './audit-hook.js';
+import { withGenAISpan } from './otel.js';
 import { collapseContentToText } from './index.js';
 import {
   type ChatOptions,
@@ -105,6 +106,9 @@ interface RawResult {
   text: string;
   rawUsage: { inputTokens: number; outputTokens: number; cachedInputTokens: number };
   finishReason: string;
+  /** The response's own id (`chatcmpl-...`) — the SDK object's id field, not
+   * an HTTP header. See {@link TokenUsage.providerRequestId}. */
+  responseId?: string;
 }
 
 /** OpenAI-compatible usage shape, including the cache fields some providers
@@ -188,27 +192,40 @@ export function createOpenAICompatAdapter(config: OpenAICompatConfig): OpenAICom
     systemPrompt: string,
     turns: ChatOptions['turns']
   ): Promise<RawResult> {
-    const messages = [
-      { role: 'system' as const, content: systemPrompt },
-      ...turns.map((t) => ({
-        role: t.role as 'user' | 'assistant',
-        content: collapseContentToText(provider, t.content),
-      })),
-    ];
-    const response = await client.chat.completions.create({ model: modelId, messages });
-    const choice = response.choices?.[0];
-    const u = (response.usage ?? {}) as CompatUsage;
-    const cachedInputTokens =
-      u.prompt_cache_hit_tokens ?? u.prompt_tokens_details?.cached_tokens ?? 0;
-    return {
-      text: choice?.message?.content ?? '',
-      rawUsage: {
-        inputTokens: Math.max(0, (u.prompt_tokens ?? 0) - cachedInputTokens),
-        outputTokens: u.completion_tokens ?? 0,
-        cachedInputTokens,
-      },
-      finishReason: choice?.finish_reason ?? '',
-    };
+    return withGenAISpan({ provider, requestModel: modelId }, async () => {
+      const messages = [
+        { role: 'system' as const, content: systemPrompt },
+        ...turns.map((t) => ({
+          role: t.role as 'user' | 'assistant',
+          content: collapseContentToText(provider, t.content),
+        })),
+      ];
+      const response = await client.chat.completions.create({ model: modelId, messages });
+      const choice = response.choices?.[0];
+      const u = (response.usage ?? {}) as CompatUsage;
+      const cachedInputTokens =
+        u.prompt_cache_hit_tokens ?? u.prompt_tokens_details?.cached_tokens ?? 0;
+      const result: RawResult = {
+        text: choice?.message?.content ?? '',
+        rawUsage: {
+          inputTokens: Math.max(0, (u.prompt_tokens ?? 0) - cachedInputTokens),
+          outputTokens: u.completion_tokens ?? 0,
+          cachedInputTokens,
+        },
+        finishReason: choice?.finish_reason ?? '',
+        responseId: response.id,
+      };
+      return {
+        result,
+        outcome: {
+          responseModel: response.model ?? modelId,
+          responseId: response.id,
+          inputTokens: result.rawUsage.inputTokens,
+          outputTokens: result.rawUsage.outputTokens,
+          cacheReadInputTokens: cachedInputTokens || undefined,
+        },
+      };
+    });
   }
 
   async function callWithRetries<T>(
@@ -241,7 +258,11 @@ export function createOpenAICompatAdapter(config: OpenAICompatConfig): OpenAICom
     throw new Error('callWithRetries: exited loop without return or throw');
   }
 
-  function shapeUsage(raw: RawResult['rawUsage'], direction: ModelClass): TokenUsage {
+  function shapeUsage(
+    raw: RawResult['rawUsage'],
+    direction: ModelClass,
+    responseId?: string
+  ): TokenUsage {
     return {
       provider,
       model: models[direction],
@@ -254,6 +275,9 @@ export function createOpenAICompatAdapter(config: OpenAICompatConfig): OpenAICom
       outputTokens: raw.outputTokens,
       cacheCreationInputTokens: 0,
       cacheReadInputTokens: raw.cachedInputTokens,
+      // The response object's own id (not an HTTP header) — see RawResult's
+      // own doc comment on `responseId`.
+      providerRequestId: responseId,
     };
   }
 
@@ -277,7 +301,7 @@ export function createOpenAICompatAdapter(config: OpenAICompatConfig): OpenAICom
       );
     }
 
-    const usage = shapeUsage(raw.rawUsage, modelClass);
+    const usage = shapeUsage(raw.rawUsage, modelClass, raw.responseId);
     await fireUsageHook(options.onUsage, usage, `${provider}.chat`);
 
     if (!raw.text) {
@@ -333,31 +357,41 @@ export function createOpenAICompatAdapter(config: OpenAICompatConfig): OpenAICom
     raw: RawResult['rawUsage'];
     finishReason: string;
   }> {
-    const response = await client.chat.completions.create({
-      model: modelId,
-      messages: messages as never,
-      tools: tools.length > 0 ? (tools as never) : undefined,
+    return withGenAISpan({ provider, requestModel: modelId }, async () => {
+      const response = await client.chat.completions.create({
+        model: modelId,
+        messages: messages as never,
+        tools: tools.length > 0 ? (tools as never) : undefined,
+      });
+      const choice = response.choices?.[0];
+      const msg = (choice?.message ?? {}) as {
+        content?: string | null;
+        tool_calls?: OpenAIToolCall[];
+      };
+      const u = (response.usage ?? {}) as CompatUsage;
+      const cachedInputTokens =
+        u.prompt_cache_hit_tokens ?? u.prompt_tokens_details?.cached_tokens ?? 0;
+      const result = {
+        text: msg.content ?? '',
+        rawCalls: msg.tool_calls ?? [],
+        raw: {
+          inputTokens: Math.max(0, (u.prompt_tokens ?? 0) - cachedInputTokens),
+          outputTokens: u.completion_tokens ?? 0,
+          cachedInputTokens,
+        },
+        finishReason: choice?.finish_reason ?? '',
+      };
+      return {
+        result,
+        outcome: {
+          responseModel: response.model ?? modelId,
+          responseId: response.id,
+          inputTokens: result.raw.inputTokens,
+          outputTokens: result.raw.outputTokens,
+          cacheReadInputTokens: cachedInputTokens || undefined,
+        },
+      };
     });
-    const choice = response.choices?.[0];
-    const msg = (choice?.message ?? {}) as {
-      content?: string | null;
-      tool_calls?: OpenAIToolCall[];
-    };
-    const u = (response.usage ?? {}) as CompatUsage;
-    return {
-      text: msg.content ?? '',
-      rawCalls: msg.tool_calls ?? [],
-      raw: {
-        inputTokens: Math.max(
-          0,
-          (u.prompt_tokens ?? 0) -
-            (u.prompt_cache_hit_tokens ?? u.prompt_tokens_details?.cached_tokens ?? 0)
-        ),
-        outputTokens: u.completion_tokens ?? 0,
-        cachedInputTokens: u.prompt_cache_hit_tokens ?? u.prompt_tokens_details?.cached_tokens ?? 0,
-      },
-      finishReason: choice?.finish_reason ?? '',
-    };
   }
 
   /** Single-shot tool-calling: surface the model's tool_calls for the caller to

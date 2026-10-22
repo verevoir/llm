@@ -15,6 +15,7 @@
 
 import OpenAI from 'openai';
 import { fireUsageHook } from '../audit-hook.js';
+import { withGenAISpan } from '../otel.js';
 import {
   type ChatOptions,
   type ChatReply,
@@ -114,6 +115,9 @@ interface RawResult {
     cachedInputTokens: number;
   };
   finishReason: string;
+  /** The response's own id (`chatcmpl-...`) — the SDK object's id field, not
+   * an HTTP header. See {@link TokenUsage.providerRequestId}. */
+  responseId?: string;
 }
 
 /** DeepSeek reports cache hits via the non-standard `prompt_cache_hit_tokens`
@@ -132,37 +136,51 @@ async function callChatCompletionsCreate(
   systemPrompt: string,
   turns: ChatOptions['turns']
 ): Promise<RawResult> {
-  // Chat Completions takes a single `messages` array with the system
-  // prompt as the leading 'system' message. 'user' / 'assistant' roles
-  // pass through unchanged.
-  const messages = [
-    { role: 'system' as const, content: systemPrompt },
-    ...turns.map((t) => ({
-      role: t.role as 'user' | 'assistant',
-      content: collapseContentToText(PROVIDER, t.content),
-    })),
-  ];
+  return withGenAISpan({ provider: PROVIDER, requestModel: modelId }, async () => {
+    // Chat Completions takes a single `messages` array with the system
+    // prompt as the leading 'system' message. 'user' / 'assistant' roles
+    // pass through unchanged.
+    const messages = [
+      { role: 'system' as const, content: systemPrompt },
+      ...turns.map((t) => ({
+        role: t.role as 'user' | 'assistant',
+        content: collapseContentToText(PROVIDER, t.content),
+      })),
+    ];
 
-  const response = await client.chat.completions.create({
-    model: modelId,
-    messages,
+    const response = await client.chat.completions.create({
+      model: modelId,
+      messages,
+    });
+
+    const choice = response.choices?.[0];
+    const text = choice?.message?.content ?? '';
+    const u = (response.usage ?? {}) as DeepSeekUsage;
+    const cachedInputTokens =
+      u.prompt_cache_hit_tokens ?? u.prompt_tokens_details?.cached_tokens ?? 0;
+
+    const result: RawResult = {
+      text,
+      rawUsage: {
+        inputTokens: u.prompt_tokens ?? 0,
+        outputTokens: u.completion_tokens ?? 0,
+        cachedInputTokens,
+      },
+      finishReason: choice?.finish_reason ?? '',
+      responseId: response.id,
+    };
+
+    return {
+      result,
+      outcome: {
+        responseModel: response.model ?? modelId,
+        responseId: response.id,
+        inputTokens: result.rawUsage.inputTokens,
+        outputTokens: result.rawUsage.outputTokens,
+        cacheReadInputTokens: cachedInputTokens || undefined,
+      },
+    };
   });
-
-  const choice = response.choices?.[0];
-  const text = choice?.message?.content ?? '';
-  const u = (response.usage ?? {}) as DeepSeekUsage;
-  const cachedInputTokens =
-    u.prompt_cache_hit_tokens ?? u.prompt_tokens_details?.cached_tokens ?? 0;
-
-  return {
-    text,
-    rawUsage: {
-      inputTokens: u.prompt_tokens ?? 0,
-      outputTokens: u.completion_tokens ?? 0,
-      cachedInputTokens,
-    },
-    finishReason: choice?.finish_reason ?? '',
-  };
 }
 
 // DeepSeek outages and rate limits are handled with the same exponential-
@@ -229,7 +247,11 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function shapeUsage(raw: RawResult['rawUsage'], direction: ModelClass): TokenUsage {
+function shapeUsage(
+  raw: RawResult['rawUsage'],
+  direction: ModelClass,
+  responseId?: string
+): TokenUsage {
   return {
     provider: PROVIDER,
     model: models[direction],
@@ -244,6 +266,9 @@ function shapeUsage(raw: RawResult['rawUsage'], direction: ModelClass): TokenUsa
     outputTokens: raw.outputTokens,
     cacheCreationInputTokens: 0,
     cacheReadInputTokens: raw.cachedInputTokens,
+    // The response object's own id (not an HTTP header) — see RawResult's
+    // own doc comment on `responseId`.
+    providerRequestId: responseId,
   };
 }
 
@@ -291,7 +316,7 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
     );
   }
 
-  const usage = shapeUsage(raw.rawUsage, modelClass);
+  const usage = shapeUsage(raw.rawUsage, modelClass, raw.responseId);
   await fireUsageHook(options.onUsage, usage, 'deepseek.chat');
 
   if (!raw.text) {

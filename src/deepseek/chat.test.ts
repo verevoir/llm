@@ -41,6 +41,41 @@ function fakeResponse(
   };
 }
 
+describe('deepseek.chat — providerRequestId (#70 honesty fix)', () => {
+  beforeEach(() => {
+    mockCreate.mockReset();
+    mockClientCtor.mockReset();
+  });
+
+  it("reports providerRequestId from the response object's own id field", async () => {
+    mockCreate.mockResolvedValueOnce({
+      id: 'chatcmpl-honest123',
+      choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 10, completion_tokens: 5 },
+    });
+
+    const reply = await chat({
+      systemPrompt: 's',
+      turns: [{ role: 'user', content: 'q' }],
+      apiKey: 'sk-test',
+    });
+
+    expect(reply.usage.providerRequestId).toBe('chatcmpl-honest123');
+  });
+
+  it('leaves providerRequestId undefined when the response has no id', async () => {
+    mockCreate.mockResolvedValueOnce(fakeResponse('ok'));
+
+    const reply = await chat({
+      systemPrompt: 's',
+      turns: [{ role: 'user', content: 'q' }],
+      apiKey: 'sk-test',
+    });
+
+    expect(reply.usage.providerRequestId).toBeUndefined();
+  });
+});
+
 describe('deepseek.chat', () => {
   beforeEach(() => {
     mockCreate.mockReset();
