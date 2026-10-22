@@ -50,6 +50,7 @@ import {
   ATTR_GEN_AI_PROVIDER_NAME,
   ATTR_GEN_AI_USAGE_INPUT_TOKENS,
   ATTR_GEN_AI_USAGE_OUTPUT_TOKENS,
+  ATTR_VEREVOIR_SESSION_ID,
 } from '../otel.js';
 
 function fakeVersionChild() {
@@ -582,6 +583,25 @@ describe('claudeCli.chatWithToolLoop — GenAI spans', () => {
     const spans = exporter.getFinishedSpans();
     expect(spans).toHaveLength(1);
     expect(spans[0].status.code).toBe(SpanStatusCode.ERROR);
+  });
+
+  it("chat()'s held-session branch puts the envelope's session_id on TokenUsage.sessionId and the span's verevoir.llm.session_id attribute (#73 review finding: untested)", async () => {
+    queueVersionSpawn();
+    mockRunSessionTurn.mockResolvedValueOnce(
+      baseSessionTurnResult({ sessionId: 'sess_live_xyz', uuid: 'turn-uuid-live' })
+    );
+
+    const result = await chat({
+      systemPrompt: 'sys',
+      turns: [{ role: 'user', content: 'q' }],
+      session: SESSION_HANDLE,
+    });
+
+    expect(result.usage.sessionId).toBe('sess_live_xyz');
+
+    const spans2 = exporter.getFinishedSpans();
+    expect(spans2).toHaveLength(1);
+    expect(spans2[0].attributes[ATTR_VEREVOIR_SESSION_ID]).toBe('sess_live_xyz');
   });
 });
 

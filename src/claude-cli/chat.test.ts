@@ -13,6 +13,7 @@ import {
   ATTR_VEREVOIR_CACHE_CREATION_EPHEMERAL_1H_INPUT_TOKENS,
   ATTR_VEREVOIR_COST_USD_REPORTED,
   ATTR_VEREVOIR_PROVIDER_REQUEST_ID,
+  ATTR_VEREVOIR_SESSION_ID,
 } from '../otel.js';
 import { EventEmitter } from 'node:events';
 import { tmpdir } from 'node:os';
@@ -241,6 +242,11 @@ describe('claudeCli.chat — GenAI spans', () => {
     expect(reply.usage.cacheCreationEphemeral1hInputTokens).toBe(20);
     expect(reply.usage.costUsdReported).toBe(0.0042);
     expect(reply.usage.providerRequestId).toBe('sess_abc123');
+    // One-shot: session_id genuinely is unique per call there and is kept
+    // as providerRequestId (above) — but it must NOT also be surfaced as
+    // TokenUsage.sessionId, which exists only to correlate turns on a HELD
+    // session (#73 review finding: untested).
+    expect(reply.usage.sessionId).toBeUndefined();
 
     const spans = exporter.getFinishedSpans();
     expect(spans).toHaveLength(1);
@@ -253,6 +259,7 @@ describe('claudeCli.chat — GenAI spans', () => {
     expect(span.attributes[ATTR_VEREVOIR_CACHE_CREATION_EPHEMERAL_1H_INPUT_TOKENS]).toBe(20);
     expect(span.attributes[ATTR_VEREVOIR_COST_USD_REPORTED]).toBe(0.0042);
     expect(span.attributes[ATTR_VEREVOIR_PROVIDER_REQUEST_ID]).toBe('sess_abc123');
+    expect(Object.keys(span.attributes)).not.toContain(ATTR_VEREVOIR_SESSION_ID);
   });
 
   it('omits the cache-split + cost + request-id span attributes on a success that does not report them', async () => {

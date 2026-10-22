@@ -855,6 +855,66 @@ describe('claude-cli session lifecycle (wave 2a)', () => {
     });
   });
 
+  describe('uuid / session_id / total_cost_usd parsing (#73 review finding: untested)', () => {
+    it('surfaces uuid, sessionId and totalCostUsd from the terminal envelope, including the cache-creation 5m/1h split', async () => {
+      const { child, emitLine } = fakeChild();
+      mockSpawn.mockImplementationOnce(() => {
+        setImmediate(() =>
+          emitLine({
+            type: 'result',
+            result: 'ok',
+            uuid: 'turn-uuid-xyz',
+            session_id: 'sess-abc',
+            total_cost_usd: 0.0123,
+            usage: {
+              input_tokens: 5,
+              output_tokens: 3,
+              cache_creation: { ephemeral_5m_input_tokens: 10, ephemeral_1h_input_tokens: 20 },
+            },
+          })
+        );
+        return child;
+      });
+      const session = createSession();
+
+      const r = await runSessionTurn({
+        session,
+        systemPrompt: 'sys',
+        message: 'a',
+        tools: [],
+        maxToolCalls: 0,
+      });
+
+      expect(r.uuid).toBe('turn-uuid-xyz');
+      expect(r.sessionId).toBe('sess-abc');
+      expect(r.totalCostUsd).toBe(0.0123);
+      expect(r.usage?.cache_creation?.ephemeral_5m_input_tokens).toBe(10);
+      expect(r.usage?.cache_creation?.ephemeral_1h_input_tokens).toBe(20);
+    });
+
+    it('leaves uuid, sessionId and totalCostUsd undefined — never 0 or an empty string — when the envelope omits them', async () => {
+      const { child, emitLine } = fakeChild();
+      mockSpawn.mockImplementationOnce(() => {
+        setImmediate(() => emitLine({ type: 'result', result: 'ok' }));
+        return child;
+      });
+      const session = createSession();
+
+      const r = await runSessionTurn({
+        session,
+        systemPrompt: 'sys',
+        message: 'a',
+        tools: [],
+        maxToolCalls: 0,
+      });
+
+      expect(r.uuid).toBeUndefined();
+      expect(r.sessionId).toBeUndefined();
+      expect(r.totalCostUsd).toBeUndefined();
+      expect(r.usage?.cache_creation).toBeUndefined();
+    });
+  });
+
   describe('bounds', () => {
     it("does not evict a session while a turn is still in flight, even past the idle timeout — only the per-turn watchdog governs a turn's own length", async () => {
       vi.useFakeTimers();
