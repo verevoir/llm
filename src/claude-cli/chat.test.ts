@@ -304,6 +304,42 @@ describe('claudeCli.chat — GenAI spans', () => {
     expect(spans).toHaveLength(1);
     expect(spans[0].status.code).toBe(SpanStatusCode.ERROR);
   });
+
+  it("never lets the CLI's is_error result text reach the span — the caller still sees it (0.34.0 privacy fix)", async () => {
+    // This inner describe block never resets mockSpawn/the version cache
+    // between tests (only the OUTER 'claudeCli.chat' describe's beforeEach
+    // does) — an earlier test's mockSuccessfulCall queues a version-fallback
+    // spawn that the (now-cached) version never consumes, leaving it to leak
+    // into whichever test's spawn call comes next. Reset both explicitly so
+    // this test's single queued call is the one it actually gets.
+    mockSpawn.mockReset();
+    resetClaudeCliVersionCacheForTests();
+    queueCall(
+      streamOutput({
+        is_error: true,
+        subtype: 'error_max_turns',
+        result: 'SECRET-RESPONSE-TEXT',
+      })
+    );
+
+    await expect(
+      chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] })
+    ).rejects.toThrow(/SECRET-RESPONSE-TEXT/);
+
+    const spans = exporter.getFinishedSpans();
+    expect(spans).toHaveLength(1);
+    const span = spans[0];
+    expect(span.status.code).toBe(SpanStatusCode.ERROR);
+
+    const exceptionEvent = span.events.find((e) => e.name === 'exception');
+    expect(exceptionEvent).toBeDefined();
+    const eventAttrs = exceptionEvent!.attributes ?? {};
+    for (const value of Object.values(eventAttrs)) {
+      expect(String(value)).not.toContain('SECRET-RESPONSE-TEXT');
+    }
+    expect(eventAttrs['exception.stacktrace']).toBeUndefined();
+    expect(span.status.message).not.toContain('SECRET-RESPONSE-TEXT');
+  });
 });
 
 describe('claudeCli.chat', () => {

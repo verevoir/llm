@@ -125,6 +125,46 @@ export interface GenAISpanOutcome {
 }
 
 /**
+ * ══════════════════════════════════════════════════════════════════════
+ * WHY SPANS NEVER CARRY ERROR MESSAGES.
+ * ══════════════════════════════════════════════════════════════════════
+ * A privacy audit (2026-10-22) found three real paths for provider or
+ * response text to reach a span through the raw error object
+ * `recordException` used to record verbatim:
+ *   - claude-cli's `is_error: true` throws embed the CLI's own response
+ *     text (`parsed.result`) directly in the error message — see
+ *     src/claude-cli/index.ts's one-shot path and src/claude-cli/
+ *     session.ts's held-session path, both around their `is_error`
+ *     check. That text can be the model's own output for the call.
+ *   - every other adapter rethrows its SDK's own error unchanged out of
+ *     its `callWithRetries`; this library does not control what those
+ *     SDKs put in `.message`, which can include a copy of the request or
+ *     response body.
+ *   - `recordException`'s standard behaviour also captures the error's
+ *     `.stack`, which — being a Node stack trace — carries local
+ *     filesystem paths.
+ * `withGenAISpan` below records a SANITIZED stand-in instead of the raw
+ * error: the error's `name`, plus a numeric HTTP status if the error
+ * happens to carry one (`.status`/`.statusCode`, as the OpenAI/Anthropic
+ * SDKs set) — never the error's own `.message` and never `.stack`. The
+ * error rethrown to the CALLER below is the original, untouched object;
+ * only what reaches the span is sanitized.
+ */
+
+/** Best-effort numeric HTTP status off an error, if the SDK that threw it
+ * sets one (OpenAI/Anthropic-shaped errors use `.status`; some others use
+ * `.statusCode`). `undefined` when neither is a number — never guessed,
+ * and never derived from the error's message text. */
+function extractHttpStatus(err: unknown): number | undefined {
+  if (!err || typeof err !== 'object') return undefined;
+  const status = (err as { status?: unknown }).status;
+  if (typeof status === 'number') return status;
+  const statusCode = (err as { statusCode?: unknown }).statusCode;
+  if (typeof statusCode === 'number') return statusCode;
+  return undefined;
+}
+
+/**
  * Run `fn` inside a CLIENT span named `chat {requestModel}` — the GenAI
  * semconv span-naming convention, `{gen_ai.operation.name} {gen_ai.request
  * .model}`. `fn` receives the live span (for a caller that wants to add
@@ -132,10 +172,13 @@ export interface GenAISpanOutcome {
  * {@link GenAISpanOutcome} to record.
  *
  * On success, every PRESENT outcome field becomes a span attribute and the
- * span ends OK. On throw, `error.type` is set to the error's `name`, the
- * exception is recorded on the span, the span ends ERROR, and the error is
- * rethrown completely unchanged — this never swallows, wraps, or reshapes a
- * failure; it only observes it.
+ * span ends OK. On throw, `error.type` is set to the error's `name`, a
+ * SANITIZED exception (name + a content-free summary, never the error's
+ * own message or stack — see WHY SPANS NEVER CARRY ERROR MESSAGES above)
+ * is recorded on the span, the span ends ERROR with that same sanitized
+ * message, and the error is rethrown to the CALLER completely unchanged —
+ * this never swallows, wraps, or reshapes a failure for the caller; it
+ * only changes what the span itself is allowed to observe.
  */
 export async function withGenAISpan<T>(
   request: GenAISpanRequest,
@@ -159,9 +202,15 @@ export async function withGenAISpan<T>(
         return result;
       } catch (err) {
         const errorType = err instanceof Error && err.name ? err.name : 'Error';
+        const httpStatus = extractHttpStatus(err);
+        const sanitizedMessage =
+          httpStatus !== undefined ? `${errorType} (status ${httpStatus})` : errorType;
         span.setAttribute(ATTR_ERROR_TYPE, errorType);
-        span.recordException(err instanceof Error ? err : new Error(String(err)));
-        span.setStatus({ code: SpanStatusCode.ERROR, message: errorType });
+        // SANITIZED exception — never the real error's message or stack.
+        // See "WHY SPANS NEVER CARRY ERROR MESSAGES" above. The error
+        // rethrown to the caller below is the original, untouched object.
+        span.recordException({ name: errorType, message: sanitizedMessage });
+        span.setStatus({ code: SpanStatusCode.ERROR, message: sanitizedMessage });
         throw err;
       } finally {
         span.end();
