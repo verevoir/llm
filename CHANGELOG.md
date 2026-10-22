@@ -5,7 +5,7 @@
 **Adds a USD-per-token price book (`createPriceBook`), exported from the package's main entry — cost telemetry needs USD, not just token counts.**
 
 - **LiteLLM's live price list is the default; the bundled `PRICING_SNAPSHOT` is the fallback** — used before the first live fetch ever succeeds, and again whenever every live fetch has failed, unless the caller injects its own snapshot. It ships in this release as an unpopulated placeholder (`asOf: 'unpopulated'`, `payload: {}`); regenerating it with real LiteLLM data is a separate, non-belt step, so until then every model resolves `unpriced`, never `0`.
-- **The 10x price-move circuit breaker compares live → live only** — a refresh where any price moved more than 10x in either direction (or crossed to/from exactly zero) against the previous *live* table rejects the whole payload and keeps the current one.
+- **The 10x price-move circuit breaker compares live → live only** — a refresh where any price moved more than 10x in either direction (or crossed to/from exactly zero) against the previous _live_ table rejects the whole payload and keeps the current one.
 - **The first move from the snapshot to a live table only warns, never rejects** — a snapshot is stale by construction, so the snapshot → first-live transition is accepted once it parses and validates, with a warning logged for every price that moved more than 10x against the snapshot it replaces.
 - **`costOf(usage)`** prices input, output, cache-read, and cache-write (5m/1h) tokens each at their own rate; an unmatched model is `unpriced`, and partial/approximated pricing is marked `complete: false` rather than silently treated as exact or free.
 
