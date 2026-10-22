@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.34.0] — 2026-10-22
+
+**Spans no longer record provider error messages or stacks; exception events carry the error name and status only. Errors thrown to callers are unchanged.** A privacy audit found that `withGenAISpan`'s failure path (`src/otel.ts`) recorded the raw thrown error on the span via `recordException`, verbatim — including claude-cli's `is_error` throws, which embed the CLI's own response text, and every other adapter's passed-through SDK error messages, plus the standard stack trace `recordException` captures (which carries local file paths). The exception event recorded on a span now carries only the error's `name` and a content-free summary (optionally a numeric HTTP status, when the error carries one) — never the error's own message and never its stack. `span.setStatus`'s message is the same content-free summary. The error rethrown to the caller is the identical, untouched object in every case — no behaviour change for anything that catches a `chat()`/`chatWithTools()`/`chatWithToolLoop()` rejection.
+
 ## [0.33.0] — 2026-10-22
 
 **Adds a USD-per-token price book (`createPriceBook`), exported from the package's main entry — cost telemetry needs USD, not just token counts.**

@@ -160,4 +160,29 @@ describe('withGenAISpan — recorded via an in-memory span exporter', () => {
     expect(span.attributes[ATTR_ERROR_TYPE]).toBe('RateLimitError');
     expect(span.events.some((e) => e.name === 'exception')).toBe(true);
   });
+
+  it('never records the error message or stack on the exception event or span status — only the name (+ status if present) — while the caller still sees the original message (0.34.0 privacy fix)', async () => {
+    const err = new Error('prompt: SECRET-PROMPT');
+    err.name = 'ValidationError';
+
+    await expect(
+      withGenAISpan({ provider: 'openai', requestModel: 'gpt-5' }, async () => {
+        throw err;
+      })
+    ).rejects.toThrow('prompt: SECRET-PROMPT');
+
+    const spans = exporter.getFinishedSpans();
+    expect(spans).toHaveLength(1);
+    const span = spans[0];
+    expect(span.attributes[ATTR_ERROR_TYPE]).toBe('ValidationError');
+
+    const exceptionEvent = span.events.find((e) => e.name === 'exception');
+    expect(exceptionEvent).toBeDefined();
+    const eventAttrs = exceptionEvent!.attributes ?? {};
+    for (const value of Object.values(eventAttrs)) {
+      expect(String(value)).not.toContain('SECRET-PROMPT');
+    }
+    expect(eventAttrs['exception.stacktrace']).toBeUndefined();
+    expect(span.status.message).not.toContain('SECRET-PROMPT');
+  });
 });
