@@ -123,9 +123,12 @@ rates). `route` (`CredentialRoute`, a core export: `'api-key'` |
 `'subscription-oauth'` | `'mixed'`) reports which credential mechanism actually
 served a call, positively, never left to be inferred from what's absent. The
 core export ships `sumUsages` / `parseUsage` to roll up across calls,
-`totalTokens`, `formatTokensCompact` for compact displays, `estimateCostUSD`, and
-`uncoveredModels` (loud-on-miss: which models a rates table doesn't cover) — so
-usage converts to a cost estimate without external lookups.
+`totalTokens`, `formatTokensCompact` for compact displays, and
+`createPriceBook` / `book.costOf(...)` — the cost API, pricing from
+LiteLLM's live price table (a bundled snapshot as fallback) and reporting an
+unmatched model as `unpriced`, never `0`. The older `estimateCostUSD`,
+`RatesTable` / `RateTuple`, `catalogEntryFor`, and `uncoveredModels` are kept
+for back-compat but `@deprecated` — new code should use `createPriceBook`.
 
 The `direction` field carries the model-class semantic (`reasoning` /
 `drafting` / `extraction`) so per-conversation / per-project rollups can break

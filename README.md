@@ -117,9 +117,13 @@ catalog).
 ## Cost accounting
 
 Every call returns a `TokenUsage` shaped as
-`{ provider, model, direction, inputTokens, outputTokens, ... }`. The package
-exports `sumUsages`, `formatTokensCompact`, and a per-model rate table so
-per-conversation / per-project rollups need no external lookups. The
+`{ provider, model, direction, inputTokens, outputTokens, ... }`. The cost API
+is `createPriceBook(...)` / `book.costOf(usage)` — it prices from LiteLLM's
+live price table, with a bundled snapshot as the fallback, and reports an
+unmatched model as `unpriced` rather than `$0`. The package also exports
+`sumUsages` and `formatTokensCompact` for rollups and compact displays. The
+older per-adapter `rates` tables and `estimateCostUSD` are kept for
+back-compat but `@deprecated` — use `createPriceBook` instead. The
 **direction** field tracks the model-class semantic (`reasoning` /
 `extraction`) so rollups can break down "spent X on reasoning + Y on extraction"
 natively.
