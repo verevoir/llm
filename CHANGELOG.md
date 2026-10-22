@@ -9,6 +9,7 @@
 - **The 10x price-move circuit breaker compares live → live only** — a refresh where any price moved more than 10x in either direction (or crossed to/from exactly zero) against the previous _live_ table rejects the whole payload and keeps the current one.
 - **The first move from the snapshot to a live table only warns, never rejects** — a snapshot is stale by construction, so the snapshot → first-live transition is accepted once it parses and validates, with a warning logged for every price that moved more than 10x against the snapshot it replaces.
 - **`costOf(usage)`** prices input, output, cache-read, and cache-write (5m/1h) tokens each at their own rate; an unmatched model is `unpriced`, and partial/approximated pricing is marked `complete: false` rather than silently treated as exact or free.
+- **Decision: two cost APIs, for now.** `createPriceBook` / `book.costOf(...)` is the successor: live-priced from LiteLLM, with the bundled snapshot as fallback, and an unknown model is always `unpriced`, never `0`. The old static-rates API — `estimateCostUSD`, `RatesTable`, `RateTuple`, `catalogEntryFor`, `uncoveredModels` — is kept and marked `@deprecated` rather than removed, so nothing breaks: all 5 provider adapters still call `estimateCostUSD`. A follow-up moves those adapters onto `PriceBook` and removes the old API in a later minor. Decided by the operator on 2026-10-22.
 
 ## [0.32.0] — 2026-10-22
 
