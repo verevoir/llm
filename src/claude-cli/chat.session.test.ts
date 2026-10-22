@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from 'vitest';
 import { EventEmitter } from 'node:events';
 
 // This file tests wave 3's WIRING — chatOnSession, chat()'s session
@@ -40,6 +40,17 @@ import {
   resetClaudeCliVersionCacheForTests,
 } from './index.js';
 import type { ToolDef, ToolUse, TokenUsage } from '../index.js';
+import { trace, SpanStatusCode } from '@opentelemetry/api';
+import {
+  BasicTracerProvider,
+  InMemorySpanExporter,
+  SimpleSpanProcessor,
+} from '@opentelemetry/sdk-trace-base';
+import {
+  ATTR_GEN_AI_PROVIDER_NAME,
+  ATTR_GEN_AI_USAGE_INPUT_TOKENS,
+  ATTR_GEN_AI_USAGE_OUTPUT_TOKENS,
+} from '../otel.js';
 
 function fakeVersionChild() {
   const child = new EventEmitter() as EventEmitter & {
@@ -506,5 +517,70 @@ describe('chatWithToolLoop', () => {
     expect(result.usage.model).toBe('claude-opus-5');
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('invoked more than one model'));
     warn.mockRestore();
+  });
+});
+
+// ── GenAI spans on chatWithToolLoop (#73 review finding: the span wrap had
+// no test at all) — same in-memory-exporter pattern as chat.test.ts's own
+// 'claudeCli.chat — GenAI spans' block, registered once for this block.
+// The file-level beforeEach above already resets every mock and re-arms
+// mockCreateSession's return value per test; this block only owns the
+// exporter's own reset.
+describe('claudeCli.chatWithToolLoop — GenAI spans', () => {
+  let exporter: InMemorySpanExporter;
+  let provider: BasicTracerProvider;
+
+  beforeAll(() => {
+    exporter = new InMemorySpanExporter();
+    provider = new BasicTracerProvider({ spanProcessors: [new SimpleSpanProcessor(exporter)] });
+    trace.setGlobalTracerProvider(provider);
+  });
+
+  afterAll(async () => {
+    await provider.shutdown();
+  });
+
+  beforeEach(() => {
+    exporter.reset();
+  });
+
+  it('records one CLIENT span with the GenAI usage attributes on a successful call', async () => {
+    queueVersionSpawn();
+    mockRunSessionTurn.mockResolvedValueOnce(
+      baseSessionTurnResult({ usage: { input_tokens: 12, output_tokens: 4 } })
+    );
+
+    await chatWithToolLoop({
+      systemPrompt: 'sys',
+      turns: [{ role: 'user', content: 'q' }],
+      tools: [ECHO_TOOL],
+      executor: async () => 'x',
+    });
+
+    const spans = exporter.getFinishedSpans();
+    expect(spans).toHaveLength(1);
+    const span = spans[0];
+    expect(span.attributes[ATTR_GEN_AI_PROVIDER_NAME]).toBe('anthropic');
+    expect(span.attributes[ATTR_GEN_AI_USAGE_INPUT_TOKENS]).toBe(12);
+    expect(span.attributes[ATTR_GEN_AI_USAGE_OUTPUT_TOKENS]).toBe(4);
+    expect(span.status.code).toBe(SpanStatusCode.OK);
+  });
+
+  it('marks the span ERROR and rethrows unchanged when runSessionTurn rejects', async () => {
+    queueVersionSpawn();
+    mockRunSessionTurn.mockRejectedValueOnce(new Error('boom'));
+
+    await expect(
+      chatWithToolLoop({
+        systemPrompt: 'sys',
+        turns: [{ role: 'user', content: 'q' }],
+        tools: [ECHO_TOOL],
+        executor: async () => 'x',
+      })
+    ).rejects.toThrow('boom');
+
+    const spans = exporter.getFinishedSpans();
+    expect(spans).toHaveLength(1);
+    expect(spans[0].status.code).toBe(SpanStatusCode.ERROR);
   });
 });
