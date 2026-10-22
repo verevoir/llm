@@ -364,14 +364,13 @@ describe('createPriceBook — snapshot', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  // The bundled default (src/pricing-snapshot.ts) is now populated with
-  // real LiteLLM data (asOf 2026-10-22T12:59:18Z, raw upstream sha256
+  // The bundled default (src/pricing-snapshot.ts) is populated with real
+  // LiteLLM data (asOf 2026-10-22T12:59:18Z, raw upstream sha256
   // 91da1a98…). This test exercises the REAL, unmocked module exactly as
   // it ships: falling back to it (because no explicit snapshot and no
   // fetch were supplied) prices a known model straight from that real
   // data. See pricing-default-snapshot.test.ts for the same fallback
-  // exercised against a MOCKED snapshot, including the empty-table edge
-  // cases this file used to cover against the (now-stale) placeholder.
+  // exercised against a MOCKED snapshot instead.
   it('falls back to the bundled default snapshot and prices a known model — claude-sonnet-4-5 — from the real, unmocked data', () => {
     const book = createPriceBook({ fetch: vi.fn() });
     expect(book.source?.kind).toBe('snapshot');

@@ -344,12 +344,13 @@ function sha256Hex(text: string): string {
  * it is the same raw LiteLLM shape, just trimmed to the fields this
  * module reads.
  *
- * The bundled default ships in this PR as an unpopulated placeholder
- * (`payload: {}`) — a later, non-belt step regenerates
- * `src/pricing-snapshot.ts` with real data. Until then this resolves to
- * an empty table, which is exactly the pre-this-PR behaviour for a caller
- * supplying neither a snapshot nor a successful fetch: every model
- * `unpriced`, never `0`.
+ * The bundled default is generated from LiteLLM's own price list — see
+ * `src/pricing-snapshot.ts` for its provenance (source URL, `asOf`, and a
+ * sha256 fingerprint of the raw upstream JSON it was trimmed from). It is
+ * used as the fallback until the first successful live fetch replaces it,
+ * and again whenever every live fetch has failed; a model with no entry
+ * in whichever table is currently in effect resolves `unpriced`, never
+ * `0`.
  */
 function defaultTableAndSource(
   options: PriceBookOptions,
