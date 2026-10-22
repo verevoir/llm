@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.33.0] — 2026-10-22
+
+**Adds a USD-per-token price book (`createPriceBook`), exported from the package's main entry — cost telemetry needs USD, not just token counts.**
+
+- **LiteLLM's live price list is the default; the bundled `PRICING_SNAPSHOT` is the fallback only until the first successful fetch** — used before the first live fetch ever succeeds; `refresh()` only ever assigns the table on success, so once a live fetch has succeeded once, a later failed refresh keeps that last good _live_ table rather than falling back to the snapshot again (unless the caller injects its own snapshot). The bundled snapshot is populated with real LiteLLM data (`asOf: '2026-10-22T12:59:18Z'`, raw upstream sha256 `91da1a98e194e0d7c436aaf970800c8e734d70cc78027cfe314d5b27dfaf9a4c`; 6 providers, 321 parsed entries), trimmed from LiteLLM's `model_prices_and_context_window.json` to the fields this module reads.
+- **A bounded fetch timeout, and an overlap guard** — each refresh now aborts its fetch via `AbortController` after `fetchTimeoutMs` (default `DEFAULT_FETCH_TIMEOUT_MS`, 30 seconds; configurable), treating a timeout as a failed refresh exactly like a thrown fetch, a non-OK status, or invalid JSON: the last good table is kept and a warning is logged. A `refreshing` flag also stops a periodic tick from starting a second fetch while one is still in flight.
+- **The 10x price-move circuit breaker compares live → live only** — a refresh where any price moved more than 10x in either direction (or crossed to/from exactly zero) against the previous _live_ table rejects the whole payload and keeps the current one.
+- **The first move from the snapshot to a live table only warns, never rejects** — a snapshot is stale by construction, so the snapshot → first-live transition is accepted once it parses and validates, with a warning logged for every price that moved more than 10x against the snapshot it replaces.
+- **`costOf(usage)`** prices input, output, cache-read, and cache-write (5m/1h) tokens each at their own rate; an unmatched model is `unpriced`, and partial/approximated pricing is marked `complete: false` rather than silently treated as exact or free.
+- **Decision: two cost APIs, for now.** `createPriceBook` / `book.costOf(...)` is the successor: live-priced from LiteLLM, with the bundled snapshot as fallback, and an unknown model is always `unpriced`, never `0`. The old static-rates API — `estimateCostUSD`, `RatesTable`, `RateTuple`, `catalogEntryFor`, `uncoveredModels` — is kept and marked `@deprecated` rather than removed, so nothing breaks: all 5 provider adapters still call `estimateCostUSD`. A follow-up moves those adapters onto `PriceBook` and removes the old API in a later minor. Decided by the operator on 2026-10-22.
+
 ## [0.32.0] — 2026-10-22
 
 **The `claude-cli` adapter now gets the same OTel GenAI CLIENT spans as the provider-SDK adapters — `chat()`, the held-session turn path (`chatOnSession`), and `chatWithToolLoop()` are all wrapped in `withGenAISpan`, using the same `gen_ai.*` attributes (`gen_ai.provider.name` = `anthropic`, request/response model, input/output token usage) and the same `verevoir.llm.*` cache attributes — closing the telemetry gap for v5's reviews, which run through claude-cli rather than a provider SDK.**

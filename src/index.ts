@@ -33,6 +33,11 @@
  */
 export type ModelClass = 'reasoning' | 'drafting' | 'extraction';
 
+// Price book (STDIO-pricing) — USD-per-token lookup, fetched at start-up and
+// refreshed periodically by the caller. See src/pricing.ts for the full
+// design note; this package does no cost arithmetic beyond that lookup.
+export * from './pricing.js';
+
 // Model-span hook (STDIO-500) — optional, fail-soft per-call instrumentation so
 // a consumer can audit every model call, not only delegated ones.
 export {
@@ -578,10 +583,21 @@ export function formatTokensCompact(n: number): string {
  * back to the Anthropic-standard multipliers (cache read 0.1×, cache
  * write 1.25× of the input rate). Existing two-element tables stay
  * valid.
+ *
+ * @deprecated Part of the old static-rates cost API. Use
+ * `createPriceBook(...)` / `book.costOf(...)` (see `src/pricing.ts`),
+ * which prices from LiteLLM's live table (the bundled snapshot as
+ * fallback) and reports an unmatched model as `unpriced` rather than
+ * `0`. Kept, unchanged, while the 5 provider adapters still call
+ * `estimateCostUSD`.
  */
 export type RateTuple = readonly [number, number, number?, number?];
 
-/** Per-model rate table — `model id → RateTuple`. */
+/**
+ * Per-model rate table — `model id → RateTuple`.
+ * @deprecated Part of the old static-rates cost API — use
+ * `createPriceBook(...)` / `book.costOf(...)` instead.
+ */
 export type RatesTable = Readonly<Record<string, RateTuple>>;
 
 /** Default cache-rate multipliers (Anthropic standard) applied when a
@@ -601,6 +617,15 @@ const CACHE_WRITE_MULTIPLIER = 1.25;
  * Unknown models contribute 0 to the total — the caller can detect
  * coverage gaps by checking that every model in the rollup is in the
  * rates table.
+ *
+ * @deprecated Static per-adapter rate tables, silent on an unknown model
+ * (contributes `0`, never surfaced as missing). Use
+ * `createPriceBook(...)` / `book.costOf(...)` instead (see
+ * `src/pricing.ts`) — it prices from LiteLLM's live table (the bundled
+ * snapshot as fallback) and reports an unmatched model as `unpriced`.
+ * Kept, unchanged, for now: all 5 provider adapters still call this.
+ * Decision recorded in the PR body ("Decision: two cost APIs") and the
+ * 0.33.0 CHANGELOG entry.
  */
 export function estimateCostUSD(usage: PerModelUsage, rates: RatesTable): number {
   let total = 0;
@@ -728,7 +753,12 @@ export function normalizeModelId(id: string): ModelIdentity | null {
   return null;
 }
 
-/** The catalog entry a concrete id normalises to, or `null`. */
+/**
+ * The catalog entry a concrete id normalises to, or `null`.
+ * @deprecated Part of the old static-rates cost API (used by
+ * `estimateCostUSD` / `uncoveredModels`). Use `createPriceBook(...)` /
+ * `book.costOf(...)` instead.
+ */
 export function catalogEntryFor(id: string): ModelCatalogEntry | null {
   const ident = normalizeModelId(id);
   if (!ident) return null;
@@ -744,6 +774,10 @@ export function catalogEntryFor(id: string): ModelCatalogEntry | null {
  * on a non-empty result rather than quietly showing an under-count. Distinct
  * from {@link estimateCostUSD}, which stays silent (back-compat) and treats an
  * uncovered model as $0.
+ *
+ * @deprecated Part of the old static-rates cost API. `createPriceBook(...)`
+ * / `book.costOf(...)` makes this unnecessary: an unmatched model there is
+ * always `unpriced`, so there's no silent-zero case left to surface.
  */
 export function uncoveredModels(usage: PerModelUsage, rates: RatesTable = {}): string[] {
   return Object.keys(usage).filter((model) => !rates[model] && !catalogEntryFor(model)?.rates);
