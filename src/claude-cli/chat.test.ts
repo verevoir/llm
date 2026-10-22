@@ -306,6 +306,14 @@ describe('claudeCli.chat — GenAI spans', () => {
   });
 
   it("never lets the CLI's is_error result text reach the span — the caller still sees it (0.34.0 privacy fix)", async () => {
+    // This inner describe block never resets mockSpawn/the version cache
+    // between tests (only the OUTER 'claudeCli.chat' describe's beforeEach
+    // does) — an earlier test's mockSuccessfulCall queues a version-fallback
+    // spawn that the (now-cached) version never consumes, leaving it to leak
+    // into whichever test's spawn call comes next. Reset both explicitly so
+    // this test's single queued call is the one it actually gets.
+    mockSpawn.mockReset();
+    resetClaudeCliVersionCacheForTests();
     queueCall(
       streamOutput({
         is_error: true,
