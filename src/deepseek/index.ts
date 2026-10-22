@@ -61,10 +61,15 @@ export const models: Readonly<Record<ModelClass, string>> = {
  *
  * **Worst-case approach:** same convention as the other adapters — cached
  * input is billed cheaper than standard but the rate-tuple here is the
- * standard input rate, so {@link estimateCostUSD} returns an upper bound.
+ * standard input rate, so pricing via this table is an upper bound.
  * Refresh this table when DeepSeek publishes new pricing.
  *
  * Each rate-tuple is `[input_per_million_USD, output_per_million_USD]`.
+ *
+ * @deprecated Part of the old static-rates cost API. Use
+ * `createPriceBook(...)` / `book.costOf(...)` instead (see `src/pricing.ts`)
+ * — it prices from LiteLLM's live table (the bundled snapshot as fallback)
+ * and reports an unmatched model as `unpriced` rather than `0`.
  */
 export const rates: RatesTable = {
   'deepseek-reasoner': [0.55, 2.19],

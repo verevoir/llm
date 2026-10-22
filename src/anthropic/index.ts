@@ -67,8 +67,12 @@ export const models: Readonly<Record<ModelClass, string>> = Object.fromEntries(
 /**
  * Per-model pricing keyed by the concrete current id, derived from
  * {@link CATALOG}. Kept for back-compat with consumers that look pricing up by
- * exact id; the core's {@link estimateCostUSD} also falls back to the family
- * catalog, so a *new* version of a family prices even before this map lists it.
+ * exact id.
+ *
+ * @deprecated Part of the old static-rates cost API. Use
+ * `createPriceBook(...)` / `book.costOf(...)` instead (see `src/pricing.ts`)
+ * — it prices from LiteLLM's live table (the bundled snapshot as fallback)
+ * and reports an unmatched model as `unpriced` rather than `0`.
  */
 export const rates: RatesTable = Object.fromEntries(CATALOG.map((e) => [e.currentId, e.rates]));
 
