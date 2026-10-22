@@ -41,7 +41,10 @@ export interface FetchResponseLike {
   text(): Promise<string>;
 }
 
-export type FetchLike = (url: string) => Promise<FetchResponseLike>;
+export type FetchLike = (
+  url: string,
+  init?: { signal?: AbortSignal }
+) => Promise<FetchResponseLike>;
 
 /** One model's parsed, validated price entry. Every numeric field here is
  * USD per token, finite, and non-negative — {@link parseEntry} is the only
@@ -130,6 +133,12 @@ export interface PriceBookOptions {
   url?: string;
   /** Default 24h. */
   refreshMs?: number;
+  /** Default {@link DEFAULT_FETCH_TIMEOUT_MS} (30_000ms). An `AbortController`
+   * aborts the in-flight fetch after this many milliseconds; a timeout
+   * counts as a failed refresh exactly like a thrown fetch, a non-OK
+   * status, or invalid JSON — it keeps the last good table and warns
+   * rather than hanging indefinitely. */
+  fetchTimeoutMs?: number;
   /** A pre-built, already-trusted table to use before any fetch succeeds
    * (and to fall back to if every fetch ever fails). No default is
    * bundled in this PR — ship one as a later change. */
@@ -163,6 +172,11 @@ export const DEFAULT_PRICE_BOOK_URL =
   'https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json';
 
 export const DEFAULT_REFRESH_MS = 24 * 60 * 60 * 1000;
+
+/** How long a single refresh's fetch may run before it's aborted and
+ * treated as a failed refresh, same as a thrown fetch, a non-OK status,
+ * or invalid JSON — the last good table is kept and a warning is logged. */
+export const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
 
 const SAMPLE_SPEC_KEY = 'sample_spec';
 
@@ -347,10 +361,13 @@ function sha256Hex(text: string): string {
  * The bundled default is generated from LiteLLM's own price list — see
  * `src/pricing-snapshot.ts` for its provenance (source URL, `asOf`, and a
  * sha256 fingerprint of the raw upstream JSON it was trimmed from). It is
- * used as the fallback until the first successful live fetch replaces it,
- * and again whenever every live fetch has failed; a model with no entry
- * in whichever table is currently in effect resolves `unpriced`, never
- * `0`.
+ * used as the fallback only until the first successful live fetch
+ * replaces it — {@link createPriceBook}'s `refresh()` only ever assigns
+ * the table on success, so once a live fetch has succeeded once, every
+ * later failure (thrown, non-OK, bad JSON, or a timeout) keeps that last
+ * good LIVE table rather than falling back to the snapshot again; a
+ * model with no entry in whichever table is currently in effect resolves
+ * `unpriced`, never `0`.
  */
 function defaultTableAndSource(
   options: PriceBookOptions,
@@ -383,58 +400,72 @@ export function createPriceBook(options: PriceBookOptions): PriceBook {
   let table: Record<string, ModelPriceEntry> = initial.table;
   let source: PriceSource | undefined = initial.source;
   let timer: ReturnType<typeof setInterval> | null = null;
+  // Guards against an interval tick starting a second fetch while one is
+  // still in flight — without this, a slow fetch plus one or more ticks
+  // during it would fire multiple overlapping requests.
+  let refreshing = false;
 
   async function refresh(): Promise<void> {
-    let res: FetchResponseLike;
+    if (refreshing) return;
+    refreshing = true;
+    const controller = new AbortController();
+    const timeoutMs = options.fetchTimeoutMs ?? DEFAULT_FETCH_TIMEOUT_MS;
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      res = await options.fetch(url);
-    } catch (err) {
-      logger.warn('priceBook: fetch threw, keeping the last good table', {
-        error: err instanceof Error ? err.message : String(err),
-      });
-      return;
+      let res: FetchResponseLike;
+      try {
+        res = await options.fetch(url, { signal: controller.signal });
+      } catch (err) {
+        logger.warn('priceBook: fetch threw, keeping the last good table', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return;
+      }
+      if (!res.ok) {
+        logger.warn('priceBook: fetch returned a non-OK status, keeping the last good table', {
+          status: res.status,
+        });
+        return;
+      }
+      let text: string;
+      try {
+        text = await res.text();
+      } catch (err) {
+        logger.warn('priceBook: failed reading the response body, keeping the last good table', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return;
+      }
+      let json: unknown;
+      try {
+        json = JSON.parse(text);
+      } catch (err) {
+        logger.warn('priceBook: response was not valid JSON, keeping the last good table', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return;
+      }
+      const parsed = parsePayload(json, logger);
+      if (!parsed || Object.keys(parsed).length === 0) {
+        logger.warn('priceBook: parsed payload had no valid entries, keeping the last good table');
+        return;
+      }
+      // Breaker policy — see the doc comment above has10xMove: live → live
+      // rejects on any 10x-or-more move; snapshot → first live table only
+      // warns, because a stale snapshot legitimately being 10x off must
+      // never pin the book to it forever.
+      const isFirstLiveTransition = source === undefined || source.kind === 'snapshot';
+      if (isFirstLiveTransition) {
+        warn10xMoves(table, parsed, logger);
+      } else if (has10xMove(table, parsed, logger)) {
+        return;
+      }
+      table = parsed;
+      source = { kind: 'fetched', url, fetchedAt: now(), sha256: sha256Hex(text) };
+    } finally {
+      clearTimeout(timeoutId);
+      refreshing = false;
     }
-    if (!res.ok) {
-      logger.warn('priceBook: fetch returned a non-OK status, keeping the last good table', {
-        status: res.status,
-      });
-      return;
-    }
-    let text: string;
-    try {
-      text = await res.text();
-    } catch (err) {
-      logger.warn('priceBook: failed reading the response body, keeping the last good table', {
-        error: err instanceof Error ? err.message : String(err),
-      });
-      return;
-    }
-    let json: unknown;
-    try {
-      json = JSON.parse(text);
-    } catch (err) {
-      logger.warn('priceBook: response was not valid JSON, keeping the last good table', {
-        error: err instanceof Error ? err.message : String(err),
-      });
-      return;
-    }
-    const parsed = parsePayload(json, logger);
-    if (!parsed || Object.keys(parsed).length === 0) {
-      logger.warn('priceBook: parsed payload had no valid entries, keeping the last good table');
-      return;
-    }
-    // Breaker policy — see the doc comment above has10xMove: live → live
-    // rejects on any 10x-or-more move; snapshot → first live table only
-    // warns, because a stale snapshot legitimately being 10x off must
-    // never pin the book to it forever.
-    const isFirstLiveTransition = source === undefined || source.kind === 'snapshot';
-    if (isFirstLiveTransition) {
-      warn10xMoves(table, parsed, logger);
-    } else if (has10xMove(table, parsed, logger)) {
-      return;
-    }
-    table = parsed;
-    source = { kind: 'fetched', url, fetchedAt: now(), sha256: sha256Hex(text) };
   }
 
   function lookup(usage: UsageForPricing): ModelPriceEntry | undefined {

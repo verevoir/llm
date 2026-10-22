@@ -428,3 +428,65 @@ describe('createPriceBook — timer start/stop', () => {
     }
   });
 });
+
+describe('createPriceBook — fetch timeout', () => {
+  it('treats a timed-out fetch as a failed refresh — keeps the last good table and source, and warns like other failures', async () => {
+    vi.useFakeTimers();
+    try {
+      const logger = fakeLogger();
+      const neverResolvingFetch = vi.fn(
+        (_url: string, init?: { signal?: AbortSignal }) =>
+          new Promise<FetchResponseLike>((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () =>
+              reject(new Error('The operation was aborted'))
+            );
+          })
+      );
+      const book = createPriceBook({ fetch: neverResolvingFetch, fetchTimeoutMs: 5000, logger });
+      const sourceBefore = book.source;
+      const sizeBefore = book.size;
+
+      book.start();
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(5000);
+
+      expect(neverResolvingFetch).toHaveBeenCalledTimes(1);
+      expect(book.size).toBe(sizeBefore);
+      expect(book.source).toEqual(sourceBefore);
+      expect(logger.warn).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('createPriceBook — overlapping refresh', () => {
+  it('does not start a second fetch while one is still in flight — two interval ticks during a slow fetch give exactly one call', async () => {
+    vi.useFakeTimers();
+    try {
+      let resolveFetch: ((value: FetchResponseLike) => void) | undefined;
+      const slowFetch = vi.fn(
+        () =>
+          new Promise<FetchResponseLike>((resolve) => {
+            resolveFetch = resolve;
+          })
+      );
+      const book = createPriceBook({ fetch: slowFetch, refreshMs: 1000 });
+
+      book.start();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(slowFetch).toHaveBeenCalledTimes(1);
+
+      // Two interval ticks fire while the first fetch is still pending.
+      await vi.advanceTimersByTimeAsync(1000);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(slowFetch).toHaveBeenCalledTimes(1);
+
+      resolveFetch?.(okResponse(RAW));
+      await vi.advanceTimersByTimeAsync(0);
+      book.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

@@ -2,9 +2,12 @@
  * @verevoir/llm — bundled fallback price snapshot.
  *
  * `createPriceBook` (see `src/pricing.ts`) uses this as its DEFAULT
- * fallback table — in effect before the first live fetch ever succeeds,
- * and again whenever every live fetch has failed — unless the caller
- * injects its own `PriceBookOptions.snapshot`. `payload` is a TRIMMED
+ * fallback table — in effect only until the first successful live
+ * fetch replaces it. `refresh()` only ever assigns the table on
+ * success, so once a live fetch has succeeded once, a later failed
+ * refresh keeps that last good LIVE table rather than falling back to
+ * this snapshot again — unless the caller injects its own
+ * `PriceBookOptions.snapshot`. `payload` is a TRIMMED
  * LiteLLM `model_prices_and_context_window.json`: model key → only the
  * fields `src/pricing.ts`'s parser reads, in their original snake_case
  * shape, so the exact same parser that reads a live fetch's body reads
