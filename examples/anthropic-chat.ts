@@ -42,7 +42,10 @@ async function main(): Promise<void> {
   };
 
   const total =
-    usage.inputTokens + usage.outputTokens + usage.cacheReadInputTokens + usage.cacheCreationInputTokens;
+    usage.inputTokens +
+    usage.outputTokens +
+    usage.cacheReadInputTokens +
+    usage.cacheCreationInputTokens;
   console.log(`Total: ${formatTokensCompact(total)} tokens`);
 
   const cost = book.costOf(usage);
