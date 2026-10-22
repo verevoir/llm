@@ -14,7 +14,9 @@
  * upstream file was fetched, trimmed to the anthropic, openai, gemini,
  * deepseek, mistral and sambanova providers and to the six fields above,
  * and written here with its `asOf`, `sourceUrl` and the `sha256` of the
- * raw upstream bytes. Do not hand-edit prices into it; regenerate it.
+ * raw upstream bytes. `sourceUrl` is pinned to the upstream commit, so
+ * `curl -sL <sourceUrl> | shasum -a 256` reproduces `sha256`. Do not
+ * hand-edit prices into it; regenerate it.
  */
 
 export interface PricingSnapshot {
@@ -37,7 +39,7 @@ export interface PricingSnapshot {
 export const PRICING_SNAPSHOT: PricingSnapshot = {
   asOf: '2026-10-22T12:59:18Z',
   sourceUrl:
-    'https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json',
+    'https://raw.githubusercontent.com/BerriAI/litellm/159b5b2f7243bba757c08e4ddc45a2514e4cd037/model_prices_and_context_window.json',
   sha256: '91da1a98e194e0d7c436aaf970800c8e734d70cc78027cfe314d5b27dfaf9a4c',
   payload: {
     'chat-latest': {
