@@ -43,6 +43,12 @@ SDK does not enter your bundle.
   earlier denylist that had already missed one live credential vector
   (`ANTHROPIC_AUTH_TOKEN`) in an earlier version — a denylist can only
   exclude names someone thought of; the allowlist doesn't need to.
+  Fresh-spawn `chat()` calls are bounded by an IDLE-output timeout (not
+  wall-clock — resets on every stdout/stderr chunk, including tool-call
+  activity, so tool time never counts as silence): default 10 minutes,
+  override per call via `idleTimeoutMs` or process-wide via
+  `CLAUDE_CLI_IDLE_TIMEOUT_MS`. On expiry the child is killed and the call
+  rejects with `.code === 'CLAUDE_CLI_IDLE_TIMEOUT'` plus `.timeoutMs`.
 
 Every provider in the matrix (Anthropic, Google, OpenAI, DeepSeek, SambaNova,
 Mistral) can now drive the tool loop. `claude-cli` is a separate, deliberately

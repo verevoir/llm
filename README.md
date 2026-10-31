@@ -61,6 +61,16 @@ enters the consumer's bundle:
 Multi-provider deployments depend on the same `chat()` contract; consumers
 switch backends by importing a different subpath, not by changing call sites.
 
+**`claude-cli` idle timeout.** Every fresh-spawn `chat()` call through
+`@verevoir/llm/claude-cli` is bounded by an IDLE-output timer, not a wall-clock
+one: the timer resets on every chunk of stdout/stderr the `claude` process
+writes — including a running tool call's own stream-json output — so a call
+that is genuinely working is never killed by this regardless of total
+runtime; only real silence is. Default 10 minutes; override per call with
+`idleTimeoutMs`, or process-wide with `CLAUDE_CLI_IDLE_TIMEOUT_MS`
+(milliseconds). On expiry the process is killed and the call rejects with an
+`Error` carrying `.code === 'CLAUDE_CLI_IDLE_TIMEOUT'` and `.timeoutMs`.
+
 ## Provider endpoints & routing
 
 Every adapter authenticates with `<PROVIDER>_API_KEY` and can be pointed at a
