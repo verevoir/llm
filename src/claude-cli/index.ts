@@ -872,6 +872,30 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
  * rejects immediately with the signal's own reason (see `abortReason`),
  * rather than either waiting for the process to exit on its own or
  * reporting the abort as an ordinary spawn failure. */
+/** How long `runClaudeCli` tolerates a gap with NO stdout/stderr output at
+ * all before killing the child and refusing — reset on every chunk inside
+ * the function below (see `resetIdleTimer`). IDLE, not wall-clock: a call
+ * that is actively producing output, however long in total, is never
+ * killed by this — only a silent gap is, the same rule session.ts's
+ * `SESSION_IDLE_TIMEOUT_MS` applies to a held session's between-turn gap.
+ * Overridable via `CLAUDE_CLI_IDLE_TIMEOUT_MS` (milliseconds); an unset,
+ * blank or non-positive override falls back to this default, so a
+ * misconfigured env var degrades to the safe default rather than
+ * disabling the guard entirely. */
+const DEFAULT_CLAUDE_CLI_IDLE_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
+
+function claudeCliIdleTimeoutMs(): number {
+  const override = process.env.CLAUDE_CLI_IDLE_TIMEOUT_MS?.trim();
+  if (!override) return DEFAULT_CLAUDE_CLI_IDLE_TIMEOUT_MS;
+  const parsed = Number(override);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_CLAUDE_CLI_IDLE_TIMEOUT_MS;
+}
+
+/** Grace period between the idle timeout's SIGTERM and its follow-up
+ * SIGKILL — long enough for a well-behaved process to exit on SIGTERM,
+ * short enough that a stuck one is not left running indefinitely. */
+const CLAUDE_CLI_IDLE_KILL_GRACE_MS = 5000;
+
 function runClaudeCli(args: string[], input: string, signal?: AbortSignal): Promise<SpawnResult> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
@@ -888,10 +912,15 @@ function runClaudeCli(args: string[], input: string, signal?: AbortSignal): Prom
     let stdout = '';
     let stderr = '';
     let settled = false;
+    const idleTimeoutMs = claudeCliIdleTimeoutMs();
+    // Placeholder only — reassigned by the first resetIdleTimer() call
+    // below, mirroring session.ts's own HeldSession.idleTimer placeholder.
+    let idleTimer: ReturnType<typeof setTimeout> = setTimeout(() => {}, 0);
 
     const onAbort = () => {
       if (settled) return;
       settled = true;
+      clearTimeout(idleTimer);
       // Terminate the still-running subprocess — an abort must not leave
       // it running to completion in the background after the caller has
       // already been told the call failed. This is the half an
@@ -901,18 +930,50 @@ function runClaudeCli(args: string[], input: string, signal?: AbortSignal): Prom
     };
     signal?.addEventListener('abort', onAbort, { once: true });
 
+    // Fires only when NOTHING has arrived on stdout or stderr for
+    // idleTimeoutMs straight — resetIdleTimer() (called from both data
+    // handlers below) pushes this back out on every chunk, so a reviewer
+    // call that is genuinely working, however long it takes in total, is
+    // never killed here. A reviewer that has gone silent is killed
+    // (SIGTERM, then SIGKILL after a short grace) and this rejects with a
+    // named reason; chat()'s own catch below turns that rejection into its
+    // EXISTING "could not run the claude CLI" outcome — nothing here
+    // constructs a new one, and this never resolves as though the call
+    // succeeded.
+    const onIdleTimeout = () => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener('abort', onAbort);
+      child.kill('SIGTERM');
+      const killTimer = setTimeout(() => {
+        child.kill('SIGKILL');
+      }, CLAUDE_CLI_IDLE_KILL_GRACE_MS);
+      if (typeof killTimer.unref === 'function') killTimer.unref();
+      reject(new Error(`reviewer produced no output for ${String(idleTimeoutMs)}ms`));
+    };
+
+    const resetIdleTimer = () => {
+      clearTimeout(idleTimer);
+      idleTimer = setTimeout(onIdleTimeout, idleTimeoutMs);
+      if (typeof idleTimer.unref === 'function') idleTimer.unref();
+    };
+    resetIdleTimer();
+
     const finish = (fn: () => void) => {
       if (settled) return;
       settled = true;
+      clearTimeout(idleTimer);
       signal?.removeEventListener('abort', onAbort);
       fn();
     };
 
     child.stdout.on('data', (chunk: Buffer) => {
       stdout += chunk.toString();
+      resetIdleTimer();
     });
     child.stderr.on('data', (chunk: Buffer) => {
       stderr += chunk.toString();
+      resetIdleTimer();
     });
     // e.g. ENOENT — claude is not on PATH at all. A spawn-level failure,
     // distinct from a non-zero exit; both end up refusing (see chat()).
