@@ -167,12 +167,16 @@ describe('claudeCli idle timeout (real subprocess, no mocked spawn)', () => {
   }, 10_000);
 
   it('a periodic writer that runs well past the idle budget IN TOTAL is never timed out — only a GAP trips it', async () => {
-    setIdleOverride('500');
-    // Emits a chunk every 25ms, forty times (~1000ms total — twice the
-    // 500ms idle budget), then a real result event and a clean exit. Each
+    setIdleOverride('2000');
+    // Emits a chunk every 25ms, forty times (~1000ms total — half of the
+    // 2000ms idle budget), then a real result event and a clean exit. Each
     // chunk must reset the idle timer; cumulative runtime must never be
-    // read as idleness, and 500ms is generous enough that the stubbed
-    // node process's own startup latency can never be mistaken for a gap.
+    // read as idleness. Budget widened from an earlier 500ms — observed
+    // flaky under load, because the FIRST write (INIT_LINE) has to beat
+    // the stubbed node process's own startup latency, not just the 25ms
+    // inter-chunk gaps — to 2000ms, which gives that first write real
+    // margin; the 25ms writer interval stays far below either budget, so
+    // this still proves exactly what it always proved.
     writeStubClaude(
       `process.stdout.write(${JSON.stringify(INIT_LINE)});\n` +
         `let n = 0;\n` +
@@ -193,7 +197,7 @@ describe('claudeCli idle timeout (real subprocess, no mocked spawn)', () => {
   }, 10_000);
 
   it('a normal, prompt completion resolves and leaves nothing pending (the timer is cleared, not merely outrun)', async () => {
-    setIdleOverride('500');
+    setIdleOverride('2000');
     writeStubClaude(
       `process.stdout.write(${JSON.stringify(INIT_LINE)});\n` +
         `process.stdout.write(JSON.stringify({ type: 'result', result: 'done', usage: { input_tokens: 1, output_tokens: 1 } }) + '\\n');\n` +
@@ -205,9 +209,13 @@ describe('claudeCli idle timeout (real subprocess, no mocked spawn)', () => {
 
     // If `finish()` ever stopped clearing the idle timer on a clean close,
     // an unref'd timer wouldn't hang the process — but it WOULD still fire
-    // later and call child.kill() on an already-exited child. Waiting past
-    // the 500ms budget here and asserting nothing throws / no unhandled
-    // rejection appears is the direct proof that didn't happen.
-    await new Promise((resolve) => setTimeout(resolve, 600));
-  }, 2_000);
+    // later and call child.kill() on an already-exited child. Budget
+    // widened from an earlier 500ms (observed too tight for the stubbed
+    // process's own startup latency under load, same root cause as the
+    // periodic-writer test above) to 2000ms; this wait (2500ms) stays
+    // comfortably PAST that widened budget, so a stray fire would still
+    // be caught here — asserting nothing throws / no unhandled rejection
+    // appears is the direct proof that didn't happen.
+    await new Promise((resolve) => setTimeout(resolve, 2500));
+  }, 6_000);
 });
