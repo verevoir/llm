@@ -1020,10 +1020,10 @@ function runClaudeCli(
       }, CLAUDE_CLI_IDLE_KILL_GRACE_MS);
       if (typeof killTimer.unref === 'function') killTimer.unref();
       reject(
-        Object.assign(
-          new Error(`claude CLI produced no output for ${String(idleTimeoutMs)}ms`),
-          { code: CLAUDE_CLI_IDLE_TIMEOUT_CODE, timeoutMs: idleTimeoutMs }
-        )
+        Object.assign(new Error(`claude CLI produced no output for ${String(idleTimeoutMs)}ms`), {
+          code: CLAUDE_CLI_IDLE_TIMEOUT_CODE,
+          timeoutMs: idleTimeoutMs,
+        })
       );
     };
 
