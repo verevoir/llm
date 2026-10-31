@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.35.0] — 2026-10-31
+
+**`@verevoir/llm/claude-cli` gains an idle-output timeout on `chat()`'s fresh-spawn path — closing a real hang (audit AIGENCY-RUNTIME-205): a `claude -p` child that stopped writing to stdout/stderr and never exited left the caller's promise pending forever.** Fixed with an IDLE timer, not a wall-clock one, deliberately: the timer resets on every stdout/stderr chunk, so a call that is genuinely working — including one running a tool call, whose own stream-json assistant/tool_use lines count as stdout — is never killed by this, however long it takes in total. Only a true silent gap trips it.
+
+- **Behaviour change for every existing caller, named here rather than left for a reader to discover by its absence:** a fresh-spawn `chat()` call that previously could hang indefinitely on a silent `claude` process now gets killed (`SIGTERM`, then `SIGKILL` after a 5s grace) and rejects after 10 minutes of silence by default. No caller code change is required, but a caller that relied on (or simply never hit) an unbounded wait should know its calls are now bounded.
+- **New `ClaudeCliChatOptions.idleTimeoutMs`** — a per-call override. Precedence, highest first: this option, then the new `CLAUDE_CLI_IDLE_TIMEOUT_MS` env var, then the 10-minute default. A value that is not a finite number greater than zero at any level is treated as absent and falls through to the next — never as "disable the guard", so a caller's or operator's mistake degrades to the safe default instead of removing it.
+- **New exported `CLAUDE_CLI_IDLE_TIMEOUT_CODE` (`'CLAUDE_CLI_IDLE_TIMEOUT'`)** — the idle rejection now carries this as a stable `.code`, plus `.timeoutMs`, so a caller can match on it structurally rather than by message text. The message itself is deliberately generic (`"claude CLI produced no output for Nms"`) — this package has no reviewer-specific vocabulary of its own; a caller such as `@verevoir/review` maps this onto its own could-not-run outcome in its own layer.
+- Kept the code **distinct** from this package's generic `LLM_TIMEOUT` contract (a different mechanism — wall-clock, not idle — and not yet present on this adapter) rather than reusing it, so a future unification is a deliberate choice, not an assumed one.
+- The session-holding transport (a `chat()` call with `session` set) is untouched by this — its own `SESSION_IDLE_TIMEOUT_MS` / `SESSION_TURN_TIMEOUT_MS` bounds (0.27.0) govern that path exactly as before.
+
 ## [0.34.1] — 2026-10-22
 
 - **The Anthropic, OpenAI, Google and DeepSeek adapters' exported `rates` tables are now `@deprecated`.** Each doc comment points at `createPriceBook(...)` / `book.costOf(...)` as the successor (the 0.33.0 operator decision, below) instead of the old `estimateCostUSD`. No behaviour change — nothing removed, nothing renamed.

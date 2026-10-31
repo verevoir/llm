@@ -955,6 +955,46 @@ describe('claudeCli.chat', () => {
       await expect(chatPromise).rejects.toThrow('aborted mid-call');
       expect(child.kill).toHaveBeenCalledTimes(1);
     });
+
+    // AIGENCY-RUNTIME-205 audit item 2: a real race, now that runClaudeCli
+    // carries its own idle timeout alongside abortSignal — the two must
+    // never both fire for the same call.
+    it('an abort that lands while the idle timer is still pending settles exactly once (the abort), kills the child exactly once, and leaves no stray idle-timeout firing later', async () => {
+      vi.useFakeTimers();
+      const { child } = fakeChild();
+      mockSpawn.mockImplementationOnce(() => child);
+      // Deliberately never emits any stdout/stderr/close — the idle timer
+      // is the only thing racing the abort here.
+
+      const controller = new AbortController();
+      const chatPromise = chat({
+        systemPrompt: 'sys',
+        turns: [{ role: 'user', content: 'q' }],
+        abortSignal: controller.signal,
+        idleTimeoutMs: 1000,
+      });
+
+      // Advance to short of the idle budget, THEN abort — the idle timer
+      // is still genuinely pending when the abort arrives, not already
+      // fired.
+      await vi.advanceTimersByTimeAsync(900);
+      controller.abort(new Error('budget exceeded'));
+
+      await expect(chatPromise).rejects.toThrow('budget exceeded');
+      // Exactly the abort path's own child.kill() — no arguments, unlike
+      // the idle timeout's child.kill('SIGTERM').
+      expect(child.kill).toHaveBeenCalledTimes(1);
+      expect(child.kill).toHaveBeenCalledWith();
+
+      // Advance well past the idle budget this call set. If onAbort had
+      // not cleared the idle timer, onIdleTimeout would fire here — a
+      // second child.kill() call and a second (silently dropped)
+      // rejection on an already-settled promise. Neither happens.
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(child.kill).toHaveBeenCalledTimes(1);
+
+      vi.useRealTimers();
+    });
   });
 
   // ── The real, observed terminal result event ────────────────────────────

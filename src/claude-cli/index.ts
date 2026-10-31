@@ -136,6 +136,15 @@
  * memoized `claude --version` lookup is deliberately NOT wired to any
  * one call's signal, since every caller shares it.
  *
+ * `abortSignal` IS NO LONGER THE ONLY BOUND ON HOW LONG A CALL CAN RUN.
+ * `runClaudeCli` also carries its own IDLE timeout, independent of
+ * whether a caller ever supplies `abortSignal` at all — a child that
+ * goes silent on stdout/stderr for too long is killed and this call
+ * refuses, reset on every chunk so genuine work (however long it takes)
+ * is never mistaken for a hang. See `claudeCliIdleTimeoutMs`'s own doc
+ * comment, just above `runClaudeCli` below, for the default, the
+ * override precedence, and the named `.code`/`.timeoutMs` failure shape.
+ *
  * `onProgress` IS ACCEPTED, NEVER INVOKED. `--disallowedTools "*"`
  * disables every built-in tool a `report_progress` mechanism would
  * need, and the terminal `result` event still delivers the full reply
@@ -872,7 +881,87 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
  * rejects immediately with the signal's own reason (see `abortReason`),
  * rather than either waiting for the process to exit on its own or
  * reporting the abort as an ordinary spawn failure. */
-function runClaudeCli(args: string[], input: string, signal?: AbortSignal): Promise<SpawnResult> {
+/** How long `runClaudeCli` tolerates a gap with NO stdout/stderr output at
+ * all before killing the child and refusing — reset on every chunk inside
+ * the function below (see `resetIdleTimer`). IDLE, not wall-clock: a call
+ * that is actively producing output, however long in total, is never
+ * killed by this — only a silent gap is, the same rule session.ts's
+ * `SESSION_IDLE_TIMEOUT_MS` applies to a held session's between-turn gap.
+ *
+ * WHY TOOL EXECUTION INSIDE THE CLI IS SAFE UNDER THIS, EVEN WHEN IT RUNS
+ * LONG — the v4 lesson this corrects. A tool call is not silence: the
+ * CLI's own stream-json output (the assistant/tool_use lines around it)
+ * keeps arriving on stdout while it runs, and every one of those chunks
+ * resets this timer exactly like any other output would. A WALL-CLOCK
+ * bound would have to carve out an explicit exemption for tool time —
+ * easy to get wrong, which is exactly what v4 got wrong — or risk killing
+ * a call for doing real, visible work. An IDLE bound never needs that
+ * exemption: it only ever measures silence, and a running tool call is
+ * never silent on this stream.
+ *
+ * PRECEDENCE, highest first: the per-call override passed in by
+ * `chat()`/`chatImpl` (from `ChatOptions.idleTimeoutMs`), then the
+ * `CLAUDE_CLI_IDLE_TIMEOUT_MS` env var, then this default. At every step,
+ * a value that is not a finite number greater than zero is treated as
+ * absent and falls through to the next one — never as "disable the
+ * guard", so a caller's or operator's mistake degrades to the safe
+ * default instead of removing it.
+ *
+ * The rejection this produces on expiry carries a stable `.code`
+ * ({@link CLAUDE_CLI_IDLE_TIMEOUT_CODE}) and `.timeoutMs` field a caller
+ * can match on structurally, rather than by message text. Kept a
+ * DISTINCT code from the generic `LLM_TIMEOUT` contract some routes in
+ * this package are growing (not yet present on this branch) — that
+ * contract governs a whole call's wall-clock bound with real request
+ * teardown; this is a different mechanism (idle, not wall-clock; this
+ * adapter's own stdout/stderr gap, not a generic wrapper), and collapsing
+ * the two under one code ahead of that contract landing here would claim
+ * a compatibility this file cannot yet prove. The message itself is
+ * deliberately generic ("claude CLI produced no output for Nms") — this
+ * is `@verevoir/llm`, not a reviewer; a caller such as `@verevoir/review`
+ * maps this to its own could-not-run outcome in ITS OWN layer, not
+ * this one's. */
+const DEFAULT_CLAUDE_CLI_IDLE_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
+
+/** The stable `.code` field on the `Error` this file's idle timeout
+ * rejects with — see {@link DEFAULT_CLAUDE_CLI_IDLE_TIMEOUT_MS}'s own
+ * doc comment for why this is kept distinct from the generic
+ * `LLM_TIMEOUT` contract rather than reusing it. */
+export const CLAUDE_CLI_IDLE_TIMEOUT_CODE = 'CLAUDE_CLI_IDLE_TIMEOUT' as const;
+
+/**
+ * Resolves the idle-timeout budget for one call. Precedence, highest
+ * first: `perCallOverrideMs` (the caller's own `ChatOptions.idleTimeoutMs`),
+ * then the `CLAUDE_CLI_IDLE_TIMEOUT_MS` env var, then
+ * {@link DEFAULT_CLAUDE_CLI_IDLE_TIMEOUT_MS}. A value that is not a
+ * finite number greater than zero — at either level — is treated as
+ * absent and falls through to the next one, never disabling the guard.
+ */
+function claudeCliIdleTimeoutMs(perCallOverrideMs?: number): number {
+  if (
+    typeof perCallOverrideMs === 'number' &&
+    Number.isFinite(perCallOverrideMs) &&
+    perCallOverrideMs > 0
+  ) {
+    return perCallOverrideMs;
+  }
+  const envOverride = process.env.CLAUDE_CLI_IDLE_TIMEOUT_MS?.trim();
+  if (!envOverride) return DEFAULT_CLAUDE_CLI_IDLE_TIMEOUT_MS;
+  const parsed = Number(envOverride);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_CLAUDE_CLI_IDLE_TIMEOUT_MS;
+}
+
+/** Grace period between the idle timeout's SIGTERM and its follow-up
+ * SIGKILL — long enough for a well-behaved process to exit on SIGTERM,
+ * short enough that a stuck one is not left running indefinitely. */
+const CLAUDE_CLI_IDLE_KILL_GRACE_MS = 5000;
+
+function runClaudeCli(
+  args: string[],
+  input: string,
+  signal?: AbortSignal,
+  idleTimeoutMsOverride?: number
+): Promise<SpawnResult> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
       reject(abortReason(signal));
@@ -888,10 +977,15 @@ function runClaudeCli(args: string[], input: string, signal?: AbortSignal): Prom
     let stdout = '';
     let stderr = '';
     let settled = false;
+    const idleTimeoutMs = claudeCliIdleTimeoutMs(idleTimeoutMsOverride);
+    // Placeholder only — reassigned by the first resetIdleTimer() call
+    // below, mirroring session.ts's own HeldSession.idleTimer placeholder.
+    let idleTimer: ReturnType<typeof setTimeout> = setTimeout(() => {}, 0);
 
     const onAbort = () => {
       if (settled) return;
       settled = true;
+      clearTimeout(idleTimer);
       // Terminate the still-running subprocess — an abort must not leave
       // it running to completion in the background after the caller has
       // already been told the call failed. This is the half an
@@ -901,18 +995,60 @@ function runClaudeCli(args: string[], input: string, signal?: AbortSignal): Prom
     };
     signal?.addEventListener('abort', onAbort, { once: true });
 
+    // Fires only when NOTHING has arrived on stdout or stderr for
+    // idleTimeoutMs straight — resetIdleTimer() (called from both data
+    // handlers below) pushes this back out on every chunk, so a call
+    // that is genuinely working, however long it takes in total, is
+    // never killed here — only real silence is (see
+    // DEFAULT_CLAUDE_CLI_IDLE_TIMEOUT_MS's own doc comment for why tool
+    // execution inside the CLI is included in "genuinely working"). A
+    // child that has gone silent is killed (SIGTERM, then SIGKILL after
+    // a short grace) and this rejects with a generic, named error
+    // carrying `.code` (CLAUDE_CLI_IDLE_TIMEOUT_CODE) and `.timeoutMs`
+    // a caller can match on structurally. chatImpl's own catch below
+    // rethrows this exactly as constructed — wrapping it would strip
+    // those fields. This file never maps the failure onto any one
+    // caller's own outcome vocabulary (e.g. a reviewer's could-not-run)
+    // — that mapping belongs to that caller's own layer, not this one's.
+    const onIdleTimeout = () => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener('abort', onAbort);
+      child.kill('SIGTERM');
+      const killTimer = setTimeout(() => {
+        child.kill('SIGKILL');
+      }, CLAUDE_CLI_IDLE_KILL_GRACE_MS);
+      if (typeof killTimer.unref === 'function') killTimer.unref();
+      reject(
+        Object.assign(new Error(`claude CLI produced no output for ${String(idleTimeoutMs)}ms`), {
+          code: CLAUDE_CLI_IDLE_TIMEOUT_CODE,
+          timeoutMs: idleTimeoutMs,
+        })
+      );
+    };
+
+    const resetIdleTimer = () => {
+      clearTimeout(idleTimer);
+      idleTimer = setTimeout(onIdleTimeout, idleTimeoutMs);
+      if (typeof idleTimer.unref === 'function') idleTimer.unref();
+    };
+    resetIdleTimer();
+
     const finish = (fn: () => void) => {
       if (settled) return;
       settled = true;
+      clearTimeout(idleTimer);
       signal?.removeEventListener('abort', onAbort);
       fn();
     };
 
     child.stdout.on('data', (chunk: Buffer) => {
       stdout += chunk.toString();
+      resetIdleTimer();
     });
     child.stderr.on('data', (chunk: Buffer) => {
       stderr += chunk.toString();
+      resetIdleTimer();
     });
     // e.g. ENOENT — claude is not on PATH at all. A spawn-level failure,
     // distinct from a non-zero exit; both end up refusing (see chat()).
@@ -942,6 +1078,19 @@ function runClaudeCli(args: string[], input: string, signal?: AbortSignal): Prom
  * it always was — stateless, spawn-per-call, `turns` resent in full. */
 export interface ClaudeCliChatOptions extends ChatOptions {
   session?: ClaudeCliSessionHandle;
+  /**
+   * Per-call override for `runClaudeCli`'s idle-output timeout — see
+   * {@link DEFAULT_CLAUDE_CLI_IDLE_TIMEOUT_MS}'s own doc comment (above
+   * `runClaudeCli`) for the full precedence (this beats the
+   * `CLAUDE_CLI_IDLE_TIMEOUT_MS` env var, which beats the 10-minute
+   * default) and the named `.code`/`.timeoutMs` failure shape. A value
+   * that is not a finite number greater than zero is treated as absent,
+   * never as "disable the guard". Read only on the fresh-spawn path
+   * (`session` unset) — a held session's own bounds
+   * (`SESSION_IDLE_TIMEOUT_MS` / `SESSION_TURN_TIMEOUT_MS`, session.ts)
+   * are untouched by this field.
+   */
+  idleTimeoutMs?: number;
 }
 
 /** {@link ChatWithToolsOptions}, plus the same optional `session` field
@@ -1092,13 +1241,21 @@ async function chatImpl(options: ClaudeCliChatOptions): Promise<ChatReply> {
 
   let spawned: SpawnResult;
   try {
-    spawned = await runClaudeCli(args, input, options.abortSignal);
+    spawned = await runClaudeCli(args, input, options.abortSignal, options.idleTimeoutMs);
   } catch (err) {
     if (options.abortSignal?.aborted) {
       // Killed and rejected by runClaudeCli's abort wiring — rethrow the
       // signal's own reason as-is (matching throwIfAborted's contract)
       // rather than reporting an aborted call as an ordinary spawn
       // failure.
+      throw err;
+    }
+    if (err instanceof Error && (err as { code?: unknown }).code === CLAUDE_CLI_IDLE_TIMEOUT_CODE) {
+      // Already a complete, named failure — see runClaudeCli's own idle
+      // timeout and DEFAULT_CLAUDE_CLI_IDLE_TIMEOUT_MS's doc comment.
+      // Rethrown exactly as constructed: wrapping it in the generic
+      // spawn-failure message below would strip the
+      // `.code`/`.timeoutMs` fields a caller matches on structurally.
       throw err;
     }
     // Spawn-level failure (e.g. claude not on PATH). No fallback — see the
