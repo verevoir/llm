@@ -57,7 +57,7 @@ describe('claudeCli idle timeout (real subprocess, no mocked spawn)', () => {
   });
 
   it('a silent child (no stdout/stderr ever) is killed and rejects as could-not-run, naming the idle gap', async () => {
-    setIdleOverride('80');
+    setIdleOverride('400');
     const pidFile = join(tmpdir(), `claude-cli-idle-pid-${process.pid}-${Date.now()}`);
     pidFileToClean = pidFile;
     // Records its own pid, then sits forever writing NOTHING to stdout or
@@ -81,7 +81,7 @@ describe('claudeCli idle timeout (real subprocess, no mocked spawn)', () => {
     );
 
     expect(error).toBeInstanceOf(Error);
-    expect((error as Error).message).toContain('reviewer produced no output for 80ms');
+    expect((error as Error).message).toContain('reviewer produced no output for 400ms');
     // Never a plain hang reported as something else, and never approved —
     // this IS the rejection chat()'s own catch wraps into its existing
     // "could not run the claude CLI" could-not-run outcome.
@@ -90,7 +90,7 @@ describe('claudeCli idle timeout (real subprocess, no mocked spawn)', () => {
     // Give the OS a moment to actually finish terminating the process the
     // SIGTERM was sent to, then confirm it is genuinely gone — not merely
     // abandoned to finish in the background.
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await new Promise((resolve) => setTimeout(resolve, 300));
     const pid = Number(readFileSync(pidFile, 'utf8'));
     let alive = true;
     try {
@@ -102,29 +102,31 @@ describe('claudeCli idle timeout (real subprocess, no mocked spawn)', () => {
   }, 10_000);
 
   it('a periodic writer that runs well past the idle budget IN TOTAL is never timed out — only a GAP trips it', async () => {
-    setIdleOverride('100');
-    // Emits a chunk every 30ms, ten times (~300ms total — three times the
-    // 100ms idle budget), then a real result event and a clean exit. Each
+    setIdleOverride('500');
+    // Emits a chunk every 25ms, forty times (~1000ms total — twice the
+    // 500ms idle budget), then a real result event and a clean exit. Each
     // chunk must reset the idle timer; cumulative runtime must never be
-    // read as idleness.
+    // read as idleness, and 500ms is generous enough that the stubbed
+    // node process's own startup latency can never be mistaken for a gap.
     writeStubClaude(
       `process.stdout.write(${JSON.stringify(INIT_LINE)});\n` +
         `let n = 0;\n` +
         `const iv = setInterval(() => {\n` +
         `  n++;\n` +
-        `  if (n >= 10) {\n` +
+        `  if (n >= 40) {\n` +
         `    clearInterval(iv);\n` +
         `    process.stdout.write(JSON.stringify({ type: 'result', result: 'ok', usage: { input_tokens: 1, output_tokens: 1 } }) + '\\n');\n` +
         `    process.exit(0);\n` +
         `    return;\n` +
         `  }\n` +
         `  process.stdout.write(JSON.stringify({ type: 'assistant', n }) + '\\n');\n` +
-        `}, 30);\n`
+        `}, 25);\n`
     );
 
     const reply = await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] });
     expect(reply.content).toBe('ok');
   }, 10_000);
+
 
   it('a normal, prompt completion resolves and leaves nothing pending (the timer is cleared, not merely outrun)', async () => {
     setIdleOverride('500');
