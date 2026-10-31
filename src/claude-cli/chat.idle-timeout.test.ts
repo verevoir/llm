@@ -127,7 +127,6 @@ describe('claudeCli idle timeout (real subprocess, no mocked spawn)', () => {
     expect(reply.content).toBe('ok');
   }, 10_000);
 
-
   it('a normal, prompt completion resolves and leaves nothing pending (the timer is cleared, not merely outrun)', async () => {
     setIdleOverride('500');
     writeStubClaude(
