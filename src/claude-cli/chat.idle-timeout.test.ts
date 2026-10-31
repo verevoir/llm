@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { chat } from './index.js';
+import { chat, CLAUDE_CLI_IDLE_TIMEOUT_CODE } from './index.js';
 
 /** A `{"type":"system","subtype":"init",...}` line with an EMPTY tools
  * array — the confirmed-correct shape chat()'s own tool-safety check
@@ -56,7 +56,7 @@ describe('claudeCli idle timeout (real subprocess, no mocked spawn)', () => {
     }
   });
 
-  it('a silent child (no stdout/stderr ever) is killed and rejects as could-not-run, naming the idle gap', async () => {
+  it('a silent child (no stdout/stderr ever) is killed and rejects with the named idle-timeout code, naming the gap in a generic (non-reviewer) message', async () => {
     setIdleOverride('400');
     const pidFile = join(tmpdir(), `claude-cli-idle-pid-${process.pid}-${Date.now()}`);
     pidFileToClean = pidFile;
@@ -81,11 +81,14 @@ describe('claudeCli idle timeout (real subprocess, no mocked spawn)', () => {
     );
 
     expect(error).toBeInstanceOf(Error);
-    expect((error as Error).message).toContain('reviewer produced no output for 400ms');
-    // Never a plain hang reported as something else, and never approved —
-    // this IS the rejection chat()'s own catch wraps into its existing
-    // "could not run the claude CLI" could-not-run outcome.
+    // Generic, llm-level wording — this is @verevoir/llm, not a reviewer;
+    // a caller (e.g. @verevoir/review) maps this onto its own could-not-run
+    // outcome in its own layer, not this one's.
+    expect((error as Error).message).toBe('claude CLI produced no output for 400ms');
     expect((error as Error).message).not.toContain('VERDICT');
+    // Named, structural fields a caller can match on without parsing text.
+    expect((error as Error & { code?: string }).code).toBe(CLAUDE_CLI_IDLE_TIMEOUT_CODE);
+    expect((error as Error & { timeoutMs?: number }).timeoutMs).toBe(400);
 
     // Give the OS a moment to actually finish terminating the process the
     // SIGTERM was sent to, then confirm it is genuinely gone — not merely
@@ -99,6 +102,68 @@ describe('claudeCli idle timeout (real subprocess, no mocked spawn)', () => {
       alive = false;
     }
     expect(alive).toBe(false);
+  }, 10_000);
+
+  it('a per-call idleTimeoutMs wins over the env override — precedence, not just presence (audit item 2: real threading, not merely a parameter that exists)', async () => {
+    // The env var is set to a LONG budget; the per-call option is short.
+    // If the per-call option were ignored (or merely accepted and never
+    // threaded through to runClaudeCli), this call would run until the
+    // env budget instead — this proves it does not.
+    setIdleOverride('5000');
+    const pidFile = join(tmpdir(), `claude-cli-idle-precedence-pid-${process.pid}-${Date.now()}`);
+    pidFileToClean = pidFile;
+    writeStubClaude(
+      `const fs = require('fs');\n` +
+        `fs.writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));\n` +
+        `setInterval(() => {}, 1000);\n`
+    );
+
+    const error: unknown = await chat({
+      systemPrompt: 'sys',
+      turns: [{ role: 'user', content: 'q' }],
+      idleTimeoutMs: 150,
+    }).then(
+      () => {
+        throw new Error('expected chat() to reject on the shorter per-call budget');
+      },
+      (e: unknown) => e
+    );
+
+    expect((error as Error).message).toBe('claude CLI produced no output for 150ms');
+    expect((error as Error & { code?: string }).code).toBe(CLAUDE_CLI_IDLE_TIMEOUT_CODE);
+    expect((error as Error & { timeoutMs?: number }).timeoutMs).toBe(150);
+  }, 10_000);
+
+  it('a non-positive per-call idleTimeoutMs is treated as absent and falls through to the env override, never disabling the guard', async () => {
+    // 0 is not "no timeout" — see claudeCliIdleTimeoutMs's own contract:
+    // only a finite number > 0 is honoured at any level, everything else
+    // falls through to the next one. The env budget (150ms) must still
+    // govern here, proving a bad per-call value didn't silently remove
+    // the bound altogether.
+    setIdleOverride('150');
+    const pidFile = join(
+      tmpdir(),
+      `claude-cli-idle-zero-override-pid-${process.pid}-${Date.now()}`
+    );
+    pidFileToClean = pidFile;
+    writeStubClaude(
+      `const fs = require('fs');\n` +
+        `fs.writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));\n` +
+        `setInterval(() => {}, 1000);\n`
+    );
+
+    const error: unknown = await chat({
+      systemPrompt: 'sys',
+      turns: [{ role: 'user', content: 'q' }],
+      idleTimeoutMs: 0,
+    }).then(
+      () => {
+        throw new Error('expected chat() to reject on the env fallback budget');
+      },
+      (e: unknown) => e
+    );
+
+    expect((error as Error).message).toBe('claude CLI produced no output for 150ms');
   }, 10_000);
 
   it('a periodic writer that runs well past the idle budget IN TOTAL is never timed out — only a GAP trips it', async () => {
