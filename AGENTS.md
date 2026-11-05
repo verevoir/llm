@@ -36,8 +36,10 @@ SDK import at all.
 - **Publish-on-change:** any `src/` change requires a version bump in `package.json` (+
   lockfile) and a `CHANGELOG.md` entry in house style, in the same PR.
 - **Gate before commit:** `npm run lint`, `npm run typecheck`, `npm test` all green —
-  never commit red. CI (`.github/workflows/ci.yml`) re-runs the same gate; PRs also pass
-  the antagonistic review workflow.
+  never commit red. CI (`.github/workflows/ci.yml`) re-runs the same gate; PRs are also
+  reviewed by `@verevoir/review` via the governance review workflow (the `review` job in
+  `ci.yml`, pinned to a governance commit — bump the pin when that workflow changes). The
+  v3 antagonist is retired.
 - **Provision-before-code:** pull the bar with the verevoir MCP `provision` tool before
   changing code; source-changing commits carry a `Practices:` trailer.
 

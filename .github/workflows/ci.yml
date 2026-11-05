@@ -52,3 +52,15 @@ jobs:
           echo "Version bumped $base_ver -> $head_ver."
         env:
           BASE: ${{ github.base_ref }}
+
+  # Bump the pin below whenever governance's review workflow changes.
+  review:
+    needs: ci
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+      checks: read
+    uses: verevoir/aigency-governance/.github/workflows/review.yml@a04d0c95b19695d3c158bce480f09ec35b81a1c4 # governance #29, @verevoir/review 0.3.2 (2026-11-05)
+    secrets:
+      anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+      governance-token: ${{ secrets.GOVERNANCE_TOKEN }}

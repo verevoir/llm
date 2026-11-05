@@ -1,5 +1,9 @@
 # Changelog
 
+## [Unreleased]
+
+**CI: the v3 antagonistic review is retired; PRs are reviewed by `@verevoir/review` via the governance workflow.** Removed `.github/workflows/antagonistic-review.yml` and `.github/antagonistic-review/` (the v3 reviewer's MCP config). `ci.yml` gains a `review` job — after the `ci` job, pull requests only — that calls `verevoir/aigency-governance`'s `review.yml` pinned to a commit (governance #29, `@verevoir/review` 0.3.2); bump the pin when governance's review workflow changes. It needs a repo-level `ANTHROPIC_API_KEY`; `GOVERNANCE_TOKEN` arrives as an org secret. No `src/` change, so no version bump.
+
 ## [0.35.0] — 2026-10-31
 
 **`@verevoir/llm/claude-cli` gains an idle-output timeout on `chat()`'s fresh-spawn path — closing a real hang (audit AIGENCY-RUNTIME-205): a `claude -p` child that stopped writing to stdout/stderr and never exited left the caller's promise pending forever.** Fixed with an IDLE timer, not a wall-clock one, deliberately: the timer resets on every stdout/stderr chunk, so a call that is genuinely working — including one running a tool call, whose own stream-json assistant/tool_use lines count as stdout — is never killed by this, however long it takes in total. Only a true silent gap trips it.
