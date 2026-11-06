@@ -71,6 +71,8 @@ runtime; only real silence is. Default 10 minutes; override per call with
 (milliseconds). On expiry the process is killed and the call rejects with an
 `Error` carrying `.code === 'CLAUDE_CLI_IDLE_TIMEOUT'` and `.timeoutMs`.
 
+**`claude-cli` environment.** The child `claude` sees only `PATH`, `HOME`, `TMPDIR`, `CLAUDE_CODE_OAUTH_TOKEN` and `CLAUDE_CONFIG_DIR` (a path, not a secret, passed so a custom Claude config dir keeps its login); nothing else is passed through.
+
 ## Provider endpoints & routing
 
 Every adapter authenticates with `<PROVIDER>_API_KEY` and can be pointed at a
@@ -137,6 +139,13 @@ back-compat but `@deprecated` — use `createPriceBook` instead. The
 **direction** field tracks the model-class semantic (`reasoning` /
 `extraction`) so rollups can break down "spent X on reasoning + Y on extraction"
 natively.
+
+**`costUsdReported` (claude-cli only).** `@verevoir/llm/claude-cli` relays the
+CLI's own `total_cost_usd` as the optional `TokenUsage.costUsdReported`. It is
+the **API-equivalent** cost of the call: on the subscription route it is not
+money billed. It is absent (never `0`, never `NaN`) when the CLI reports no
+finite number, and every other adapter leaves it absent — their cost comes from
+the PriceBook.
 
 ## Model-span audit hook
 

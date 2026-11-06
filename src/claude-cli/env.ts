@@ -69,6 +69,16 @@ const BASE_ENV_NAMES = ['PATH', 'HOME', 'TMPDIR'] as const;
 export const CLAUDE_CLI_CREDENTIAL_ENV_VAR = 'CLAUDE_CODE_OAUTH_TOKEN';
 
 /**
+ * `CLAUDE_CONFIG_DIR` — where the `claude` CLI keeps its config and login.
+ * It is a PATH, not a secret. It is passed through so that a caller whose
+ * Claude login lives under a custom config dir keeps that login; without
+ * it the child looks in the default location and fails with "Not logged
+ * in" on every call. Operator-approved 6 Nov 2026. Absent from the child
+ * env when the parent does not set it.
+ */
+export const CLAUDE_CLI_CONFIG_DIR_ENV_VAR = 'CLAUDE_CONFIG_DIR';
+
+/**
  * Every environment variable name the `claude` child process is permitted
  * to see — an ALLOWLIST, built from {@link BASE_ENV_NAMES} plus
  * {@link CLAUDE_CLI_CREDENTIAL_ENV_VAR}, never independently.
@@ -87,7 +97,11 @@ export const CLAUDE_CLI_CREDENTIAL_ENV_VAR = 'CLAUDE_CODE_OAUTH_TOKEN';
  * child, full stop, regardless of what it's called or whether this file
  * has ever heard of it.
  */
-export const ALLOWED_ENV_VARS = [...BASE_ENV_NAMES, CLAUDE_CLI_CREDENTIAL_ENV_VAR] as const;
+export const ALLOWED_ENV_VARS = [
+  ...BASE_ENV_NAMES,
+  CLAUDE_CLI_CREDENTIAL_ENV_VAR,
+  CLAUDE_CLI_CONFIG_DIR_ENV_VAR,
+] as const;
 
 /**
  * The environment to hand the `claude` child process: every name in

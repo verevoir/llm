@@ -111,14 +111,15 @@
  * silently dropped.
  *
  * `total_cost_usd` / per-model `modelUsage[].costUSD` ARE PRESENT IN THE
- * PAYLOAD AND DELIBERATELY NOT SURFACED ONTO `TokenUsage` — not recorded
- * elsewhere in this repository, so kept here rather than cut. The
- * payload gives no signal for whether that figure is billed or notional,
- * so asserting either would be an unbacked claim; what this adapter DOES
- * know for certain is that no billed credential was available to spend,
- * because {@link allowedEnv} never lets one reach the child. A settled
- * dual-cost design (billed vs. notional) is deliberate, separate,
- * out-of-scope work (`decisions/023`, aigency-governance).
+ * PAYLOAD. The top-level `total_cost_usd` is surfaced as
+ * `TokenUsage.costUsdReported` (relayed as-is, absent unless a finite
+ * number). It is the API-EQUIVALENT cost of the call — the payload gives
+ * no signal for billed vs. notional, and since {@link allowedEnv} never
+ * lets a billed credential reach the child, on this subscription route it
+ * is NOT money billed. The per-model `costUSD` entries are deliberately
+ * NOT surfaced: they sum to the same figure, so exposing both would invite
+ * double-counting. A settled dual-cost design (billed vs. notional) is
+ * separate work (`decisions/023`, aigency-governance).
  *
  * `chat()` ONLY in this first cut — no `chatWithTools` /
  * `chatWithToolLoop`. `/google` shipped the same way at its own v0.4.0
@@ -506,8 +507,8 @@ interface ClaudeCliResultEvent {
    * it internally (which may carry a suffix like `[1m]`); prefer each
    * entry's own `canonicalModel` field over the key. */
   modelUsage?: Record<string, ModelUsageEntry>;
-  /** Present, and deliberately not surfaced onto TokenUsage — see the
-   * file header's `total_cost_usd` / `costUSD` paragraph. */
+  /** Surfaced as `TokenUsage.costUsdReported` when a finite number — see
+   * the file header's `total_cost_usd` / `costUSD` paragraph. */
   total_cost_usd?: number;
 }
 
@@ -754,7 +755,9 @@ function shapeUsage(
     // decisions/023, aigency-governance, cited in this file's header, for
     // why a billed/notional split is deliberate, separate, out-of-scope
     // work).
-    costUsdReported: totalCostUsd,
+    // Absent (never 0, never NaN) unless the CLI reported a finite number.
+    costUsdReported:
+      typeof totalCostUsd === 'number' && Number.isFinite(totalCostUsd) ? totalCostUsd : undefined,
     sessionId,
     providerRequestId,
   };

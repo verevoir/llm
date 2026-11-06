@@ -293,6 +293,55 @@ describe('claudeCli.chat — GenAI spans', () => {
     expect(Object.keys(span.attributes)).not.toContain(ATTR_VEREVOIR_PROVIDER_REQUEST_ID);
   });
 
+  describe('costUsdReported (API-equivalent total_cost_usd)', () => {
+    // The enclosing spans block does not reset these, so an earlier test's
+    // unconsumed `claude --version` mock would leak into this call's main
+    // spawn (and the cached version would skip the fallback spawn).
+    beforeEach(() => {
+      mockSpawn.mockReset();
+      resetClaudeCliVersionCacheForTests();
+    });
+
+    const usage = {
+      input_tokens: 10,
+      output_tokens: 5,
+      cache_read_input_tokens: 3,
+      cache_creation_input_tokens: 2,
+    };
+    const run = async (extra: Record<string, unknown>) => {
+      mockSuccessfulCall(streamOutput({ result: 'ok', usage, ...extra }));
+      return (await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] })).usage;
+    };
+
+    it('relays a finite total_cost_usd, leaving token counts unchanged', async () => {
+      const u = await run({ total_cost_usd: 0.5 });
+      expect(u.costUsdReported).toBe(0.5);
+      expect(u.inputTokens).toBe(10);
+      expect(u.outputTokens).toBe(5);
+      expect(u.cacheReadInputTokens).toBe(3);
+      expect(u.cacheCreationInputTokens).toBe(2);
+    });
+
+    it('is absent when total_cost_usd is missing', async () => {
+      const u = await run({});
+      expect(u.costUsdReported).toBeUndefined();
+      expect(u.inputTokens).toBe(10);
+      expect(u.outputTokens).toBe(5);
+    });
+
+    it.each([
+      ['a string', '0.5'],
+      ['null', null],
+      ['an object', {}],
+      ['a boolean', true],
+    ])('is absent (never 0 or NaN) when total_cost_usd is %s', async (_label, bad) => {
+      const u = await run({ total_cost_usd: bad });
+      expect(u.costUsdReported).toBeUndefined();
+      expect(u.inputTokens).toBe(10);
+      expect(u.outputTokens).toBe(5);
+    });
+  });
+
   it('marks the span ERROR and rethrows unchanged when the CLI call fails', async () => {
     queueFailingCall('unknown flag', 2);
 
@@ -556,7 +605,46 @@ describe('claudeCli.chat', () => {
       expect(child.GITHUB_TOKEN).toBeUndefined();
       // Nothing beyond ALLOWED_ENV_VARS reached the child at all — not just
       // the eight named above.
-      expect(Object.keys(child).sort()).toEqual([...ALLOWED_ENV_VARS].sort());
+      // CALLER_ENV does not set CLAUDE_CONFIG_DIR, so it is absent here.
+      expect(Object.keys(child).sort()).toEqual([
+        'CLAUDE_CODE_OAUTH_TOKEN',
+        'HOME',
+        'PATH',
+        'TMPDIR',
+      ]);
+    });
+
+    it('passes CLAUDE_CONFIG_DIR to the child when the parent sets it', () => {
+      expect(ALLOWED_ENV_VARS).toContain('CLAUDE_CONFIG_DIR');
+      const child = allowedEnv({ ...CALLER_ENV, CLAUDE_CONFIG_DIR: '/custom/claude' });
+      expect(child.CLAUDE_CONFIG_DIR).toBe('/custom/claude');
+    });
+
+    it('leaves CLAUDE_CONFIG_DIR absent when the parent does not set it', () => {
+      const child = allowedEnv(CALLER_ENV);
+      expect('CLAUDE_CONFIG_DIR' in child).toBe(false);
+    });
+
+    it('adds no names beyond the four approved ones, even with CLAUDE_CONFIG_DIR set', () => {
+      const child = allowedEnv({
+        ...CALLER_ENV,
+        CLAUDE_CONFIG_DIR: '/custom/claude',
+        CLAUDE_CONFIG: 'near-miss-name',
+      });
+      expect(Object.keys(child).sort()).toEqual([
+        'CLAUDE_CODE_OAUTH_TOKEN',
+        'CLAUDE_CONFIG_DIR',
+        'HOME',
+        'PATH',
+        'TMPDIR',
+      ]);
+      expect([...ALLOWED_ENV_VARS].sort()).toEqual([
+        'CLAUDE_CODE_OAUTH_TOKEN',
+        'CLAUDE_CONFIG_DIR',
+        'HOME',
+        'PATH',
+        'TMPDIR',
+      ]);
     });
 
     it('carries the subscription credential by name — CLAUDE_CODE_OAUTH_TOKEN specifically', () => {

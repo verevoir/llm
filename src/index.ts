@@ -256,7 +256,13 @@ export interface TokenUsage {
    * provider's payload carries one (e.g. Claude Code's terminal result
    * event's `total_cost_usd`). NEVER COMPUTED from a price table — this
    * is the provider's own figure, relayed as-is, or `undefined` when the
-   * adapter's transport doesn't see one.
+   * adapter's transport doesn't see one (or sees a non-finite value —
+   * never `0` or `NaN`).
+   *
+   * API-EQUIVALENT, not billed: on `@verevoir/llm/claude-cli` (a
+   * subscription route) this is what the call would cost at API rates,
+   * not money charged. Only claude-cli sets it; for the API adapters,
+   * cost comes from the PriceBook, not from here.
    */
   costUsdReported?: number;
   /**
