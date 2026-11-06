@@ -188,6 +188,26 @@ export interface Turn {
 export type CredentialRoute = 'api-key' | 'subscription-oauth' | 'mixed';
 
 /**
+ * The kind of malformation recorded when a provider's reported cost is not a
+ * finite, non-negative number: `'negative'` (a number below zero),
+ * `'non-finite'` (NaN or ±Infinity), or, for a non-number, its type name.
+ * `'bigint'`, `'symbol'` and `'function'` cannot arise from a JSON payload;
+ * they are listed so the union is total over `typeof`, not because they occur.
+ * Never the value itself.
+ */
+export type CostInvalidKind =
+  | 'negative'
+  | 'non-finite'
+  | 'string'
+  | 'boolean'
+  | 'null'
+  | 'array'
+  | 'object'
+  | 'bigint'
+  | 'symbol'
+  | 'function';
+
+/**
  * Per-call token + provenance record. Returned alongside every reply.
  * The (provider, model, direction) triple is the model-direction grid
  * used for cost rollups.
@@ -257,7 +277,8 @@ export interface TokenUsage {
    * event's `total_cost_usd`). NEVER COMPUTED from a price table — this
    * is the provider's own figure, relayed as-is (a `-0` becomes `0`), or `undefined` when the
    * adapter's transport doesn't see one (or sees a value that is not a
-   * finite number >= 0 — never `0` or `NaN`).
+   * finite number >= 0). A missing or malformed value is never turned
+   * into a default `0` or a `NaN`; a genuine reported `0` IS relayed.
    *
    * The CLI's OWN reported cost, relayed as-is: API-equivalent on a
    * subscription login, but BILLED money on a metered Console login. The
@@ -269,13 +290,12 @@ export interface TokenUsage {
   costUsdReported?: number;
   /**
    * claude-cli only: set when the CLI sent a `total_cost_usd` that was not
-   * a finite number >= 0 — the kind of malformation (`negative`,
-   * `non-finite` for NaN/Infinity, or the type name `string`, `null`,
-   * `object`, ...) — so a malformed field is
+   * a finite number >= 0 — the kind of malformation (see
+   * {@link CostInvalidKind}) — so a malformed field is
    * distinguishable from a missing one. {@link costUsdReported} is absent
    * in that case. Absent when the field was missing or valid.
    */
-  costUsdReportedInvalidType?: string;
+  costUsdReportedInvalidType?: CostInvalidKind;
   /**
    * claude-cli only: the CLI's own session id for this call, kept purely
    * for correlation. Reused across EVERY turn on a held session, so —

@@ -12,9 +12,11 @@
  * stdio-protocol consumer such as an MCP server.
  */
 
+import type { CostInvalidKind } from '../index.js';
+
 /** What {@link readReportedCost} found. At most one field is set. */
 export interface ReportedCost {
-  /** A finite, non-negative number the CLI reported. Absent otherwise — never 0, never NaN. */
+  /** A finite, non-negative number the CLI reported. Absent otherwise (a missing or malformed value is never defaulted to 0 or NaN; a reported 0 is relayed). */
   costUsdReported?: number;
   /**
    * Set when the CLI sent a `total_cost_usd` that is NOT a finite,
@@ -24,15 +26,16 @@ export interface ReportedCost {
    * or, for a non-number, its type (`'string'`, `'null'`, `'array'`,
    * `'object'`, `'boolean'`). Absent when the field was missing or valid.
    */
-  invalidType?: string;
+  invalidType?: CostInvalidKind;
 }
 
 /** The type name recorded for a malformed value (`null` and arrays are
  * named, since `typeof` calls both `object`). */
-function typeName(value: unknown): string {
+function typeName(value: unknown): CostInvalidKind {
   if (value === null) return 'null';
   if (Array.isArray(value)) return 'array';
-  return typeof value;
+  // `number` and `undefined` never reach here (handled by the caller).
+  return typeof value as Exclude<CostInvalidKind, 'negative' | 'non-finite' | 'null' | 'array'>;
 }
 
 /**
@@ -46,9 +49,10 @@ function typeName(value: unknown): string {
  * `Object.is` comparison against `0` in a consumer.
  *
  * A number is split into `'negative'` and `'non-finite'` (not both
- * `'number'`) because they have different causes: a negative is a sign
- * error from the CLI, a non-finite value is an overflowing literal such
- * as `1e999` (JSON cannot carry NaN or Infinity directly).
+ * `'number'`) so a consumer can tell them apart: a negative is a finite
+ * number below zero, a non-finite value is NaN or ±Infinity (in JSON
+ * only an overflowing literal such as `1e999` can produce it). Why the
+ * CLI would send either is not established here.
  */
 export function readReportedCost(value: unknown): ReportedCost {
   if (value === undefined) return {};

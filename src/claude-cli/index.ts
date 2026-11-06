@@ -112,10 +112,10 @@
  *
  * `total_cost_usd` / per-model `modelUsage[].costUSD` ARE PRESENT IN THE
  * PAYLOAD. The top-level `total_cost_usd` is surfaced as
- * `TokenUsage.costUsdReported` (relayed as-is, absent unless a finite
- * number >= 0; anything else is recorded as `costUsdReportedInvalidType`
- * (`negative`, `non-finite`, or the type name)
- * and a span attribute instead, silently — see cost.ts). It is the CLI's OWN
+ * `TokenUsage.costUsdReported` (relayed as-is, except that a `-0` becomes
+ * `0`; absent unless a finite number >= 0; anything else is recorded as
+ * `costUsdReportedInvalidType` (`negative`, `non-finite`, or the type
+ * name) and a span attribute instead, silently — see cost.ts). It is the CLI's OWN
  * reported cost: API-EQUIVALENT on a subscription login, and BILLED money
  * on a metered Console login. The field cannot tell which — the payload
  * gives no signal (why the child can reach either kind of login: see
@@ -759,7 +759,7 @@ function shapeUsage(
     cacheReadInputTokens: usage?.cache_read_input_tokens ?? 0,
     // Real fields on the terminal result event (see the file header's
     // PAYLOAD CONTRACT paragraph) this adapter never surfaced before now.
-    // Left undefined — never 0 or an assumed shape — when the payload
+    // Left undefined — not defaulted to 0 or an assumed shape — when the payload
     // doesn't carry them, matching every other optional TokenUsage field.
     cacheCreationEphemeral5mInputTokens: usage?.cache_creation?.ephemeral_5m_input_tokens,
     cacheCreationEphemeral1hInputTokens: usage?.cache_creation?.ephemeral_1h_input_tokens,
@@ -767,8 +767,9 @@ function shapeUsage(
     // decisions/023, aigency-governance, cited in this file's header, for
     // why a billed/notional split is deliberate, separate, out-of-scope
     // work).
-    // Omitted entirely (not an undefined-valued key), and never 0 or NaN,
-    // unless the CLI reported a finite, non-negative number.
+    // Omitted entirely (not an undefined-valued key), and never defaulted to
+    // 0 or NaN, unless the CLI reported a finite, non-negative number (a
+    // reported 0 is relayed).
     ...(reportedCost.costUsdReported !== undefined && {
       costUsdReported: reportedCost.costUsdReported,
     }),

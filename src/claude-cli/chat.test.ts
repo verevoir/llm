@@ -12,7 +12,6 @@ import {
   ATTR_VEREVOIR_CACHE_CREATION_EPHEMERAL_5M_INPUT_TOKENS,
   ATTR_VEREVOIR_CACHE_CREATION_EPHEMERAL_1H_INPUT_TOKENS,
   ATTR_VEREVOIR_COST_USD_REPORTED,
-  ATTR_VEREVOIR_COST_USD_REPORTED_INVALID,
   ATTR_VEREVOIR_COST_USD_REPORTED_INVALID_TYPE,
   ATTR_VEREVOIR_PROVIDER_REQUEST_ID,
   ATTR_VEREVOIR_SESSION_ID,
@@ -356,13 +355,6 @@ describe('claudeCli.chat — GenAI spans', () => {
       expect(Object.keys(u)).not.toContain('costUsdReportedInvalidType');
     });
 
-    it('sets no span invalid flag when total_cost_usd is missing', async () => {
-      await run({});
-      expect(Object.keys(lastSpanAttributes())).not.toContain(
-        ATTR_VEREVOIR_COST_USD_REPORTED_INVALID
-      );
-    });
-
     it('sets no span invalid-type attribute when total_cost_usd is missing', async () => {
       await run({});
       expect(Object.keys(lastSpanAttributes())).not.toContain(
@@ -382,7 +374,7 @@ describe('claudeCli.chat — GenAI spans', () => {
       ['an array', []],
       ['a boolean', true],
       ['a negative number', -0.5],
-    ])('gives no cost (never 0 or NaN) when total_cost_usd is %s', async (_label, bad) => {
+    ])('gives no cost (no default 0 or NaN) when total_cost_usd is %s', async (_label, bad) => {
       const u = await run({ total_cost_usd: bad });
       expect(u.costUsdReported).toBeUndefined();
     });
@@ -425,11 +417,6 @@ describe('claudeCli.chat — GenAI spans', () => {
       expect(lastSpanAttributes()[ATTR_VEREVOIR_COST_USD_REPORTED_INVALID_TYPE]).toBe('negative');
     });
 
-    it('flags the span invalid when total_cost_usd overflows to Infinity', async () => {
-      await runRaw('1e999');
-      expect(lastSpanAttributes()[ATTR_VEREVOIR_COST_USD_REPORTED_INVALID]).toBe(true);
-    });
-
     it('sets no cost attribute on the span when total_cost_usd overflows to Infinity', async () => {
       await runRaw('1e999');
       expect(Object.keys(lastSpanAttributes())).not.toContain(ATTR_VEREVOIR_COST_USD_REPORTED);
@@ -450,11 +437,6 @@ describe('claudeCli.chat — GenAI spans', () => {
       expect(u).toMatchObject({ inputTokens: 10, outputTokens: 5 });
     });
 
-    it('sets the span invalid flag when total_cost_usd is malformed', async () => {
-      await run({ total_cost_usd: 'oops' });
-      expect(lastSpanAttributes()[ATTR_VEREVOIR_COST_USD_REPORTED_INVALID]).toBe(true);
-    });
-
     it('sets the span invalid type when total_cost_usd is malformed', async () => {
       await run({ total_cost_usd: 'oops' });
       expect(lastSpanAttributes()[ATTR_VEREVOIR_COST_USD_REPORTED_INVALID_TYPE]).toBe('string');
@@ -468,13 +450,6 @@ describe('claudeCli.chat — GenAI spans', () => {
     it('sets the span cost attribute to the relayed figure when total_cost_usd is a finite number', async () => {
       await run({ total_cost_usd: 0.5 });
       expect(lastSpanAttributes()[ATTR_VEREVOIR_COST_USD_REPORTED]).toBe(0.5);
-    });
-
-    it('does not flag the span invalid when total_cost_usd is a finite number', async () => {
-      await run({ total_cost_usd: 0.5 });
-      expect(Object.keys(lastSpanAttributes())).not.toContain(
-        ATTR_VEREVOIR_COST_USD_REPORTED_INVALID
-      );
     });
 
     it('sets no span invalid-type attribute when total_cost_usd is a finite number', async () => {

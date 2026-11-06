@@ -36,6 +36,7 @@
  */
 
 import { SpanKind, SpanStatusCode, trace, type Span } from '@opentelemetry/api';
+import type { CostInvalidKind } from './index.js';
 
 // ── GenAI semantic-convention attributes (v1.37.0) — defined locally ───────
 
@@ -92,15 +93,12 @@ export const ATTR_VEREVOIR_SESSION_ID = 'verevoir.llm.session_id';
  * from a price table. */
 export const ATTR_VEREVOIR_COST_USD_REPORTED = 'verevoir.llm.cost_usd_reported';
 
-/** `true` when the provider sent a cost that was not a finite, non-negative number (so
- * {@link ATTR_VEREVOIR_COST_USD_REPORTED} is absent). Distinguishes a
- * malformed cost from a missing one. Set only in that case. */
-export const ATTR_VEREVOIR_COST_USD_REPORTED_INVALID = 'verevoir.llm.cost_usd_reported_invalid';
-
-/** The kind of malformation of the cost value: `negative`, `non-finite`, or
- * the type name for a non-number (`string`, `null`, ...) — never the
- * value itself. Set together with
- * {@link ATTR_VEREVOIR_COST_USD_REPORTED_INVALID}. */
+/** The kind of malformation of a provider cost that was not a finite,
+ * non-negative number: `negative`, `non-finite`, or the type name for a
+ * non-number (`string`, `null`, ...) — never the value itself. Its
+ * presence IS the "this cost was malformed" signal (there is no separate
+ * boolean), so a malformed cost is distinguishable from a missing one;
+ * {@link ATTR_VEREVOIR_COST_USD_REPORTED} is absent in that case. */
 export const ATTR_VEREVOIR_COST_USD_REPORTED_INVALID_TYPE =
   'verevoir.llm.cost_usd_reported_invalid_type';
 
@@ -136,8 +134,8 @@ export interface GenAISpanOutcome {
   costUsdReported?: number;
   /** The kind of a malformed provider cost (`negative`, `non-finite` or a
    * type name); see
-   * {@link ATTR_VEREVOIR_COST_USD_REPORTED_INVALID}. */
-  costUsdReportedInvalidType?: string;
+   * {@link ATTR_VEREVOIR_COST_USD_REPORTED_INVALID_TYPE}. */
+  costUsdReportedInvalidType?: CostInvalidKind;
 }
 
 /**
@@ -257,7 +255,6 @@ function applyOutcome(span: Span, outcome: GenAISpanOutcome): void {
   set(ATTR_VEREVOIR_PROVIDER_REQUEST_ID, outcome.providerRequestId);
   set(ATTR_VEREVOIR_COST_USD_REPORTED, outcome.costUsdReported);
   if (outcome.costUsdReportedInvalidType !== undefined) {
-    span.setAttribute(ATTR_VEREVOIR_COST_USD_REPORTED_INVALID, true);
     set(ATTR_VEREVOIR_COST_USD_REPORTED_INVALID_TYPE, outcome.costUsdReportedInvalidType);
   }
 }
