@@ -4,15 +4,24 @@
  *
  * MOVED HERE FROM index.ts, wave 1 of 4 (see CHANGELOG's 0.26.7 entry).
  * Every doc comment below is carried verbatim from where it lived in
- * index.ts before this move — nothing about the reasoning changed, only
- * which file states it. Pulled out so the upcoming session-holding
+ * index.ts before that move, EXCEPT the {@link CLAUDE_CLI_CONFIG_DIR_ENV_VAR}
+ * constant and the mentions of it in {@link ALLOWED_ENV_VARS}, which were
+ * added later (0.36.0) and never lived in index.ts. Pulled out so the upcoming session-holding
  * transport (`session.ts`) can build the exact same child environment
  * `chat()`'s single-shot path uses, without index.ts and session.ts
  * importing each other — index.ts wires the session API against
  * session.ts, so session.ts reaching back into index.ts for this would
  * be a cycle. Both sides import this module instead; index.ts
- * re-exports every name here under the same names, so nothing importing
- * `@verevoir/llm/claude-cli` can tell this ever moved.
+ * re-exports `ALLOWED_ENV_VARS`, `allowedEnv`,
+ * `CLAUDE_CLI_CREDENTIAL_ENV_VAR` and `PROVIDER` under the same names, so
+ * nothing importing `@verevoir/llm/claude-cli` can tell those moved.
+ * `CLAUDE_CLI_CONFIG_DIR_ENV_VAR` is NOT re-exported: it is reachable only
+ * from this module (its value is visible through `ALLOWED_ENV_VARS`).
+ *
+ * This file is the one place that states WHY the child can reach either a
+ * subscription or a metered login (see {@link CLAUDE_CLI_CONFIG_DIR_ENV_VAR}
+ * and {@link BASE_ENV_NAMES}); the other docs point here or to the
+ * CHANGELOG's 0.36.0 SECURITY entry, which restates the delta.
  */
 
 /** Provider id reported on every {@link TokenUsage} this adapter returns —

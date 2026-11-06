@@ -335,6 +335,11 @@ describe('claudeCli.chat — GenAI spans', () => {
       expect(u.costUsdReported).toBe(0.5);
     });
 
+    it('relays a JSON -0 total_cost_usd as +0 through chat()', async () => {
+      const u = await runRaw('-0');
+      expect(Object.is(u.costUsdReported, 0)).toBe(true);
+    });
+
     it('leaves token counts unchanged when total_cost_usd is present', async () => {
       const u = await run({ total_cost_usd: 0.5 });
       expect(u).toMatchObject({
@@ -784,9 +789,12 @@ describe('claudeCli.chat', () => {
       } finally {
         vi.unstubAllEnvs();
       }
-      const [, args, options] = mockSpawn.mock.calls[0];
-      // The second spawn is the memoized `claude --version` probe.
-      const versionOptions = mockSpawn.mock.calls[1][2];
+      // Find each spawn by its argv, not by position: the probe is the call
+      // whose args are exactly ['--version']; the main call is the other one.
+      const isProbe = (call: unknown[]) =>
+        JSON.stringify(call[1]) === JSON.stringify(['--version']);
+      const [, args, options] = mockSpawn.mock.calls.find((c) => !isProbe(c))!;
+      const versionOptions = mockSpawn.mock.calls.find((c) => isProbe(c))![2];
       return { args: args as string[], options, versionOptions };
     };
 

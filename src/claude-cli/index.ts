@@ -328,7 +328,9 @@ import {
 // header for why (session.ts needs to build the identical child
 // environment without importing back into this file). Re-exported here
 // under the exact same names, so nothing importing
-// @verevoir/llm/claude-cli can tell they ever moved.
+// @verevoir/llm/claude-cli can tell they ever moved. (env.ts also holds
+// CLAUDE_CLI_CONFIG_DIR_ENV_VAR, added in 0.36.0; it is deliberately NOT
+// re-exported here, only visible through ALLOWED_ENV_VARS.)
 export { ALLOWED_ENV_VARS, allowedEnv, CLAUDE_CLI_CREDENTIAL_ENV_VAR, PROVIDER };
 
 // The session-holding transport (session.ts + mcp-bridge.ts, wave 3 of
@@ -511,9 +513,10 @@ interface ClaudeCliResultEvent {
    * it internally (which may carry a suffix like `[1m]`); prefer each
    * entry's own `canonicalModel` field over the key. */
   modelUsage?: Record<string, ModelUsageEntry>;
-  /** Surfaced as `TokenUsage.costUsdReported` when a finite, non-negative number — see
-   * the file header's `total_cost_usd` / `costUSD` paragraph. */
-  total_cost_usd?: number;
+  /** UNTRUSTED: whatever the CLI's JSON carried, so typed `unknown`. Surfaced as
+   * `TokenUsage.costUsdReported` only when a finite, non-negative number (see
+   * cost.ts); otherwise recorded as `costUsdReportedInvalidType`. */
+  total_cost_usd?: unknown;
 }
 
 /** The `{"type":"system","subtype":"init",...}` stream-json event's shape
@@ -669,6 +672,13 @@ function resolveCliVersion(): Promise<string | undefined> {
   if (!cachedCliVersionPromise) {
     cachedCliVersionPromise = (async () => {
       try {
+        // Safe to run without the isolation flags: the probe's argv is only
+        // `--version`, so the CLI prints its version and exits without a
+        // model call, a tool, a hook-bearing session or an MCP server being
+        // started. It does receive CLAUDE_CONFIG_DIR (like every spawn). NOT
+        // established: that `--version` never reads the config dir's
+        // settings.json; that is the same UNVERIFIED hooks question the
+        // CHANGELOG 0.36.0 SECURITY entry records.
         const { stdout, exitCode } = await runClaudeCli(['--version'], '');
         if (exitCode !== 0) return undefined;
         return parseVersionOutput(stdout);

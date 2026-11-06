@@ -635,6 +635,23 @@ describe('claudeCli.chatWithToolLoop — GenAI spans', () => {
     ).toBe('negative');
   });
 
+  it("puts the kind of a malformed tool-loop cost on a HELD session's span invalid-type attribute", async () => {
+    queueVersionSpawn();
+    mockRunSessionTurn.mockResolvedValueOnce(baseSessionTurnResult({ totalCostUsd: Infinity }));
+
+    await chatWithToolLoop({
+      systemPrompt: 'sys',
+      turns: [{ role: 'user', content: 'q' }],
+      tools: [ECHO_TOOL],
+      executor: async () => 'x',
+      session: SESSION_HANDLE,
+    });
+
+    expect(
+      exporter.getFinishedSpans()[0].attributes[ATTR_VEREVOIR_COST_USD_REPORTED_INVALID_TYPE]
+    ).toBe('non-finite');
+  });
+
   it("puts the kind of a malformed held-session cost on the span's invalid-type attribute", async () => {
     queueVersionSpawn();
     mockRunSessionTurn.mockResolvedValueOnce(baseSessionTurnResult({ totalCostUsd: 'oops' }));

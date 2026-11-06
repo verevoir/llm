@@ -191,8 +191,8 @@ export type CredentialRoute = 'api-key' | 'subscription-oauth' | 'mixed';
  * The kind of malformation recorded when a provider's reported cost is not a
  * finite, non-negative number: `'negative'` (a number below zero),
  * `'non-finite'` (NaN or ±Infinity), or, for a non-number, its type name.
- * `'bigint'`, `'symbol'` and `'function'` cannot arise from a JSON payload;
- * they are listed so the union is total over `typeof`, not because they occur.
+ * The union holds only what a parsed JSON reply can contain (the adapter
+ * reads a JSON payload), so it has no `'bigint'`, `'symbol'` or `'function'`.
  * Never the value itself.
  */
 export type CostInvalidKind =
@@ -202,10 +202,7 @@ export type CostInvalidKind =
   | 'boolean'
   | 'null'
   | 'array'
-  | 'object'
-  | 'bigint'
-  | 'symbol'
-  | 'function';
+  | 'object';
 
 /**
  * Per-call token + provenance record. Returned alongside every reply.

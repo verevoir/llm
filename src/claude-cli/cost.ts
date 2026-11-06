@@ -35,7 +35,12 @@ function typeName(value: unknown): CostInvalidKind {
   if (value === null) return 'null';
   if (Array.isArray(value)) return 'array';
   // `number` and `undefined` never reach here (handled by the caller).
-  return typeof value as Exclude<CostInvalidKind, 'negative' | 'non-finite' | 'null' | 'array'>;
+  // A parsed JSON reply holds only string, boolean, null, array, object and
+  // number, so anything else (which JSON cannot produce) is named 'object'
+  // rather than widening the public union for cases that cannot occur.
+  if (typeof value === 'string') return 'string';
+  if (typeof value === 'boolean') return 'boolean';
+  return 'object';
 }
 
 /**
