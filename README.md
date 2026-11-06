@@ -71,7 +71,7 @@ runtime; only real silence is. Default 10 minutes; override per call with
 (milliseconds). On expiry the process is killed and the call rejects with an
 `Error` carrying `.code === 'CLAUDE_CLI_IDLE_TIMEOUT'` and `.timeoutMs`.
 
-**`claude-cli` environment.** The child `claude` sees only `PATH`, `HOME`, `TMPDIR`, `CLAUDE_CODE_OAUTH_TOKEN` and `CLAUDE_CONFIG_DIR` (a path, not a secret, passed so a custom Claude config dir keeps its login); nothing else is passed through.
+**`claude-cli` environment.** The child `claude` sees only `PATH`, `HOME`, `TMPDIR`, `CLAUDE_CODE_OAUTH_TOKEN` and `CLAUDE_CONFIG_DIR` (a path, not a secret, passed so a custom Claude config dir keeps its login — but that dir's `settings.json` can define hooks or MCP servers, see the CHANGELOG `SECURITY:` entry); nothing else is passed through.
 
 ## Provider endpoints & routing
 
@@ -142,10 +142,15 @@ natively.
 
 **`costUsdReported` (claude-cli only).** `@verevoir/llm/claude-cli` relays the
 CLI's own `total_cost_usd` as the optional `TokenUsage.costUsdReported`. It is
-the **API-equivalent** cost of the call: on the subscription route it is not
-money billed. It is absent (never `0`, never `NaN`) when the CLI reports no
-finite number, and every other adapter leaves it absent — their cost comes from
-the PriceBook.
+the CLI's own figure: **API-equivalent** on a subscription login, but **billed
+money** on a metered Console login. The field does not know which, because the
+child can reach either kind of stored login (via `HOME`, or a
+`CLAUDE_CONFIG_DIR`). It is absent (never `0`, never `NaN`) when the CLI reports
+no finite number. A malformed value (string, null, object, `Infinity`, …) is
+recorded as `TokenUsage.costUsdReportedInvalidType` and on the span as
+`verevoir.llm.cost_usd_reported_invalid` plus `…_invalid_type`, so it is not
+mistaken for a missing one. Every other adapter leaves it absent — their cost
+comes from the PriceBook.
 
 ## Model-span audit hook
 

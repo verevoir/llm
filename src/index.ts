@@ -259,12 +259,22 @@ export interface TokenUsage {
    * adapter's transport doesn't see one (or sees a non-finite value —
    * never `0` or `NaN`).
    *
-   * API-EQUIVALENT, not billed: on `@verevoir/llm/claude-cli` (a
-   * subscription route) this is what the call would cost at API rates,
-   * not money charged. Only claude-cli sets it; for the API adapters,
-   * cost comes from the PriceBook, not from here.
+   * The CLI's OWN reported cost, relayed as-is: API-equivalent on a
+   * subscription login, but BILLED money on a metered Console login. The
+   * field does not know which — the child can reach either kind of stored
+   * login (via `HOME`, or a `CLAUDE_CONFIG_DIR`). Do not read it as
+   * "not billed". Only claude-cli sets it; for the API adapters, cost
+   * comes from the PriceBook, not from here.
    */
   costUsdReported?: number;
+  /**
+   * claude-cli only: set when the CLI sent a `total_cost_usd` that was not
+   * a finite number — the value's type (`string`, `null`, `object`,
+   * `number` for NaN/Infinity, ...) — so a malformed field is
+   * distinguishable from a missing one. {@link costUsdReported} is absent
+   * in that case. Absent when the field was missing or valid.
+   */
+  costUsdReportedInvalidType?: string;
   /**
    * claude-cli only: the CLI's own session id for this call, kept purely
    * for correlation. Reused across EVERY turn on a held session, so —

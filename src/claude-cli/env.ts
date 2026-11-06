@@ -75,13 +75,19 @@ export const CLAUDE_CLI_CREDENTIAL_ENV_VAR = 'CLAUDE_CODE_OAUTH_TOKEN';
  * it the child looks in the default location and fails with "Not logged
  * in" on every call. Operator-approved 6 Nov 2026. Absent from the child
  * env when the parent does not set it.
+ *
+ * NOT inert: that dir's `settings.json` can define hooks or MCP servers,
+ * and it can hold a stored METERED Console login. See the CHANGELOG
+ * SECURITY entry for the delta against `HOME` (which already exposes
+ * `~/.claude`) and for what is and is not verified.
  */
 export const CLAUDE_CLI_CONFIG_DIR_ENV_VAR = 'CLAUDE_CONFIG_DIR';
 
 /**
  * Every environment variable name the `claude` child process is permitted
  * to see — an ALLOWLIST, built from {@link BASE_ENV_NAMES} plus
- * {@link CLAUDE_CLI_CREDENTIAL_ENV_VAR}, never independently.
+ * {@link CLAUDE_CLI_CREDENTIAL_ENV_VAR} plus
+ * {@link CLAUDE_CLI_CONFIG_DIR_ENV_VAR}, never independently.
  *
  * REPLACES an earlier `STRIPPED_ENV_VARS` / `childEnv` DENYLIST that
  * deleted five named Anthropic/Bedrock/Vertex variables and passed

@@ -113,10 +113,14 @@
  * `total_cost_usd` / per-model `modelUsage[].costUSD` ARE PRESENT IN THE
  * PAYLOAD. The top-level `total_cost_usd` is surfaced as
  * `TokenUsage.costUsdReported` (relayed as-is, absent unless a finite
- * number). It is the API-EQUIVALENT cost of the call — the payload gives
- * no signal for billed vs. notional, and since {@link allowedEnv} never
- * lets a billed credential reach the child, on this subscription route it
- * is NOT money billed. The per-model `costUSD` entries are deliberately
+ * number; a malformed value is recorded as `costUsdReportedInvalidType`
+ * and a span attribute instead — see cost.ts). It is the CLI's OWN
+ * reported cost: API-EQUIVALENT on a subscription login, and BILLED money
+ * on a metered Console login. The field cannot tell which — the payload
+ * gives no signal, and the child can reach either kind of stored login
+ * (`HOME` already exposes `~/.claude`; `CLAUDE_CONFIG_DIR` can point at
+ * another config dir). The allowlist keeps `ANTHROPIC_API_KEY` out of the
+ * child; it does NOT guarantee the CLI is unbilled. The per-model `costUSD` entries are deliberately
  * NOT surfaced: they sum to the same figure, so exposing both would invite
  * double-counting. A settled dual-cost design (billed vs. notional) is
  * separate work (`decisions/023`, aigency-governance).
@@ -307,6 +311,7 @@ import type {
   TurnContent,
 } from '../index.js';
 import { ALLOWED_ENV_VARS, allowedEnv, CLAUDE_CLI_CREDENTIAL_ENV_VAR, PROVIDER } from './env.js';
+import { readReportedCost } from './cost.js';
 import {
   closeSession,
   createSession,
@@ -710,6 +715,7 @@ function genAIOutcomeFromUsage(usage: TokenUsage): GenAISpanOutcome {
     sessionId: usage.sessionId,
     providerRequestId: usage.providerRequestId,
     costUsdReported: usage.costUsdReported,
+    costUsdReportedInvalidType: usage.costUsdReportedInvalidType,
   };
 }
 
@@ -717,7 +723,9 @@ function shapeUsage(
   usage: ClaudeCliResultEvent['usage'],
   model: string,
   substrateVersion: string | undefined,
-  totalCostUsd: number | undefined,
+  // `unknown`, not `number`: the value is parsed JSON and is checked at
+  // runtime by readReportedCost(), whatever its declared type says.
+  totalCostUsd: unknown,
   // The real per-turn-unique id, already resolved by the caller: the
   // held-session envelope's own `uuid` (session.ts), or — for the
   // one-shot path — `session_id`, which genuinely IS unique there (a
@@ -732,6 +740,7 @@ function shapeUsage(
   // `providerRequestId` above.
   sessionId: string | undefined
 ): TokenUsage {
+  const reportedCost = readReportedCost(totalCostUsd);
   // Constant, never computed — see the file header's PAYLOAD CONTRACT
   // paragraph for why this is safe to assert rather than derive.
   const route: CredentialRoute = 'subscription-oauth';
@@ -756,8 +765,8 @@ function shapeUsage(
     // why a billed/notional split is deliberate, separate, out-of-scope
     // work).
     // Absent (never 0, never NaN) unless the CLI reported a finite number.
-    costUsdReported:
-      typeof totalCostUsd === 'number' && Number.isFinite(totalCostUsd) ? totalCostUsd : undefined,
+    costUsdReported: reportedCost.costUsdReported,
+    costUsdReportedInvalidType: reportedCost.invalidType,
     sessionId,
     providerRequestId,
   };
