@@ -361,11 +361,12 @@ describe('claudeCli.chat — GenAI spans', () => {
     });
 
     it.each([
-      ['a string', '0.5', 'string'],
-      ['null', null, 'null'],
-      ['an object', {}, 'object'],
-      ['an array', [], 'array'],
-      ['a boolean', true, 'boolean'],
+      ['a string', '0.5'],
+      ['null', null],
+      ['an object', {}],
+      ['an array', []],
+      ['a boolean', true],
+      ['a negative number', -0.5],
     ])('gives no cost (never 0 or NaN) when total_cost_usd is %s', async (_label, bad) => {
       const u = await run({ total_cost_usd: bad });
       expect(u.costUsdReported).toBeUndefined();
