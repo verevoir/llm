@@ -196,13 +196,7 @@ export type CredentialRoute = 'api-key' | 'subscription-oauth' | 'mixed';
  * Never the value itself.
  */
 export type CostInvalidKind =
-  | 'negative'
-  | 'non-finite'
-  | 'string'
-  | 'boolean'
-  | 'null'
-  | 'array'
-  | 'object';
+  'negative' | 'non-finite' | 'string' | 'boolean' | 'null' | 'array' | 'object';
 
 /**
  * Per-call token + provenance record. Returned alongside every reply.
