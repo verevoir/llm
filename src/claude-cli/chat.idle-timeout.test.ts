@@ -57,7 +57,12 @@ describe('claudeCli idle timeout (real subprocess, no mocked spawn)', () => {
   });
 
   it('a silent child (no stdout/stderr ever) is killed and rejects with the named idle-timeout code, naming the gap in a generic (non-reviewer) message', async () => {
-    setIdleOverride('400');
+    // 2000ms, not 400ms: the idle timer starts at spawn, and this test
+    // reads the pid file the stub writes, so the stub's Node startup must
+    // beat the timer or the child is killed before the file exists (ENOENT
+    // below). Same remedy and reason as the sibling tests widened from
+    // 500ms to 2000ms; it still proves the idle timeout kills the process.
+    setIdleOverride('2000');
     const pidFile = join(tmpdir(), `claude-cli-idle-pid-${process.pid}-${Date.now()}`);
     pidFileToClean = pidFile;
     // Records its own pid, then sits forever writing NOTHING to stdout or
@@ -84,16 +89,16 @@ describe('claudeCli idle timeout (real subprocess, no mocked spawn)', () => {
     // Generic, llm-level wording — this is @verevoir/llm, not a reviewer;
     // a caller (e.g. @verevoir/review) maps this onto its own could-not-run
     // outcome in its own layer, not this one's.
-    expect((error as Error).message).toBe('claude CLI produced no output for 400ms');
+    expect((error as Error).message).toBe('claude CLI produced no output for 2000ms');
     expect((error as Error).message).not.toContain('VERDICT');
     // Named, structural fields a caller can match on without parsing text.
     expect((error as Error & { code?: string }).code).toBe(CLAUDE_CLI_IDLE_TIMEOUT_CODE);
-    expect((error as Error & { timeoutMs?: number }).timeoutMs).toBe(400);
+    expect((error as Error & { timeoutMs?: number }).timeoutMs).toBe(2000);
 
     // Give the OS a moment to actually finish terminating the process the
     // SIGTERM was sent to, then confirm it is genuinely gone — not merely
     // abandoned to finish in the background.
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    await new Promise((resolve) => setTimeout(resolve, 1000));
     const pid = Number(readFileSync(pidFile, 'utf8'));
     let alive = true;
     try {
