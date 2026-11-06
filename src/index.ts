@@ -269,8 +269,9 @@ export interface TokenUsage {
   costUsdReported?: number;
   /**
    * claude-cli only: set when the CLI sent a `total_cost_usd` that was not
-   * a finite number >= 0 — the value's type (`string`, `null`, `object`,
-   * `number` for NaN/Infinity, ...) — so a malformed field is
+   * a finite number >= 0 — the kind of malformation (`negative`,
+   * `non-finite` for NaN/Infinity, or the type name `string`, `null`,
+   * `object`, ...) — so a malformed field is
    * distinguishable from a missing one. {@link costUsdReported} is absent
    * in that case. Absent when the field was missing or valid.
    */

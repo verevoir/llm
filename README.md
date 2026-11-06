@@ -145,9 +145,9 @@ CLI's own `total_cost_usd` as the optional `TokenUsage.costUsdReported`. It is
 the CLI's own figure: **API-equivalent** on a subscription login, but **billed
 money** on a metered Console login. The field does not know which (see the CHANGELOG
 `SECURITY:` entry for 0.36.0). It is absent (never `0`, never `NaN`) unless the
-CLI reports a finite number >= 0. A malformed value (string, null, object,
-negative, `Infinity`, …) is
-recorded as `TokenUsage.costUsdReportedInvalidType` and on the span as
+CLI reports a finite number >= 0. A malformed value is recorded as
+`TokenUsage.costUsdReportedInvalidType` (`negative`, `non-finite`, or the type
+name such as `string` or `null`) and on the span as
 `verevoir.llm.cost_usd_reported_invalid` plus `…_invalid_type`, so it is not
 mistaken for a missing one. Every other adapter leaves it absent — their cost
 comes from the PriceBook.

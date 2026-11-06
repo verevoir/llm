@@ -92,13 +92,14 @@ export const ATTR_VEREVOIR_SESSION_ID = 'verevoir.llm.session_id';
  * from a price table. */
 export const ATTR_VEREVOIR_COST_USD_REPORTED = 'verevoir.llm.cost_usd_reported';
 
-/** `true` when the provider sent a cost that was not a finite number (so
+/** `true` when the provider sent a cost that was not a finite, non-negative number (so
  * {@link ATTR_VEREVOIR_COST_USD_REPORTED} is absent). Distinguishes a
  * malformed cost from a missing one. Set only in that case. */
 export const ATTR_VEREVOIR_COST_USD_REPORTED_INVALID = 'verevoir.llm.cost_usd_reported_invalid';
 
-/** The type of the malformed cost value (`string`, `null`, ...) — never
- * the value itself. Set together with
+/** The kind of malformation of the cost value: `negative`, `non-finite`, or
+ * the type name for a non-number (`string`, `null`, ...) — never the
+ * value itself. Set together with
  * {@link ATTR_VEREVOIR_COST_USD_REPORTED_INVALID}. */
 export const ATTR_VEREVOIR_COST_USD_REPORTED_INVALID_TYPE =
   'verevoir.llm.cost_usd_reported_invalid_type';
@@ -133,7 +134,8 @@ export interface GenAISpanOutcome {
    * computed, only ever relayed from the provider's payload when present.
    * See {@link ATTR_VEREVOIR_COST_USD_REPORTED}. */
   costUsdReported?: number;
-  /** The type of a malformed provider cost; see
+  /** The kind of a malformed provider cost (`negative`, `non-finite` or a
+   * type name); see
    * {@link ATTR_VEREVOIR_COST_USD_REPORTED_INVALID}. */
   costUsdReportedInvalidType?: string;
 }

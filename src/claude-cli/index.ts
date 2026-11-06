@@ -114,6 +114,7 @@
  * PAYLOAD. The top-level `total_cost_usd` is surfaced as
  * `TokenUsage.costUsdReported` (relayed as-is, absent unless a finite
  * number >= 0; anything else is recorded as `costUsdReportedInvalidType`
+ * (`negative`, `non-finite`, or the type name)
  * and a span attribute instead, silently — see cost.ts). It is the CLI's OWN
  * reported cost: API-EQUIVALENT on a subscription login, and BILLED money
  * on a metered Console login. The field cannot tell which — the payload
@@ -510,7 +511,7 @@ interface ClaudeCliResultEvent {
    * it internally (which may carry a suffix like `[1m]`); prefer each
    * entry's own `canonicalModel` field over the key. */
   modelUsage?: Record<string, ModelUsageEntry>;
-  /** Surfaced as `TokenUsage.costUsdReported` when a finite number — see
+  /** Surfaced as `TokenUsage.costUsdReported` when a finite, non-negative number — see
    * the file header's `total_cost_usd` / `costUSD` paragraph. */
   total_cost_usd?: number;
 }
@@ -766,8 +767,11 @@ function shapeUsage(
     // decisions/023, aigency-governance, cited in this file's header, for
     // why a billed/notional split is deliberate, separate, out-of-scope
     // work).
-    // Absent (never 0, never NaN) unless the CLI reported a finite number.
-    costUsdReported: reportedCost.costUsdReported,
+    // Omitted entirely (not an undefined-valued key), and never 0 or NaN,
+    // unless the CLI reported a finite, non-negative number.
+    ...(reportedCost.costUsdReported !== undefined && {
+      costUsdReported: reportedCost.costUsdReported,
+    }),
     // Omitted entirely (not an undefined-valued key) unless malformed.
     ...(reportedCost.invalidType !== undefined && {
       costUsdReportedInvalidType: reportedCost.invalidType,

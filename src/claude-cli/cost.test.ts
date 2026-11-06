@@ -26,16 +26,16 @@ describe('readReportedCost', () => {
     ['NaN', NaN],
     ['Infinity', Infinity],
     ['-Infinity', -Infinity],
-  ])('flags %s as an invalid number', (_label, bad) => {
-    expect(readReportedCost(bad).invalidType).toBe('number');
+  ])('flags %s as non-finite', (_label, bad) => {
+    expect(readReportedCost(bad).invalidType).toBe('non-finite');
   });
 
   it.each([-0.01, -1, -1e-9])('gives no cost for the negative number %s', (n) => {
     expect(readReportedCost(n).costUsdReported).toBeUndefined();
   });
 
-  it.each([-0.01, -1, -1e-9])('flags the negative number %s as an invalid number', (n) => {
-    expect(readReportedCost(n).invalidType).toBe('number');
+  it.each([-0.01, -1, -1e-9])('flags the negative number %s as negative', (n) => {
+    expect(readReportedCost(n).invalidType).toBe('negative');
   });
 
   it.each([
@@ -65,7 +65,7 @@ describe('readReportedCost', () => {
     readReportedCost('secret-looking-text');
     readReportedCost(-1);
     readReportedCost(NaN);
-    for (const spy of spies) expect(spy).not.toHaveBeenCalled();
+    expect(spies.map((spy) => spy.mock.calls.length)).toEqual([0, 0, 0, 0, 0]);
   });
 
   it('never carries the value itself in the result', () => {

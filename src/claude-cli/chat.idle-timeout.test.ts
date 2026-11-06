@@ -95,18 +95,31 @@ describe('claudeCli idle timeout (real subprocess, no mocked spawn)', () => {
     expect((error as Error & { code?: string }).code).toBe(CLAUDE_CLI_IDLE_TIMEOUT_CODE);
     expect((error as Error & { timeoutMs?: number }).timeoutMs).toBe(2000);
 
-    // Give the OS a moment to actually finish terminating the process the
-    // SIGTERM was sent to, then confirm it is genuinely gone — not merely
-    // abandoned to finish in the background.
-    await new Promise((resolve) => setTimeout(resolve, 1000));
+    // The pid file can only be read, not waited for: the idle timer starts
+    // at spawn, so a readiness wait cannot stop the child being killed
+    // BEFORE it writes the file (the ENOENT this test used to hit). The
+    // 2000ms budget above is the margin for that; by the time chat() has
+    // rejected the file is there.
     const pid = Number(readFileSync(pidFile, 'utf8'));
-    let alive = true;
-    try {
-      process.kill(pid, 0);
-    } catch {
-      alive = false;
+    const isAlive = (): boolean => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    // Confirm the process is genuinely gone, not merely abandoned to finish
+    // in the background. Poll rather than sleep a fixed time: the loop ends
+    // the moment the process is gone, and the 5s cap only bounds a real
+    // failure (a process that is never killed). A fixed wait that is too
+    // short fails this assertion spuriously, so it fails in the direction
+    // of a false "still alive"; polling removes that direction.
+    const deadline = Date.now() + 5000;
+    while (isAlive() && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
     }
-    expect(alive).toBe(false);
+    expect(isAlive()).toBe(false);
   }, 10_000);
 
   it('a per-call idleTimeoutMs wins over the env override — precedence, not just presence (audit item 2: real threading, not merely a parameter that exists)', async () => {

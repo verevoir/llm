@@ -334,30 +334,45 @@ describe('claudeCli.chat — GenAI spans', () => {
     it('relays a finite total_cost_usd as costUsdReported', async () => {
       const u = await run({ total_cost_usd: 0.5 });
       expect(u.costUsdReported).toBe(0.5);
-      expect(u.costUsdReportedInvalidType).toBeUndefined();
     });
 
     it('leaves token counts unchanged when total_cost_usd is present', async () => {
       const u = await run({ total_cost_usd: 0.5 });
-      expect(u.inputTokens).toBe(10);
-      expect(u.outputTokens).toBe(5);
-      expect(u.cacheReadInputTokens).toBe(3);
-      expect(u.cacheCreationInputTokens).toBe(2);
+      expect(u).toMatchObject({
+        inputTokens: 10,
+        outputTokens: 5,
+        cacheReadInputTokens: 3,
+        cacheCreationInputTokens: 2,
+      });
     });
 
-    it('is absent, and not flagged invalid, when total_cost_usd is missing', async () => {
+    it('omits the costUsdReported key from usage when total_cost_usd is missing', async () => {
       const u = await run({});
-      expect(u.costUsdReported).toBeUndefined();
-      expect(u.costUsdReportedInvalidType).toBeUndefined();
+      expect(Object.keys(u)).not.toContain('costUsdReported');
+    });
+
+    it('omits the invalid-type key from usage when total_cost_usd is missing', async () => {
+      const u = await run({});
+      expect(Object.keys(u)).not.toContain('costUsdReportedInvalidType');
+    });
+
+    it('sets no span invalid flag when total_cost_usd is missing', async () => {
+      await run({});
       expect(Object.keys(lastSpanAttributes())).not.toContain(
         ATTR_VEREVOIR_COST_USD_REPORTED_INVALID
       );
     });
 
+    it('sets no span invalid-type attribute when total_cost_usd is missing', async () => {
+      await run({});
+      expect(Object.keys(lastSpanAttributes())).not.toContain(
+        ATTR_VEREVOIR_COST_USD_REPORTED_INVALID_TYPE
+      );
+    });
+
     it('leaves token counts unchanged when total_cost_usd is missing', async () => {
       const u = await run({});
-      expect(u.inputTokens).toBe(10);
-      expect(u.outputTokens).toBe(5);
+      expect(u).toMatchObject({ inputTokens: 10, outputTokens: 5 });
     });
 
     it.each([
@@ -378,8 +393,8 @@ describe('claudeCli.chat — GenAI spans', () => {
       ['an object', {}, 'object'],
       ['an array', [], 'array'],
       ['a boolean', true, 'boolean'],
-      ['a negative number', -0.5, 'number'],
-    ])('records the type when total_cost_usd is %s', async (_label, bad, type) => {
+      ['a negative number', -0.5, 'negative'],
+    ])('records the kind when total_cost_usd is %s', async (_label, bad, type) => {
       const u = await run({ total_cost_usd: bad });
       expect(u.costUsdReportedInvalidType).toBe(type);
     });
@@ -395,9 +410,19 @@ describe('claudeCli.chat — GenAI spans', () => {
     it.each([
       ['Infinity', '1e999'],
       ['-Infinity', '-1e999'],
-    ])('records the type when total_cost_usd overflows to %s', async (_label, literal) => {
+    ])('records the kind when total_cost_usd overflows to %s', async (_label, literal) => {
       const u = await runRaw(literal);
-      expect(u.costUsdReportedInvalidType).toBe('number');
+      expect(u.costUsdReportedInvalidType).toBe('non-finite');
+    });
+
+    it('sets the span invalid type to non-finite when total_cost_usd overflows to Infinity', async () => {
+      await runRaw('1e999');
+      expect(lastSpanAttributes()[ATTR_VEREVOIR_COST_USD_REPORTED_INVALID_TYPE]).toBe('non-finite');
+    });
+
+    it('sets the span invalid type to negative when total_cost_usd is below zero', async () => {
+      await run({ total_cost_usd: -0.5 });
+      expect(lastSpanAttributes()[ATTR_VEREVOIR_COST_USD_REPORTED_INVALID_TYPE]).toBe('negative');
     });
 
     it('flags the span invalid when total_cost_usd overflows to Infinity', async () => {
@@ -415,10 +440,14 @@ describe('claudeCli.chat — GenAI spans', () => {
       expect(Object.keys(u)).not.toContain('costUsdReportedInvalidType');
     });
 
+    it('omits the costUsdReported key from usage when total_cost_usd is malformed', async () => {
+      const u = await run({ total_cost_usd: 'oops' });
+      expect(Object.keys(u)).not.toContain('costUsdReported');
+    });
+
     it('leaves token counts unchanged when total_cost_usd is malformed', async () => {
       const u = await run({ total_cost_usd: 'oops' });
-      expect(u.inputTokens).toBe(10);
-      expect(u.outputTokens).toBe(5);
+      expect(u).toMatchObject({ inputTokens: 10, outputTokens: 5 });
     });
 
     it('sets the span invalid flag when total_cost_usd is malformed', async () => {
@@ -436,11 +465,23 @@ describe('claudeCli.chat — GenAI spans', () => {
       expect(Object.keys(lastSpanAttributes())).not.toContain(ATTR_VEREVOIR_COST_USD_REPORTED);
     });
 
+    it('sets the span cost attribute to the relayed figure when total_cost_usd is a finite number', async () => {
+      await run({ total_cost_usd: 0.5 });
+      expect(lastSpanAttributes()[ATTR_VEREVOIR_COST_USD_REPORTED]).toBe(0.5);
+    });
+
     it('does not flag the span invalid when total_cost_usd is a finite number', async () => {
       await run({ total_cost_usd: 0.5 });
-      const attrs = lastSpanAttributes();
-      expect(attrs[ATTR_VEREVOIR_COST_USD_REPORTED]).toBe(0.5);
-      expect(Object.keys(attrs)).not.toContain(ATTR_VEREVOIR_COST_USD_REPORTED_INVALID);
+      expect(Object.keys(lastSpanAttributes())).not.toContain(
+        ATTR_VEREVOIR_COST_USD_REPORTED_INVALID
+      );
+    });
+
+    it('sets no span invalid-type attribute when total_cost_usd is a finite number', async () => {
+      await run({ total_cost_usd: 0.5 });
+      expect(Object.keys(lastSpanAttributes())).not.toContain(
+        ATTR_VEREVOIR_COST_USD_REPORTED_INVALID_TYPE
+      );
     });
   });
 
@@ -756,8 +797,8 @@ describe('claudeCli.chat', () => {
     // --safe-mode is UNVERIFIED here (see the CHANGELOG SECURITY entry);
     // this pins only that this adapter never drops the flags meant to stop
     // them when CLAUDE_CONFIG_DIR is set.
-    // Scope: chat()'s one-shot spawn only. The held-session spawn and the
-    // `claude --version` probe are NOT exercised with the variable set here.
+    // Scope: chat()'s one-shot spawn and the `claude --version` probe. The
+    // held-session spawn is covered in session.test.ts.
     const spawnWithConfigDir = async () => {
       mockSpawn.mockReset();
       resetClaudeCliVersionCacheForTests();
@@ -769,7 +810,9 @@ describe('claudeCli.chat', () => {
         vi.unstubAllEnvs();
       }
       const [, args, options] = mockSpawn.mock.calls[0];
-      return { args: args as string[], options };
+      // The second spawn is the memoized `claude --version` probe.
+      const versionOptions = mockSpawn.mock.calls[1][2];
+      return { args: args as string[], options, versionOptions };
     };
 
     it('hands the one-shot spawn the custom config dir', async () => {
@@ -777,6 +820,13 @@ describe('claudeCli.chat', () => {
       expect((options as { env: Record<string, string | undefined> }).env.CLAUDE_CONFIG_DIR).toBe(
         '/custom/claude'
       );
+    });
+
+    it('hands the claude --version probe the custom config dir', async () => {
+      const { versionOptions } = await spawnWithConfigDir();
+      expect(
+        (versionOptions as { env: Record<string, string | undefined> }).env.CLAUDE_CONFIG_DIR
+      ).toBe('/custom/claude');
     });
 
     it('keeps --strict-mcp-config on the one-shot spawn when CLAUDE_CONFIG_DIR is set', async () => {

@@ -201,7 +201,8 @@ version string, so a version bump doesn't zero a model's cost.
 - `TokenUsage.costUsdReported` (claude-cli only) — the CLI's own `total_cost_usd`: API-equivalent
   on a subscription login, billed money on a metered Console login; the field cannot tell
   which. Absent (never 0/NaN) unless a finite number >= 0. A malformed value sets
-  `TokenUsage.costUsdReportedInvalidType` and the span attributes
+  `TokenUsage.costUsdReportedInvalidType` (`negative`, `non-finite` or the type name)
+  and the span attributes
   `verevoir.llm.cost_usd_reported_invalid` / `..._invalid_type` instead. Other adapters
   leave it absent (cost comes from the PriceBook).
 - Anthropic subscription auth — the Anthropic adapter prefers
