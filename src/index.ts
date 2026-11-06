@@ -256,20 +256,20 @@ export interface TokenUsage {
    * provider's payload carries one (e.g. Claude Code's terminal result
    * event's `total_cost_usd`). NEVER COMPUTED from a price table — this
    * is the provider's own figure, relayed as-is, or `undefined` when the
-   * adapter's transport doesn't see one (or sees a non-finite value —
-   * never `0` or `NaN`).
+   * adapter's transport doesn't see one (or sees a value that is not a
+   * finite number >= 0 — never `0` or `NaN`).
    *
    * The CLI's OWN reported cost, relayed as-is: API-equivalent on a
    * subscription login, but BILLED money on a metered Console login. The
-   * field does not know which — the child can reach either kind of stored
-   * login (via `HOME`, or a `CLAUDE_CONFIG_DIR`). Do not read it as
-   * "not billed". Only claude-cli sets it; for the API adapters, cost
-   * comes from the PriceBook, not from here.
+   * field does not know which (see claude-cli's env.ts for why either
+   * login can be reached). Do not read it as "not billed".
+   * Only claude-cli sets it; for the API adapters, cost comes from the
+   * PriceBook, not from here.
    */
   costUsdReported?: number;
   /**
    * claude-cli only: set when the CLI sent a `total_cost_usd` that was not
-   * a finite number — the value's type (`string`, `null`, `object`,
+   * a finite number >= 0 — the value's type (`string`, `null`, `object`,
    * `number` for NaN/Infinity, ...) — so a malformed field is
    * distinguishable from a missing one. {@link costUsdReported} is absent
    * in that case. Absent when the field was missing or valid.

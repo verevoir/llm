@@ -1,31 +1,51 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { readReportedCost } from './cost.js';
 
 describe('readReportedCost', () => {
-  beforeEach(() => {
-    vi.spyOn(console, 'debug').mockImplementation(() => {});
-  });
   afterEach(() => {
     vi.restoreAllMocks();
   });
 
-  it.each([0.5, 0, 12.75])('relays the finite number %s as-is', (n) => {
+  it.each([0.5, 0, 12.75])('relays the finite non-negative number %s as-is', (n) => {
     expect(readReportedCost(n)).toEqual({ costUsdReported: n });
   });
 
-  it('yields nothing, and no debug note, when the value is missing', () => {
+  it('yields nothing when the value is missing', () => {
     expect(readReportedCost(undefined)).toEqual({});
-    expect(console.debug).not.toHaveBeenCalled();
   });
 
   it.each([
     ['NaN', NaN],
     ['Infinity', Infinity],
     ['-Infinity', -Infinity],
-  ])('treats %s as invalid, never as a cost', (_label, bad) => {
-    const r = readReportedCost(bad);
-    expect(r.costUsdReported).toBeUndefined();
-    expect(r.invalidType).toBe('number');
+  ])('gives no cost for %s', (_label, bad) => {
+    expect(readReportedCost(bad).costUsdReported).toBeUndefined();
+  });
+
+  it.each([
+    ['NaN', NaN],
+    ['Infinity', Infinity],
+    ['-Infinity', -Infinity],
+  ])('flags %s as an invalid number', (_label, bad) => {
+    expect(readReportedCost(bad).invalidType).toBe('number');
+  });
+
+  it.each([-0.01, -1, -1e-9])('gives no cost for the negative number %s', (n) => {
+    expect(readReportedCost(n).costUsdReported).toBeUndefined();
+  });
+
+  it.each([-0.01, -1, -1e-9])('flags the negative number %s as an invalid number', (n) => {
+    expect(readReportedCost(n).invalidType).toBe('number');
+  });
+
+  it.each([
+    ['a string', '0.5'],
+    ['null', null],
+    ['an object', {}],
+    ['an array', []],
+    ['a boolean', false],
+  ])('gives no cost for %s', (_label, bad) => {
+    expect(readReportedCost(bad).costUsdReported).toBeUndefined();
   });
 
   it.each([
@@ -35,16 +55,22 @@ describe('readReportedCost', () => {
     ['an array', [], 'array'],
     ['a boolean', false, 'boolean'],
   ])('names the type of %s', (_label, bad, type) => {
-    const r = readReportedCost(bad);
-    expect(r.costUsdReported).toBeUndefined();
-    expect(r.invalidType).toBe(type);
+    expect(readReportedCost(bad).invalidType).toBe(type);
   });
 
-  it('writes a debug note naming the type, never the value', () => {
+  it('never writes to the console, whatever the value', () => {
+    const spies = (['debug', 'log', 'info', 'warn', 'error'] as const).map((m) =>
+      vi.spyOn(console, m).mockImplementation(() => {})
+    );
     readReportedCost('secret-looking-text');
-    expect(console.debug).toHaveBeenCalledTimes(1);
-    const message = String((console.debug as ReturnType<typeof vi.fn>).mock.calls[0][0]);
-    expect(message).toContain('string');
-    expect(message).not.toContain('secret-looking-text');
+    readReportedCost(-1);
+    readReportedCost(NaN);
+    for (const spy of spies) expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('never carries the value itself in the result', () => {
+    expect(JSON.stringify(readReportedCost('secret-looking-text'))).not.toContain(
+      'secret-looking-text'
+    );
   });
 });

@@ -295,7 +295,7 @@ describe('claudeCli.chat — GenAI spans', () => {
     expect(Object.keys(span.attributes)).not.toContain(ATTR_VEREVOIR_PROVIDER_REQUEST_ID);
   });
 
-  describe('costUsdReported (API-equivalent total_cost_usd)', () => {
+  describe("costUsdReported (the CLI's own total_cost_usd)", () => {
     // The enclosing spans block does not reset these, so an earlier test's
     // unconsumed `claude --version` mock would leak into this call's main
     // spawn (and the cached version would skip the fallback spawn).
@@ -366,22 +366,52 @@ describe('claudeCli.chat — GenAI spans', () => {
       ['an object', {}, 'object'],
       ['an array', [], 'array'],
       ['a boolean', true, 'boolean'],
-    ])(
-      'is absent (never 0 or NaN) and flagged invalid when total_cost_usd is %s',
-      async (_label, bad, type) => {
-        const u = await run({ total_cost_usd: bad });
-        expect(u.costUsdReported).toBeUndefined();
-        expect(u.costUsdReportedInvalidType).toBe(type);
-      }
-    );
+    ])('gives no cost (never 0 or NaN) when total_cost_usd is %s', async (_label, bad) => {
+      const u = await run({ total_cost_usd: bad });
+      expect(u.costUsdReported).toBeUndefined();
+    });
+
+    it.each([
+      ['a string', '0.5', 'string'],
+      ['null', null, 'null'],
+      ['an object', {}, 'object'],
+      ['an array', [], 'array'],
+      ['a boolean', true, 'boolean'],
+      ['a negative number', -0.5, 'number'],
+    ])('records the type when total_cost_usd is %s', async (_label, bad, type) => {
+      const u = await run({ total_cost_usd: bad });
+      expect(u.costUsdReportedInvalidType).toBe(type);
+    });
 
     it.each([
       ['Infinity', '1e999'],
       ['-Infinity', '-1e999'],
-    ])('is absent when total_cost_usd overflows to %s', async (_label, literal) => {
+    ])('gives no cost when total_cost_usd overflows to %s', async (_label, literal) => {
       const u = await runRaw(literal);
       expect(u.costUsdReported).toBeUndefined();
+    });
+
+    it.each([
+      ['Infinity', '1e999'],
+      ['-Infinity', '-1e999'],
+    ])('records the type when total_cost_usd overflows to %s', async (_label, literal) => {
+      const u = await runRaw(literal);
       expect(u.costUsdReportedInvalidType).toBe('number');
+    });
+
+    it('flags the span invalid when total_cost_usd overflows to Infinity', async () => {
+      await runRaw('1e999');
+      expect(lastSpanAttributes()[ATTR_VEREVOIR_COST_USD_REPORTED_INVALID]).toBe(true);
+    });
+
+    it('sets no cost attribute on the span when total_cost_usd overflows to Infinity', async () => {
+      await runRaw('1e999');
+      expect(Object.keys(lastSpanAttributes())).not.toContain(ATTR_VEREVOIR_COST_USD_REPORTED);
+    });
+
+    it('omits the invalid-type key entirely from usage when total_cost_usd is valid', async () => {
+      const u = await run({ total_cost_usd: 0.5 });
+      expect(Object.keys(u)).not.toContain('costUsdReportedInvalidType');
     });
 
     it('leaves token counts unchanged when total_cost_usd is malformed', async () => {
@@ -390,12 +420,19 @@ describe('claudeCli.chat — GenAI spans', () => {
       expect(u.outputTokens).toBe(5);
     });
 
-    it('records a malformed total_cost_usd on the span: invalid flag and type, no cost', async () => {
+    it('sets the span invalid flag when total_cost_usd is malformed', async () => {
       await run({ total_cost_usd: 'oops' });
-      const attrs = lastSpanAttributes();
-      expect(attrs[ATTR_VEREVOIR_COST_USD_REPORTED_INVALID]).toBe(true);
-      expect(attrs[ATTR_VEREVOIR_COST_USD_REPORTED_INVALID_TYPE]).toBe('string');
-      expect(Object.keys(attrs)).not.toContain(ATTR_VEREVOIR_COST_USD_REPORTED);
+      expect(lastSpanAttributes()[ATTR_VEREVOIR_COST_USD_REPORTED_INVALID]).toBe(true);
+    });
+
+    it('sets the span invalid type when total_cost_usd is malformed', async () => {
+      await run({ total_cost_usd: 'oops' });
+      expect(lastSpanAttributes()[ATTR_VEREVOIR_COST_USD_REPORTED_INVALID_TYPE]).toBe('string');
+    });
+
+    it('sets no span cost attribute when total_cost_usd is malformed', async () => {
+      await run({ total_cost_usd: 'oops' });
+      expect(Object.keys(lastSpanAttributes())).not.toContain(ATTR_VEREVOIR_COST_USD_REPORTED);
     });
 
     it('does not flag the span invalid when total_cost_usd is a finite number', async () => {
@@ -718,7 +755,9 @@ describe('claudeCli.chat', () => {
     // --safe-mode is UNVERIFIED here (see the CHANGELOG SECURITY entry);
     // this pins only that this adapter never drops the flags meant to stop
     // them when CLAUDE_CONFIG_DIR is set.
-    it('keeps --strict-mcp-config, --disallowedTools * and --safe-mode when CLAUDE_CONFIG_DIR is set', async () => {
+    // Scope: chat()'s one-shot spawn only. The held-session spawn and the
+    // `claude --version` probe are NOT exercised with the variable set here.
+    const spawnWithConfigDir = async () => {
       mockSpawn.mockReset();
       resetClaudeCliVersionCacheForTests();
       vi.stubEnv('CLAUDE_CONFIG_DIR', '/custom/claude');
@@ -729,11 +768,28 @@ describe('claudeCli.chat', () => {
         vi.unstubAllEnvs();
       }
       const [, args, options] = mockSpawn.mock.calls[0];
+      return { args: args as string[], options };
+    };
+
+    it('hands the one-shot spawn the custom config dir', async () => {
+      const { options } = await spawnWithConfigDir();
       expect((options as { env: Record<string, string | undefined> }).env.CLAUDE_CONFIG_DIR).toBe(
         '/custom/claude'
       );
+    });
+
+    it('keeps --strict-mcp-config on the one-shot spawn when CLAUDE_CONFIG_DIR is set', async () => {
+      const { args } = await spawnWithConfigDir();
       expect(args).toContain('--strict-mcp-config');
+    });
+
+    it('keeps --safe-mode on the one-shot spawn when CLAUDE_CONFIG_DIR is set', async () => {
+      const { args } = await spawnWithConfigDir();
       expect(args).toContain('--safe-mode');
+    });
+
+    it('keeps --disallowedTools * on the one-shot spawn when CLAUDE_CONFIG_DIR is set', async () => {
+      const { args } = await spawnWithConfigDir();
       expect(args[args.indexOf('--disallowedTools') + 1]).toBe('*');
     });
 

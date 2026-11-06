@@ -113,16 +113,14 @@
  * `total_cost_usd` / per-model `modelUsage[].costUSD` ARE PRESENT IN THE
  * PAYLOAD. The top-level `total_cost_usd` is surfaced as
  * `TokenUsage.costUsdReported` (relayed as-is, absent unless a finite
- * number; a malformed value is recorded as `costUsdReportedInvalidType`
- * and a span attribute instead — see cost.ts). It is the CLI's OWN
+ * number >= 0; anything else is recorded as `costUsdReportedInvalidType`
+ * and a span attribute instead, silently — see cost.ts). It is the CLI's OWN
  * reported cost: API-EQUIVALENT on a subscription login, and BILLED money
  * on a metered Console login. The field cannot tell which — the payload
- * gives no signal, and the child can reach either kind of stored login
- * (`HOME` already exposes `~/.claude`; `CLAUDE_CONFIG_DIR` can point at
- * another config dir). The allowlist keeps `ANTHROPIC_API_KEY` out of the
- * child; it does NOT guarantee the CLI is unbilled. The per-model `costUSD` entries are deliberately
- * NOT surfaced: they sum to the same figure, so exposing both would invite
- * double-counting. A settled dual-cost design (billed vs. notional) is
+ * gives no signal (why the child can reach either kind of login: see
+ * env.ts, the canonical statement). The per-model `costUSD` entries are
+ * deliberately NOT surfaced: the top-level figure is the call total, and
+ * surfacing both would invite double-counting. A settled dual-cost design (billed vs. notional) is
  * separate work (`decisions/023`, aigency-governance).
  *
  * `chat()` ONLY in this first cut — no `chatWithTools` /
@@ -741,8 +739,12 @@ function shapeUsage(
   sessionId: string | undefined
 ): TokenUsage {
   const reportedCost = readReportedCost(totalCostUsd);
-  // Constant, never computed — see the file header's PAYLOAD CONTRACT
-  // paragraph for why this is safe to assert rather than derive.
+  // The route NAME is a fixed label for this adapter's one mechanism (the
+  // CLI authenticating itself), never computed — see the file header's
+  // PAYLOAD CONTRACT paragraph. It does NOT say how the call was BILLED:
+  // that depends on which stored login the CLI used (subscription or a
+  // metered Console login; see env.ts), which is why costUsdReported
+  // cannot be read as "not billed".
   const route: CredentialRoute = 'subscription-oauth';
   return {
     provider: PROVIDER,
@@ -766,7 +768,10 @@ function shapeUsage(
     // work).
     // Absent (never 0, never NaN) unless the CLI reported a finite number.
     costUsdReported: reportedCost.costUsdReported,
-    costUsdReportedInvalidType: reportedCost.invalidType,
+    // Omitted entirely (not an undefined-valued key) unless malformed.
+    ...(reportedCost.invalidType !== undefined && {
+      costUsdReportedInvalidType: reportedCost.invalidType,
+    }),
     sessionId,
     providerRequestId,
   };

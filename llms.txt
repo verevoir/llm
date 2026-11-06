@@ -38,11 +38,10 @@ SDK does not enter your bundle.
   directly. `chat()` only. No SDK dependency — it spawns a subprocess, and
   that subprocess's environment is built from an allowlist — only `PATH`,
   `HOME`, `TMPDIR`, and the CLI's own subscription-credential env var
-  (`CLAUDE_CODE_OAUTH_TOKEN`) and `CLAUDE_CONFIG_DIR` (a path, not a secret, passed
-  so a custom Claude config dir keeps its login; operator-approved 6 Nov 2026, see
-  the CHANGELOG SECURITY entry) ever reach it; nothing else in the caller's
-  environment is passed through (this does not stop a stored metered login
-  reachable via `HOME` or `CLAUDE_CONFIG_DIR`). Replaced an
+  (`CLAUDE_CODE_OAUTH_TOKEN`) and `CLAUDE_CONFIG_DIR` (a path; see the CHANGELOG
+  SECURITY entry for 0.36.0) ever reach it; nothing else in the caller's
+  environment is passed through (but see that entry: a stored metered
+  login is still reachable). Replaced an
   earlier denylist that had already missed one live credential vector
   (`ANTHROPIC_AUTH_TOKEN`) in an earlier version — a denylist can only
   exclude names someone thought of; the allowlist doesn't need to.
@@ -201,7 +200,7 @@ version string, so a version bump doesn't zero a model's cost.
   only providers whose subpath has been imported.
 - `TokenUsage.costUsdReported` (claude-cli only) — the CLI's own `total_cost_usd`: API-equivalent
   on a subscription login, billed money on a metered Console login; the field cannot tell
-  which. Absent (never 0/NaN) unless a finite number. A malformed value sets
+  which. Absent (never 0/NaN) unless a finite number >= 0. A malformed value sets
   `TokenUsage.costUsdReportedInvalidType` and the span attributes
   `verevoir.llm.cost_usd_reported_invalid` / `..._invalid_type` instead. Other adapters
   leave it absent (cost comes from the PriceBook).

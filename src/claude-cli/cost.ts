@@ -2,20 +2,26 @@
  * @verevoir/llm/claude-cli — reading the CLI's own reported cost.
  *
  * Kept in its own module (not exported from the package entry) so the
- * finite-number guard can be unit-tested directly: JSON cannot carry
- * `NaN`, and `Infinity` only arrives as an overflowing literal like
- * `1e999`, so a fake CLI payload alone cannot exercise every branch.
+ * guard can be unit-tested directly: JSON cannot carry `NaN`, and
+ * `Infinity` only arrives as an overflowing literal like `1e999`, so a
+ * fake CLI payload alone cannot exercise every branch.
+ *
+ * Deliberately silent: a malformed value is recorded on the returned
+ * object (and from there on `TokenUsage` and the span), never written to
+ * stdout/stderr. Library code that logs to stdout can corrupt a
+ * stdio-protocol consumer such as an MCP server.
  */
 
 /** What {@link readReportedCost} found. At most one field is set. */
 export interface ReportedCost {
-  /** A finite number the CLI reported. Absent otherwise — never 0, never NaN. */
+  /** A finite, non-negative number the CLI reported. Absent otherwise — never 0, never NaN. */
   costUsdReported?: number;
   /**
-   * Set when the CLI sent a `total_cost_usd` that is NOT a finite number
-   * (a string, null, object, boolean, NaN or ±Infinity): the value's type,
-   * so a malformed field is distinguishable from a missing one. The value
-   * itself is never recorded. Absent when the field was missing or valid.
+   * Set when the CLI sent a `total_cost_usd` that is NOT a finite,
+   * non-negative number (a string, null, array, object, boolean, NaN,
+   * ±Infinity or a negative number): the value's type, so a malformed
+   * field is distinguishable from a missing one. The value itself is
+   * never recorded. Absent when the field was missing or valid.
    */
   invalidType?: string;
 }
@@ -30,18 +36,13 @@ function typeName(value: unknown): string {
 
 /**
  * Read the CLI's `total_cost_usd`. A missing value (`undefined`) yields
- * nothing; a finite number is relayed as-is; anything else yields only
- * `invalidType` and a debug note, and the cost stays absent.
+ * nothing; a finite number >= 0 is relayed as-is; anything else yields
+ * only `invalidType`, and the cost stays absent.
  */
 export function readReportedCost(value: unknown): ReportedCost {
   if (value === undefined) return {};
-  if (typeof value === 'number' && Number.isFinite(value)) {
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
     return { costUsdReported: value };
   }
-  const invalidType = typeName(value);
-  console.debug(
-    `@verevoir/llm/claude-cli: ignoring a malformed total_cost_usd (type: ${invalidType}); ` +
-      'costUsdReported is left absent.'
-  );
-  return { invalidType };
+  return { invalidType: typeName(value) };
 }
