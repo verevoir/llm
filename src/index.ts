@@ -255,7 +255,7 @@ export interface TokenUsage {
    * The provider's own reported cost for this call, in USD, when the
    * provider's payload carries one (e.g. Claude Code's terminal result
    * event's `total_cost_usd`). NEVER COMPUTED from a price table — this
-   * is the provider's own figure, relayed as-is, or `undefined` when the
+   * is the provider's own figure, relayed as-is (a `-0` becomes `0`), or `undefined` when the
    * adapter's transport doesn't see one (or sees a value that is not a
    * finite number >= 0 — never `0` or `NaN`).
    *

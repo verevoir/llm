@@ -51,12 +51,28 @@ describe('claudeCli idle timeout (real subprocess, no mocked spawn)', () => {
     else process.env.CLAUDE_CLI_IDLE_TIMEOUT_MS = originalIdleOverride;
     originalIdleOverride = undefined;
     if (pidFileToClean !== undefined) {
+      // If a test failed with the stub child still alive, do not leave it
+      // running on the runner. A child that is already gone makes kill()
+      // throw ESRCH, which is the normal case and is ignored. (A pid
+      // recycled to an unrelated process within the test's few seconds is
+      // theoretically possible and not guarded against.)
+      try {
+        process.kill(Number(readFileSync(pidFileToClean, 'utf8')), 'SIGKILL');
+      } catch {
+        // No pid file yet, or the child is already gone.
+      }
       rmSync(pidFileToClean, { force: true });
       pidFileToClean = undefined;
     }
   });
 
-  it('a silent child (no stdout/stderr ever) is killed and rejects with the named idle-timeout code, naming the gap in a generic (non-reviewer) message', async () => {
+  /** Runs chat() against a stub that records its pid and then stays silent
+   * forever, and returns the idle-timeout rejection. Shared by the four
+   * tests below so each asserts one thing. */
+  async function rejectionFromSilentChild(): Promise<{
+    error: Error & { code?: string; timeoutMs?: number };
+    pidFile: string;
+  }> {
     // 2000ms, not 400ms: the idle timer starts at spawn, and this test
     // reads the pid file the stub writes, so the stub's Node startup must
     // beat the timer or the child is killed before the file exists (ENOENT
@@ -85,21 +101,35 @@ describe('claudeCli idle timeout (real subprocess, no mocked spawn)', () => {
       (e: unknown) => e
     );
 
-    expect(error).toBeInstanceOf(Error);
+    return { error: error as Error & { code?: string; timeoutMs?: number }, pidFile };
+  }
+
+  it('a silent child is rejected with a generic (non-reviewer) message naming the gap', async () => {
     // Generic, llm-level wording — this is @verevoir/llm, not a reviewer;
     // a caller (e.g. @verevoir/review) maps this onto its own could-not-run
     // outcome in its own layer, not this one's.
-    expect((error as Error).message).toBe('claude CLI produced no output for 2000ms');
-    expect((error as Error).message).not.toContain('VERDICT');
-    // Named, structural fields a caller can match on without parsing text.
-    expect((error as Error & { code?: string }).code).toBe(CLAUDE_CLI_IDLE_TIMEOUT_CODE);
-    expect((error as Error & { timeoutMs?: number }).timeoutMs).toBe(2000);
+    const { error } = await rejectionFromSilentChild();
+    expect(error.message).toBe('claude CLI produced no output for 2000ms');
+  }, 10_000);
 
+  it('a silent child is rejected with the named idle-timeout code', async () => {
+    const { error } = await rejectionFromSilentChild();
+    expect(error.code).toBe(CLAUDE_CLI_IDLE_TIMEOUT_CODE);
+  }, 10_000);
+
+  it('a silent child is rejected with the structural timeoutMs', async () => {
+    const { error } = await rejectionFromSilentChild();
+    expect(error.timeoutMs).toBe(2000);
+  }, 10_000);
+
+  it('a silent child is genuinely killed, not merely abandoned', async () => {
+    const { pidFile } = await rejectionFromSilentChild();
     // The pid file can only be read, not waited for: the idle timer starts
     // at spawn, so a readiness wait cannot stop the child being killed
     // BEFORE it writes the file (the ENOENT this test used to hit). The
-    // 2000ms budget above is the margin for that; by the time chat() has
-    // rejected the file is there.
+    // 2000ms budget is the margin against that, not a guarantee: if the
+    // stub's startup ever exceeds it, the read below throws ENOENT and the
+    // test fails loudly rather than passing without evidence.
     const pid = Number(readFileSync(pidFile, 'utf8'));
     const isAlive = (): boolean => {
       try {

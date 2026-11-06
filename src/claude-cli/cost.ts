@@ -40,6 +40,11 @@ function typeName(value: unknown): string {
  * nothing; a finite number >= 0 is relayed as-is; anything else yields
  * only `invalidType`, and the cost stays absent.
  *
+ * `-0` is a zero cost, not a negative one (`-0 < 0` is false), so it is
+ * accepted, but it is normalised to `0`: the sign of zero carries no
+ * meaning for a cost, and a `-0` would print as `-0` and fail an
+ * `Object.is` comparison against `0` in a consumer.
+ *
  * A number is split into `'negative'` and `'non-finite'` (not both
  * `'number'`) because they have different causes: a negative is a sign
  * error from the CLI, a non-finite value is an overflowing literal such
@@ -50,7 +55,7 @@ export function readReportedCost(value: unknown): ReportedCost {
   if (typeof value === 'number') {
     if (!Number.isFinite(value)) return { invalidType: 'non-finite' };
     if (value < 0) return { invalidType: 'negative' };
-    return { costUsdReported: value };
+    return { costUsdReported: value === 0 ? 0 : value };
   }
   return { invalidType: typeName(value) };
 }

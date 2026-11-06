@@ -10,6 +10,14 @@ describe('readReportedCost', () => {
     expect(readReportedCost(n)).toEqual({ costUsdReported: n });
   });
 
+  it('accepts -0 as a zero cost and normalises it to +0', () => {
+    expect(Object.is(readReportedCost(-0).costUsdReported, 0)).toBe(true);
+  });
+
+  it('does not flag -0 as invalid', () => {
+    expect(readReportedCost(-0).invalidType).toBeUndefined();
+  });
+
   it('yields nothing when the value is missing', () => {
     expect(readReportedCost(undefined)).toEqual({});
   });

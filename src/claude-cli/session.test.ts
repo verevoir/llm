@@ -160,13 +160,18 @@ describe('claude-cli session lifecycle (wave 2a)', () => {
       );
     });
 
-    it.each(['--strict-mcp-config', '--safe-mode', '--disallowedTools'])(
+    it.each(['--strict-mcp-config', '--safe-mode'])(
       'keeps %s on the held-session spawn',
       async (flag) => {
         const { args } = await spawnHeldWithConfigDir();
         expect(args).toContain(flag);
       }
     );
+
+    it('keeps --disallowedTools * (the value, not just the flag) on the held-session spawn', async () => {
+      const { args } = await spawnHeldWithConfigDir();
+      expect(args[args.indexOf('--disallowedTools') + 1]).toBe('*');
+    });
   });
 
   it('spawns claude with the stream-json flags and no --mcp-config when there are no tools', async () => {
