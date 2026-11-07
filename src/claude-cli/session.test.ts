@@ -135,6 +135,45 @@ describe('claude-cli session lifecycle (wave 2a)', () => {
     expect(createSession().id).not.toBe(createSession().id);
   });
 
+  describe('with CLAUDE_CONFIG_DIR set in the parent', () => {
+    // The held-session spawn is built separately from chat()'s one-shot
+    // spawn, so it needs its own coverage that the variable reaches it and
+    // that the isolation flags are still there. Whether settings.json hooks
+    // fire under --safe-mode is UNVERIFIED (see the CHANGELOG SECURITY entry).
+    const spawnHeldWithConfigDir = async () => {
+      const { child } = fakeChild();
+      mockSpawn.mockImplementationOnce(() => child);
+      vi.stubEnv('CLAUDE_CONFIG_DIR', '/custom/claude');
+      try {
+        await getOrCreateSession(createSession(), NO_TOOLS);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+      const [, args, options] = mockSpawn.mock.calls[0];
+      return { args: args as string[], options };
+    };
+
+    it('hands the held-session spawn the custom config dir', async () => {
+      const { options } = await spawnHeldWithConfigDir();
+      expect((options as { env: Record<string, string | undefined> }).env.CLAUDE_CONFIG_DIR).toBe(
+        '/custom/claude'
+      );
+    });
+
+    it.each(['--strict-mcp-config', '--safe-mode'])(
+      'keeps %s on the held-session spawn',
+      async (flag) => {
+        const { args } = await spawnHeldWithConfigDir();
+        expect(args).toContain(flag);
+      }
+    );
+
+    it('keeps --disallowedTools * (the value, not just the flag) on the held-session spawn', async () => {
+      const { args } = await spawnHeldWithConfigDir();
+      expect(args[args.indexOf('--disallowedTools') + 1]).toBe('*');
+    });
+  });
+
   it('spawns claude with the stream-json flags and no --mcp-config when there are no tools', async () => {
     const { child } = fakeChild();
     mockSpawn.mockImplementationOnce(() => child);

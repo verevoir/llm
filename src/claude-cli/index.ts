@@ -111,14 +111,18 @@
  * silently dropped.
  *
  * `total_cost_usd` / per-model `modelUsage[].costUSD` ARE PRESENT IN THE
- * PAYLOAD AND DELIBERATELY NOT SURFACED ONTO `TokenUsage` — not recorded
- * elsewhere in this repository, so kept here rather than cut. The
- * payload gives no signal for whether that figure is billed or notional,
- * so asserting either would be an unbacked claim; what this adapter DOES
- * know for certain is that no billed credential was available to spend,
- * because {@link allowedEnv} never lets one reach the child. A settled
- * dual-cost design (billed vs. notional) is deliberate, separate,
- * out-of-scope work (`decisions/023`, aigency-governance).
+ * PAYLOAD. The top-level `total_cost_usd` is surfaced as
+ * `TokenUsage.costUsdReported` (relayed as-is, except that a `-0` becomes
+ * `0`; absent unless a finite number >= 0; anything else is recorded as
+ * `costUsdReportedInvalidType` (`negative`, `non-finite`, or the type
+ * name) and a span attribute instead, silently — see cost.ts). It is the CLI's OWN
+ * reported cost: API-EQUIVALENT on a subscription login, and BILLED money
+ * on a metered Console login. The field cannot tell which — the payload
+ * gives no signal (why the child can reach either kind of login: see
+ * env.ts, the canonical statement). The per-model `costUSD` entries are
+ * deliberately NOT surfaced: the top-level figure is the call total, and
+ * surfacing both would invite double-counting. A settled dual-cost design (billed vs. notional) is
+ * separate work (`decisions/023`, aigency-governance).
  *
  * `chat()` ONLY in this first cut — no `chatWithTools` /
  * `chatWithToolLoop`. `/google` shipped the same way at its own v0.4.0
@@ -306,6 +310,7 @@ import type {
   TurnContent,
 } from '../index.js';
 import { ALLOWED_ENV_VARS, allowedEnv, CLAUDE_CLI_CREDENTIAL_ENV_VAR, PROVIDER } from './env.js';
+import { readReportedCost } from './cost.js';
 import {
   closeSession,
   createSession,
@@ -323,7 +328,9 @@ import {
 // header for why (session.ts needs to build the identical child
 // environment without importing back into this file). Re-exported here
 // under the exact same names, so nothing importing
-// @verevoir/llm/claude-cli can tell they ever moved.
+// @verevoir/llm/claude-cli can tell they ever moved. (env.ts also holds
+// CLAUDE_CLI_CONFIG_DIR_ENV_VAR, added in 0.36.0; it is deliberately NOT
+// re-exported here, only visible through ALLOWED_ENV_VARS.)
 export { ALLOWED_ENV_VARS, allowedEnv, CLAUDE_CLI_CREDENTIAL_ENV_VAR, PROVIDER };
 
 // The session-holding transport (session.ts + mcp-bridge.ts, wave 3 of
@@ -506,9 +513,10 @@ interface ClaudeCliResultEvent {
    * it internally (which may carry a suffix like `[1m]`); prefer each
    * entry's own `canonicalModel` field over the key. */
   modelUsage?: Record<string, ModelUsageEntry>;
-  /** Present, and deliberately not surfaced onto TokenUsage — see the
-   * file header's `total_cost_usd` / `costUSD` paragraph. */
-  total_cost_usd?: number;
+  /** UNTRUSTED: whatever the CLI's JSON carried, so typed `unknown`. Surfaced as
+   * `TokenUsage.costUsdReported` only when a finite, non-negative number (see
+   * cost.ts); otherwise recorded as `costUsdReportedInvalidType`. */
+  total_cost_usd?: unknown;
 }
 
 /** The `{"type":"system","subtype":"init",...}` stream-json event's shape
@@ -664,6 +672,13 @@ function resolveCliVersion(): Promise<string | undefined> {
   if (!cachedCliVersionPromise) {
     cachedCliVersionPromise = (async () => {
       try {
+        // Safe to run without the isolation flags: the probe's argv is only
+        // `--version`, so the CLI prints its version and exits without a
+        // model call, a tool, a hook-bearing session or an MCP server being
+        // started. It does receive CLAUDE_CONFIG_DIR (like every spawn). NOT
+        // established: that `--version` never reads the config dir's
+        // settings.json; that is the same UNVERIFIED hooks question the
+        // CHANGELOG 0.36.0 SECURITY entry records.
         const { stdout, exitCode } = await runClaudeCli(['--version'], '');
         if (exitCode !== 0) return undefined;
         return parseVersionOutput(stdout);
@@ -709,6 +724,7 @@ function genAIOutcomeFromUsage(usage: TokenUsage): GenAISpanOutcome {
     sessionId: usage.sessionId,
     providerRequestId: usage.providerRequestId,
     costUsdReported: usage.costUsdReported,
+    costUsdReportedInvalidType: usage.costUsdReportedInvalidType,
   };
 }
 
@@ -716,7 +732,9 @@ function shapeUsage(
   usage: ClaudeCliResultEvent['usage'],
   model: string,
   substrateVersion: string | undefined,
-  totalCostUsd: number | undefined,
+  // `unknown`, not `number`: the value is parsed JSON and is checked at
+  // runtime by readReportedCost(), whatever its declared type says.
+  totalCostUsd: unknown,
   // The real per-turn-unique id, already resolved by the caller: the
   // held-session envelope's own `uuid` (session.ts), or — for the
   // one-shot path — `session_id`, which genuinely IS unique there (a
@@ -731,8 +749,13 @@ function shapeUsage(
   // `providerRequestId` above.
   sessionId: string | undefined
 ): TokenUsage {
-  // Constant, never computed — see the file header's PAYLOAD CONTRACT
-  // paragraph for why this is safe to assert rather than derive.
+  const reportedCost = readReportedCost(totalCostUsd);
+  // The route NAME is a fixed label for this adapter's one mechanism (the
+  // CLI authenticating itself), never computed — see the file header's
+  // PAYLOAD CONTRACT paragraph. It does NOT say how the call was BILLED:
+  // that depends on which stored login the CLI used (subscription or a
+  // metered Console login; see env.ts), which is why costUsdReported
+  // cannot be read as "not billed".
   const route: CredentialRoute = 'subscription-oauth';
   return {
     provider: PROVIDER,
@@ -746,7 +769,7 @@ function shapeUsage(
     cacheReadInputTokens: usage?.cache_read_input_tokens ?? 0,
     // Real fields on the terminal result event (see the file header's
     // PAYLOAD CONTRACT paragraph) this adapter never surfaced before now.
-    // Left undefined — never 0 or an assumed shape — when the payload
+    // Left undefined — not defaulted to 0 or an assumed shape — when the payload
     // doesn't carry them, matching every other optional TokenUsage field.
     cacheCreationEphemeral5mInputTokens: usage?.cache_creation?.ephemeral_5m_input_tokens,
     cacheCreationEphemeral1hInputTokens: usage?.cache_creation?.ephemeral_1h_input_tokens,
@@ -754,7 +777,16 @@ function shapeUsage(
     // decisions/023, aigency-governance, cited in this file's header, for
     // why a billed/notional split is deliberate, separate, out-of-scope
     // work).
-    costUsdReported: totalCostUsd,
+    // Omitted entirely (not an undefined-valued key), and never defaulted to
+    // 0 or NaN, unless the CLI reported a finite, non-negative number (a
+    // reported 0 is relayed).
+    ...(reportedCost.costUsdReported !== undefined && {
+      costUsdReported: reportedCost.costUsdReported,
+    }),
+    // Omitted entirely (not an undefined-valued key) unless malformed.
+    ...(reportedCost.invalidType !== undefined && {
+      costUsdReportedInvalidType: reportedCost.invalidType,
+    }),
     sessionId,
     providerRequestId,
   };

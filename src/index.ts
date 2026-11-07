@@ -188,6 +188,17 @@ export interface Turn {
 export type CredentialRoute = 'api-key' | 'subscription-oauth' | 'mixed';
 
 /**
+ * The kind of malformation recorded when a provider's reported cost is not a
+ * finite, non-negative number: `'negative'` (a number below zero),
+ * `'non-finite'` (NaN or ±Infinity), or, for a non-number, its type name.
+ * The union holds only what a parsed JSON reply can contain (the adapter
+ * reads a JSON payload), so it has no `'bigint'`, `'symbol'` or `'function'`.
+ * Never the value itself.
+ */
+export type CostInvalidKind =
+  'negative' | 'non-finite' | 'string' | 'boolean' | 'null' | 'array' | 'object';
+
+/**
  * Per-call token + provenance record. Returned alongside every reply.
  * The (provider, model, direction) triple is the model-direction grid
  * used for cost rollups.
@@ -255,10 +266,27 @@ export interface TokenUsage {
    * The provider's own reported cost for this call, in USD, when the
    * provider's payload carries one (e.g. Claude Code's terminal result
    * event's `total_cost_usd`). NEVER COMPUTED from a price table — this
-   * is the provider's own figure, relayed as-is, or `undefined` when the
-   * adapter's transport doesn't see one.
+   * is the provider's own figure, relayed as-is (a `-0` becomes `0`), or `undefined` when the
+   * adapter's transport doesn't see one (or sees a value that is not a
+   * finite number >= 0). A missing or malformed value is never turned
+   * into a default `0` or a `NaN`; a genuine reported `0` IS relayed.
+   *
+   * The CLI's OWN reported cost, relayed as-is: API-equivalent on a
+   * subscription login, but BILLED money on a metered Console login. The
+   * field does not know which (see claude-cli's env.ts for why either
+   * login can be reached). Do not read it as "not billed".
+   * Only claude-cli sets it; for the API adapters, cost comes from the
+   * PriceBook, not from here.
    */
   costUsdReported?: number;
+  /**
+   * claude-cli only: set when the CLI sent a `total_cost_usd` that was not
+   * a finite number >= 0 — the kind of malformation (see
+   * {@link CostInvalidKind}) — so a malformed field is
+   * distinguishable from a missing one. {@link costUsdReported} is absent
+   * in that case. Absent when the field was missing or valid.
+   */
+  costUsdReportedInvalidType?: CostInvalidKind;
   /**
    * claude-cli only: the CLI's own session id for this call, kept purely
    * for correlation. Reused across EVERY turn on a held session, so —

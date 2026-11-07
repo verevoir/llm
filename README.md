@@ -71,6 +71,8 @@ runtime; only real silence is. Default 10 minutes; override per call with
 (milliseconds). On expiry the process is killed and the call rejects with an
 `Error` carrying `.code === 'CLAUDE_CLI_IDLE_TIMEOUT'` and `.timeoutMs`.
 
+**`claude-cli` environment.** The child `claude` sees only `PATH`, `HOME`, `TMPDIR`, `CLAUDE_CODE_OAUTH_TOKEN` and `CLAUDE_CONFIG_DIR` (a path, not a secret; see the CHANGELOG `SECURITY:` entry for 0.36.0); nothing else is passed through.
+
 ## Provider endpoints & routing
 
 Every adapter authenticates with `<PROVIDER>_API_KEY` and can be pointed at a
@@ -137,6 +139,19 @@ back-compat but `@deprecated` — use `createPriceBook` instead. The
 **direction** field tracks the model-class semantic (`reasoning` /
 `extraction`) so rollups can break down "spent X on reasoning + Y on extraction"
 natively.
+
+**`costUsdReported` (claude-cli only).** `@verevoir/llm/claude-cli` relays the
+CLI's own `total_cost_usd` as the optional `TokenUsage.costUsdReported`. It is
+the CLI's own figure: **API-equivalent** on a subscription login, but **billed
+money** on a metered Console login. The field does not know which (see the CHANGELOG
+`SECURITY:` entry for 0.36.0). It is absent (never defaulted to `0` or `NaN`) unless the
+CLI reports a finite number >= 0, and is then relayed as-is, except that a
+`-0` becomes `0`; a reported `0` is relayed. A malformed value is recorded as
+`TokenUsage.costUsdReportedInvalidType` (`negative`, `non-finite`, or the type
+name such as `string` or `null`) and on the span as
+`verevoir.llm.cost_usd_reported_invalid_type`, so it is not
+mistaken for a missing one. Every other adapter leaves it absent — their cost
+comes from the PriceBook.
 
 ## Model-span audit hook
 

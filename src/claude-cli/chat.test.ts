@@ -12,6 +12,7 @@ import {
   ATTR_VEREVOIR_CACHE_CREATION_EPHEMERAL_5M_INPUT_TOKENS,
   ATTR_VEREVOIR_CACHE_CREATION_EPHEMERAL_1H_INPUT_TOKENS,
   ATTR_VEREVOIR_COST_USD_REPORTED,
+  ATTR_VEREVOIR_COST_USD_REPORTED_INVALID_TYPE,
   ATTR_VEREVOIR_PROVIDER_REQUEST_ID,
   ATTR_VEREVOIR_SESSION_ID,
 } from '../otel.js';
@@ -293,6 +294,177 @@ describe('claudeCli.chat — GenAI spans', () => {
     expect(Object.keys(span.attributes)).not.toContain(ATTR_VEREVOIR_PROVIDER_REQUEST_ID);
   });
 
+  describe("costUsdReported (the CLI's own total_cost_usd)", () => {
+    // The enclosing spans block does not reset these, so an earlier test's
+    // unconsumed `claude --version` mock would leak into this call's main
+    // spawn (and the cached version would skip the fallback spawn).
+    beforeEach(() => {
+      mockSpawn.mockReset();
+      resetClaudeCliVersionCacheForTests();
+    });
+
+    const usage = {
+      input_tokens: 10,
+      output_tokens: 5,
+      cache_read_input_tokens: 3,
+      cache_creation_input_tokens: 2,
+    };
+    const run = async (extra: Record<string, unknown>) => {
+      mockSuccessfulCall(streamOutput({ result: 'ok', usage, ...extra }));
+      return (await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] })).usage;
+    };
+
+    // A payload whose total_cost_usd is a raw JSON literal JSON.stringify
+    // cannot produce: `1e999` parses to Infinity.
+    const runRaw = async (rawLiteral: string) => {
+      mockSuccessfulCall(
+        streamOutput({ result: 'ok', usage, total_cost_usd: '__RAW__' }).replace(
+          '"__RAW__"',
+          rawLiteral
+        )
+      );
+      return (await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] })).usage;
+    };
+    const lastSpanAttributes = () => {
+      const spans = exporter.getFinishedSpans();
+      return spans[spans.length - 1].attributes;
+    };
+
+    it('relays a finite total_cost_usd as costUsdReported', async () => {
+      const u = await run({ total_cost_usd: 0.5 });
+      expect(u.costUsdReported).toBe(0.5);
+    });
+
+    it('relays a JSON -0 total_cost_usd as +0 through chat()', async () => {
+      const u = await runRaw('-0');
+      expect(Object.is(u.costUsdReported, 0)).toBe(true);
+    });
+
+    it('leaves token counts unchanged when total_cost_usd is present', async () => {
+      const u = await run({ total_cost_usd: 0.5 });
+      expect(u).toMatchObject({
+        inputTokens: 10,
+        outputTokens: 5,
+        cacheReadInputTokens: 3,
+        cacheCreationInputTokens: 2,
+      });
+    });
+
+    it('omits the costUsdReported key from usage when total_cost_usd is missing', async () => {
+      const u = await run({});
+      expect(Object.keys(u)).not.toContain('costUsdReported');
+    });
+
+    it('omits the invalid-type key from usage when total_cost_usd is missing', async () => {
+      const u = await run({});
+      expect(Object.keys(u)).not.toContain('costUsdReportedInvalidType');
+    });
+
+    it('sets no span invalid-type attribute when total_cost_usd is missing', async () => {
+      await run({});
+      expect(Object.keys(lastSpanAttributes())).not.toContain(
+        ATTR_VEREVOIR_COST_USD_REPORTED_INVALID_TYPE
+      );
+    });
+
+    it('leaves token counts unchanged when total_cost_usd is missing', async () => {
+      const u = await run({});
+      expect(u).toMatchObject({ inputTokens: 10, outputTokens: 5 });
+    });
+
+    it.each([
+      ['a string', '0.5'],
+      ['null', null],
+      ['an object', {}],
+      ['an array', []],
+      ['a boolean', true],
+      ['a negative number', -0.5],
+    ])('gives no cost (no default 0 or NaN) when total_cost_usd is %s', async (_label, bad) => {
+      const u = await run({ total_cost_usd: bad });
+      expect(u.costUsdReported).toBeUndefined();
+    });
+
+    it.each([
+      ['a string', '0.5', 'string'],
+      ['null', null, 'null'],
+      ['an object', {}, 'object'],
+      ['an array', [], 'array'],
+      ['a boolean', true, 'boolean'],
+      ['a negative number', -0.5, 'negative'],
+    ])('records the kind when total_cost_usd is %s', async (_label, bad, type) => {
+      const u = await run({ total_cost_usd: bad });
+      expect(u.costUsdReportedInvalidType).toBe(type);
+    });
+
+    it.each([
+      ['Infinity', '1e999'],
+      ['-Infinity', '-1e999'],
+    ])('gives no cost when total_cost_usd overflows to %s', async (_label, literal) => {
+      const u = await runRaw(literal);
+      expect(u.costUsdReported).toBeUndefined();
+    });
+
+    it.each([
+      ['Infinity', '1e999'],
+      ['-Infinity', '-1e999'],
+    ])('records the kind when total_cost_usd overflows to %s', async (_label, literal) => {
+      const u = await runRaw(literal);
+      expect(u.costUsdReportedInvalidType).toBe('non-finite');
+    });
+
+    it('sets the span invalid type to non-finite when total_cost_usd overflows to Infinity', async () => {
+      await runRaw('1e999');
+      expect(lastSpanAttributes()[ATTR_VEREVOIR_COST_USD_REPORTED_INVALID_TYPE]).toBe('non-finite');
+    });
+
+    it('sets the span invalid type to negative when total_cost_usd is below zero', async () => {
+      await run({ total_cost_usd: -0.5 });
+      expect(lastSpanAttributes()[ATTR_VEREVOIR_COST_USD_REPORTED_INVALID_TYPE]).toBe('negative');
+    });
+
+    it('sets no cost attribute on the span when total_cost_usd overflows to Infinity', async () => {
+      await runRaw('1e999');
+      expect(Object.keys(lastSpanAttributes())).not.toContain(ATTR_VEREVOIR_COST_USD_REPORTED);
+    });
+
+    it('omits the invalid-type key entirely from usage when total_cost_usd is valid', async () => {
+      const u = await run({ total_cost_usd: 0.5 });
+      expect(Object.keys(u)).not.toContain('costUsdReportedInvalidType');
+    });
+
+    it('omits the costUsdReported key from usage when total_cost_usd is malformed', async () => {
+      const u = await run({ total_cost_usd: 'oops' });
+      expect(Object.keys(u)).not.toContain('costUsdReported');
+    });
+
+    it('leaves token counts unchanged when total_cost_usd is malformed', async () => {
+      const u = await run({ total_cost_usd: 'oops' });
+      expect(u).toMatchObject({ inputTokens: 10, outputTokens: 5 });
+    });
+
+    it('sets the span invalid type when total_cost_usd is malformed', async () => {
+      await run({ total_cost_usd: 'oops' });
+      expect(lastSpanAttributes()[ATTR_VEREVOIR_COST_USD_REPORTED_INVALID_TYPE]).toBe('string');
+    });
+
+    it('sets no span cost attribute when total_cost_usd is malformed', async () => {
+      await run({ total_cost_usd: 'oops' });
+      expect(Object.keys(lastSpanAttributes())).not.toContain(ATTR_VEREVOIR_COST_USD_REPORTED);
+    });
+
+    it('sets the span cost attribute to the relayed figure when total_cost_usd is a finite number', async () => {
+      await run({ total_cost_usd: 0.5 });
+      expect(lastSpanAttributes()[ATTR_VEREVOIR_COST_USD_REPORTED]).toBe(0.5);
+    });
+
+    it('sets no span invalid-type attribute when total_cost_usd is a finite number', async () => {
+      await run({ total_cost_usd: 0.5 });
+      expect(Object.keys(lastSpanAttributes())).not.toContain(
+        ATTR_VEREVOIR_COST_USD_REPORTED_INVALID_TYPE
+      );
+    });
+  });
+
   it('marks the span ERROR and rethrows unchanged when the CLI call fails', async () => {
     queueFailingCall('unknown flag', 2);
 
@@ -556,7 +728,103 @@ describe('claudeCli.chat', () => {
       expect(child.GITHUB_TOKEN).toBeUndefined();
       // Nothing beyond ALLOWED_ENV_VARS reached the child at all — not just
       // the eight named above.
-      expect(Object.keys(child).sort()).toEqual([...ALLOWED_ENV_VARS].sort());
+      // CALLER_ENV does not set CLAUDE_CONFIG_DIR, so it is absent here.
+      expect(Object.keys(child).sort()).toEqual([
+        'CLAUDE_CODE_OAUTH_TOKEN',
+        'HOME',
+        'PATH',
+        'TMPDIR',
+      ]);
+    });
+
+    it('passes CLAUDE_CONFIG_DIR to the child when the parent sets it', () => {
+      const child = allowedEnv({ ...CALLER_ENV, CLAUDE_CONFIG_DIR: '/custom/claude' });
+      expect(child.CLAUDE_CONFIG_DIR).toBe('/custom/claude');
+    });
+
+    it('leaves CLAUDE_CONFIG_DIR absent when the parent does not set it', () => {
+      const child = allowedEnv(CALLER_ENV);
+      expect('CLAUDE_CONFIG_DIR' in child).toBe(false);
+    });
+
+    it('allowedEnv adds no names beyond the five approved ones, even with a near-miss set', () => {
+      const child = allowedEnv({
+        ...CALLER_ENV,
+        CLAUDE_CONFIG_DIR: '/custom/claude',
+        CLAUDE_CONFIG: 'near-miss-name',
+      });
+      expect(Object.keys(child).sort()).toEqual([
+        'CLAUDE_CODE_OAUTH_TOKEN',
+        'CLAUDE_CONFIG_DIR',
+        'HOME',
+        'PATH',
+        'TMPDIR',
+      ]);
+    });
+
+    it('ALLOWED_ENV_VARS is exactly the five approved names', () => {
+      expect([...ALLOWED_ENV_VARS].sort()).toEqual([
+        'CLAUDE_CODE_OAUTH_TOKEN',
+        'CLAUDE_CONFIG_DIR',
+        'HOME',
+        'PATH',
+        'TMPDIR',
+      ]);
+    });
+
+    // What IS enforceable about a custom config dir's settings.json (hooks,
+    // MCP servers). Whether the CLI still RUNS those hooks under
+    // --safe-mode is UNVERIFIED here (see the CHANGELOG SECURITY entry);
+    // this pins only that this adapter never drops the flags meant to stop
+    // them when CLAUDE_CONFIG_DIR is set.
+    // Scope: chat()'s one-shot spawn and the `claude --version` probe. The
+    // held-session spawn is covered in session.test.ts.
+    const spawnWithConfigDir = async () => {
+      mockSpawn.mockReset();
+      resetClaudeCliVersionCacheForTests();
+      vi.stubEnv('CLAUDE_CONFIG_DIR', '/custom/claude');
+      try {
+        mockSuccessfulCall(streamOutput({ result: 'ok' }));
+        await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] });
+      } finally {
+        vi.unstubAllEnvs();
+      }
+      // Find each spawn by its argv, not by position: the probe is the call
+      // whose args are exactly ['--version']; the main call is the other one.
+      const isProbe = (call: unknown[]) =>
+        JSON.stringify(call[1]) === JSON.stringify(['--version']);
+      const [, args, options] = mockSpawn.mock.calls.find((c) => !isProbe(c))!;
+      const versionOptions = mockSpawn.mock.calls.find((c) => isProbe(c))![2];
+      return { args: args as string[], options, versionOptions };
+    };
+
+    it('hands the one-shot spawn the custom config dir', async () => {
+      const { options } = await spawnWithConfigDir();
+      expect((options as { env: Record<string, string | undefined> }).env.CLAUDE_CONFIG_DIR).toBe(
+        '/custom/claude'
+      );
+    });
+
+    it('hands the claude --version probe the custom config dir', async () => {
+      const { versionOptions } = await spawnWithConfigDir();
+      expect(
+        (versionOptions as { env: Record<string, string | undefined> }).env.CLAUDE_CONFIG_DIR
+      ).toBe('/custom/claude');
+    });
+
+    it('keeps --strict-mcp-config on the one-shot spawn when CLAUDE_CONFIG_DIR is set', async () => {
+      const { args } = await spawnWithConfigDir();
+      expect(args).toContain('--strict-mcp-config');
+    });
+
+    it('keeps --safe-mode on the one-shot spawn when CLAUDE_CONFIG_DIR is set', async () => {
+      const { args } = await spawnWithConfigDir();
+      expect(args).toContain('--safe-mode');
+    });
+
+    it('keeps --disallowedTools * on the one-shot spawn when CLAUDE_CONFIG_DIR is set', async () => {
+      const { args } = await spawnWithConfigDir();
+      expect(args[args.indexOf('--disallowedTools') + 1]).toBe('*');
     });
 
     it('carries the subscription credential by name — CLAUDE_CODE_OAUTH_TOKEN specifically', () => {
