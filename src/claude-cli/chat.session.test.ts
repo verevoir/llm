@@ -50,6 +50,8 @@ import {
   ATTR_GEN_AI_PROVIDER_NAME,
   ATTR_GEN_AI_USAGE_INPUT_TOKENS,
   ATTR_GEN_AI_USAGE_OUTPUT_TOKENS,
+  ATTR_VEREVOIR_COST_USD_REPORTED,
+  ATTR_VEREVOIR_COST_USD_REPORTED_INVALID_TYPE,
   ATTR_VEREVOIR_SESSION_ID,
 } from '../otel.js';
 
@@ -602,6 +604,178 @@ describe('claudeCli.chatWithToolLoop — GenAI spans', () => {
     const spans2 = exporter.getFinishedSpans();
     expect(spans2).toHaveLength(1);
     expect(spans2[0].attributes[ATTR_VEREVOIR_SESSION_ID]).toBe('sess_live_xyz');
+  });
+
+  it("puts the held session's relayed total cost on the span's cost attribute", async () => {
+    queueVersionSpawn();
+    mockRunSessionTurn.mockResolvedValueOnce(baseSessionTurnResult({ totalCostUsd: 0.5 }));
+
+    await chat({
+      systemPrompt: 'sys',
+      turns: [{ role: 'user', content: 'q' }],
+      session: SESSION_HANDLE,
+    });
+
+    expect(exporter.getFinishedSpans()[0].attributes[ATTR_VEREVOIR_COST_USD_REPORTED]).toBe(0.5);
+  });
+
+  it("puts the kind of a malformed tool-loop cost on the span's invalid-type attribute", async () => {
+    queueVersionSpawn();
+    mockRunSessionTurn.mockResolvedValueOnce(baseSessionTurnResult({ totalCostUsd: -1 }));
+
+    await chatWithToolLoop({
+      systemPrompt: 'sys',
+      turns: [{ role: 'user', content: 'q' }],
+      tools: [ECHO_TOOL],
+      executor: async () => 'x',
+    });
+
+    expect(
+      exporter.getFinishedSpans()[0].attributes[ATTR_VEREVOIR_COST_USD_REPORTED_INVALID_TYPE]
+    ).toBe('negative');
+  });
+
+  it("puts the kind of a malformed tool-loop cost on a HELD session's span invalid-type attribute", async () => {
+    queueVersionSpawn();
+    mockRunSessionTurn.mockResolvedValueOnce(baseSessionTurnResult({ totalCostUsd: Infinity }));
+
+    await chatWithToolLoop({
+      systemPrompt: 'sys',
+      turns: [{ role: 'user', content: 'q' }],
+      tools: [ECHO_TOOL],
+      executor: async () => 'x',
+      session: SESSION_HANDLE,
+    });
+
+    expect(
+      exporter.getFinishedSpans()[0].attributes[ATTR_VEREVOIR_COST_USD_REPORTED_INVALID_TYPE]
+    ).toBe('non-finite');
+  });
+
+  it("puts the kind of a malformed held-session cost on the span's invalid-type attribute", async () => {
+    queueVersionSpawn();
+    mockRunSessionTurn.mockResolvedValueOnce(baseSessionTurnResult({ totalCostUsd: 'oops' }));
+
+    await chat({
+      systemPrompt: 'sys',
+      turns: [{ role: 'user', content: 'q' }],
+      session: SESSION_HANDLE,
+    });
+
+    expect(
+      exporter.getFinishedSpans()[0].attributes[ATTR_VEREVOIR_COST_USD_REPORTED_INVALID_TYPE]
+    ).toBe('string');
+  });
+});
+
+// ── costUsdReported on the held-session path: shapeUsage is shared with the
+// one-shot path, but the held session feeds it `result.totalCostUsd` from
+// runSessionTurn, a different call site (index.ts chatOnSession and
+// chatWithToolLoop), so it needs its own assertions. ─────────────────────
+describe('costUsdReported on a held session', () => {
+  const heldChat = async (totalCostUsd?: unknown) => {
+    queueVersionSpawn();
+    mockRunSessionTurn.mockResolvedValueOnce(
+      baseSessionTurnResult(totalCostUsd === undefined ? {} : { totalCostUsd })
+    );
+    return (
+      await chat({
+        systemPrompt: 'sys',
+        turns: [{ role: 'user', content: 'q' }],
+        session: SESSION_HANDLE,
+      })
+    ).usage;
+  };
+
+  it('chat() relays a finite total cost as costUsdReported', async () => {
+    expect((await heldChat(0.5)).costUsdReported).toBe(0.5);
+  });
+
+  it('chatWithToolLoop() relays a finite total cost as costUsdReported', async () => {
+    queueVersionSpawn();
+    mockRunSessionTurn.mockResolvedValueOnce(baseSessionTurnResult({ totalCostUsd: 0.5 }));
+    const result = await chatWithToolLoop({
+      systemPrompt: 'sys',
+      turns: [{ role: 'user', content: 'q' }],
+      tools: [ECHO_TOOL],
+      executor: async () => 'x',
+    });
+    expect(result.usage.costUsdReported).toBe(0.5);
+  });
+
+  it('omits the costUsdReported key when the turn reports no cost', async () => {
+    expect(Object.keys(await heldChat())).not.toContain('costUsdReported');
+  });
+
+  it('omits the invalid-type key when the turn reports no cost', async () => {
+    expect(Object.keys(await heldChat())).not.toContain('costUsdReportedInvalidType');
+  });
+
+  it('omits the invalid-type key when the cost is valid', async () => {
+    expect(Object.keys(await heldChat(0.5))).not.toContain('costUsdReportedInvalidType');
+  });
+
+  const MALFORMED: [string, unknown, string][] = [
+    ['a string', '0.5', 'string'],
+    ['null', null, 'null'],
+    ['an object', {}, 'object'],
+    ['an array', [], 'array'],
+    ['a boolean', true, 'boolean'],
+    ['a negative number', -0.5, 'negative'],
+    ['Infinity', Infinity, 'non-finite'],
+    ['NaN', NaN, 'non-finite'],
+  ];
+
+  it.each(MALFORMED)('omits the costUsdReported key when the cost is %s', async (_label, bad) => {
+    expect(Object.keys(await heldChat(bad))).not.toContain('costUsdReported');
+  });
+
+  it.each(MALFORMED)('records the kind when the cost is %s', async (_label, bad, kind) => {
+    expect((await heldChat(bad)).costUsdReportedInvalidType).toBe(kind);
+  });
+
+  // chatWithToolLoop() builds its usage at a separate call site from chat()'s
+  // held-session branch (index.ts, `result.totalCostUsd` passed to shapeUsage),
+  // so a drop of the invalid-type field there is caught only by these tests.
+  // With no `session` it runs on a throwaway session; with one, on the held
+  // session — both are asserted.
+  const loopUsage = async (totalCostUsd: unknown, session?: typeof SESSION_HANDLE) => {
+    queueVersionSpawn();
+    mockRunSessionTurn.mockResolvedValueOnce(baseSessionTurnResult({ totalCostUsd }));
+    return (
+      await chatWithToolLoop({
+        systemPrompt: 'sys',
+        turns: [{ role: 'user', content: 'q' }],
+        tools: [ECHO_TOOL],
+        executor: async () => 'x',
+        ...(session && { session }),
+      })
+    ).usage;
+  };
+
+  it.each(MALFORMED)(
+    'chatWithToolLoop() on a throwaway session records the kind when the cost is %s',
+    async (_label, bad, kind) => {
+      expect((await loopUsage(bad)).costUsdReportedInvalidType).toBe(kind);
+    }
+  );
+
+  it.each(MALFORMED)(
+    'chatWithToolLoop() on a held session records the kind when the cost is %s',
+    async (_label, bad, kind) => {
+      expect((await loopUsage(bad, SESSION_HANDLE)).costUsdReportedInvalidType).toBe(kind);
+    }
+  );
+
+  it.each(MALFORMED)(
+    'chatWithToolLoop() omits the costUsdReported key when the cost is %s',
+    async (_label, bad) => {
+      expect(Object.keys(await loopUsage(bad))).not.toContain('costUsdReported');
+    }
+  );
+
+  it('chatWithToolLoop() omits the invalid-type key when the cost is valid', async () => {
+    expect(Object.keys(await loopUsage(0.5))).not.toContain('costUsdReportedInvalidType');
   });
 });
 

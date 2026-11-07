@@ -247,7 +247,7 @@ interface ClaudeCliStreamResultEnvelope {
    * wave 2b's own concern, since only `runSessionTurn` reads it. */
   permission_denials?: unknown[];
   /** Same field, same shape, as index.ts's `ClaudeCliResultEvent.total_cost_usd`. */
-  total_cost_usd?: number;
+  total_cost_usd?: unknown;
 }
 
 const HELD = new Map<string, HeldSession>();

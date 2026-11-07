@@ -36,6 +36,7 @@
  */
 
 import { SpanKind, SpanStatusCode, trace, type Span } from '@opentelemetry/api';
+import type { CostInvalidKind } from './index.js';
 
 // ── GenAI semantic-convention attributes (v1.37.0) — defined locally ───────
 
@@ -92,6 +93,15 @@ export const ATTR_VEREVOIR_SESSION_ID = 'verevoir.llm.session_id';
  * from a price table. */
 export const ATTR_VEREVOIR_COST_USD_REPORTED = 'verevoir.llm.cost_usd_reported';
 
+/** The kind of malformation of a provider cost that was not a finite,
+ * non-negative number: `negative`, `non-finite`, or the type name for a
+ * non-number (`string`, `null`, ...) — never the value itself. Its
+ * presence IS the "this cost was malformed" signal (there is no separate
+ * boolean), so a malformed cost is distinguishable from a missing one;
+ * {@link ATTR_VEREVOIR_COST_USD_REPORTED} is absent in that case. */
+export const ATTR_VEREVOIR_COST_USD_REPORTED_INVALID_TYPE =
+  'verevoir.llm.cost_usd_reported_invalid_type';
+
 const tracer = trace.getTracer('@verevoir/llm');
 
 /** What identifies the call before it's made. */
@@ -122,6 +132,10 @@ export interface GenAISpanOutcome {
    * computed, only ever relayed from the provider's payload when present.
    * See {@link ATTR_VEREVOIR_COST_USD_REPORTED}. */
   costUsdReported?: number;
+  /** The kind of a malformed provider cost (`negative`, `non-finite` or a
+   * type name); see
+   * {@link ATTR_VEREVOIR_COST_USD_REPORTED_INVALID_TYPE}. */
+  costUsdReportedInvalidType?: CostInvalidKind;
 }
 
 /**
@@ -240,4 +254,7 @@ function applyOutcome(span: Span, outcome: GenAISpanOutcome): void {
   set(ATTR_VEREVOIR_SESSION_ID, outcome.sessionId);
   set(ATTR_VEREVOIR_PROVIDER_REQUEST_ID, outcome.providerRequestId);
   set(ATTR_VEREVOIR_COST_USD_REPORTED, outcome.costUsdReported);
+  if (outcome.costUsdReportedInvalidType !== undefined) {
+    set(ATTR_VEREVOIR_COST_USD_REPORTED_INVALID_TYPE, outcome.costUsdReportedInvalidType);
+  }
 }
