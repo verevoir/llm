@@ -140,6 +140,28 @@ back-compat but `@deprecated` — use `createPriceBook` instead. The
 `extraction`) so rollups can break down "spent X on reasoning + Y on extraction"
 natively.
 
+**Prompt caching (`ChatOptions.cache`, Anthropic only).** `TokenUsage` reports
+cache reads (`cacheReadInputTokens`) and cache writes
+(`cacheCreationInputTokens`) separately from plain input, and the price book
+prices each at its own rate. A cache write costs more than plain input and only
+pays back when a later call reads it, so the caller can choose per call:
+
+```ts
+await anthropic.chat({ systemPrompt, turns, cache: 'none' }); // write nothing
+```
+
+- `'default'` (or omitted): the adapter's standard breakpoints with the
+  provider's five-minute lifetime.
+- `'none'`: no `cache_control` anywhere in the request. For a one-off call
+  whose prefix nothing will read again.
+
+It applies to `chat`, `chatWithTools` and every call `chatWithToolLoop` makes.
+Every other adapter accepts the option and ignores it.
+
+When the provider returns the cache-write split by lifetime,
+`cacheCreationEphemeral5mInputTokens` / `cacheCreationEphemeral1hInputTokens`
+carry it and `book.costOf(usage)` prices each part at its own rate.
+
 **`costUsdReported` (claude-cli only).** `@verevoir/llm/claude-cli` relays the
 CLI's own `total_cost_usd` as the optional `TokenUsage.costUsdReported`. It is
 the CLI's own figure: **API-equivalent** on a subscription login, but **billed

@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.37.0] — 2026-11-22
+
+**New `ChatOptions.cache` (`'none' | 'default'`): a caller can now turn prompt caching off for a call.** Acted on by `@verevoir/llm/anthropic` only, on `chat`, `chatWithTools` and every call `chatWithToolLoop` makes.
+
+- **`'default'`, and leaving the option out, change nothing.** The request is the same as before, byte for byte: one breakpoint on the system prompt, plus one on the end of the conversation wherever a growing history is re-sent, with the provider's five-minute default lifetime.
+- **`'none'` sends no `cache_control` anywhere in the request**, neither on the system prompt nor on the conversation, including in the tool loop. For a call whose prefix nothing will read again: a cache write is billed at a premium over plain input, and that only pays back when a later call reads the entry.
+- **There is no longer-lifetime value.** The provider's one-hour lifetime costs more to write and nothing needs it; an option nobody is asking for is surface to maintain. A value outside the two, from an untyped caller, is treated as `'default'`.
+- **Every other adapter accepts the option and ignores it.** They place no cache breakpoints of their own.
+- **`chatWithToolLoop` now sums the five-minute / one-hour cache-write split into its returned `usage`**, as `chat` already did (`cacheCreationEphemeral5mInputTokens` / `cacheCreationEphemeral1hInputTokens`, `undefined` unless the provider reported them). Before, the split reached only the per-iteration `onUsage` hook, so `book.costOf(result.usage)` could not price one-hour writes at their own rate. A caller reading these two fields on the loop's result will now see numbers where it saw `undefined`.
+
 ## [0.36.0] — 2026-11-06
 
 **SECURITY: `claude-cli` now passes `CLAUDE_CONFIG_DIR` through to the child `claude`.** Decided by the operator on 6 Nov 2026. The env allowlist was `PATH`, `HOME`, `TMPDIR`, `CLAUDE_CODE_OAUTH_TOKEN`; it is now those plus `CLAUDE_CONFIG_DIR`. Why: anyone whose Claude login lives under a custom config dir got "Not logged in" on every call, because the filter stripped the variable that says where the login is. It is a path, not a secret.

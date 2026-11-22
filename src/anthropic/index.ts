@@ -162,10 +162,24 @@ const REPORT_PROGRESS_TOOL: ToolDef = {
   },
 };
 
-// One ephemeral breakpoint shape, reused for every cache_control we
-// place. 5-minute TTL (the default) — long enough to span a tool
-// loop's burst of correlated calls.
-const EPHEMERAL_CACHE = { type: 'ephemeral' as const };
+/** The `cache_control` value carried by every breakpoint in one request. */
+type CacheControl = { type: 'ephemeral' };
+
+/**
+ * The breakpoint value for a call's {@link ChatOptions.cache} setting, or
+ * `undefined` when the request carries no breakpoint at all.
+ *
+ * - `'none'` — no breakpoint: the request writes nothing to the cache.
+ * - `'default'` / absent — a breakpoint with no lifetime field, which the
+ *   provider reads as its default five-minute lifetime: long enough to span
+ *   a tool loop's burst of correlated calls.
+ *
+ * Anything else (a value outside the type, from an untyped caller) is
+ * treated as `'default'`. One value serves every breakpoint in a request.
+ */
+function cacheControlFor(cache: ChatOptions['cache']): CacheControl | undefined {
+  return cache === 'none' ? undefined : { type: 'ephemeral' };
+}
 
 type WireMessage = { role: string; content: unknown };
 
@@ -185,21 +199,24 @@ type WireMessage = { role: string; content: unknown };
  * block is the varying current question, so a breakpoint on it would
  * only write a cache entry that never gets read.
  */
-function withConversationCacheBreakpoint(messages: WireMessage[]): WireMessage[] {
+function withConversationCacheBreakpoint(
+  messages: WireMessage[],
+  cacheControl: CacheControl
+): WireMessage[] {
   if (messages.length === 0) return messages;
   const out = messages.slice();
   const last = out[out.length - 1];
   if (typeof last.content === 'string') {
     out[out.length - 1] = {
       ...last,
-      content: [{ type: 'text', text: last.content, cache_control: EPHEMERAL_CACHE }],
+      content: [{ type: 'text', text: last.content, cache_control: cacheControl }],
     };
   } else if (Array.isArray(last.content) && last.content.length > 0) {
     const blocks = last.content;
     out[out.length - 1] = {
       ...last,
       content: blocks.map((block, i) =>
-        i === blocks.length - 1 ? { ...(block as object), cache_control: EPHEMERAL_CACHE } : block
+        i === blocks.length - 1 ? { ...(block as object), cache_control: cacheControl } : block
       ),
     };
   }
@@ -212,6 +229,7 @@ function buildRequest({
   turns,
   tools,
   cacheConversation = false,
+  cache,
   oauth = false,
   model,
   maxTokens,
@@ -225,6 +243,11 @@ function buildRequest({
    * Default false — single-shot calls only benefit from the system /
    * tools breakpoint below. */
   cacheConversation?: boolean;
+  /** Whether the request carries cache breakpoints — see
+   * {@link ChatOptions.cache} and {@link cacheControlFor}.
+   * `'none'` wins over `cacheConversation`: no breakpoint is placed
+   * anywhere. */
+  cache?: ChatOptions['cache'];
   /** When true the request authenticates with a subscription OAuth token, which
    * Anthropic accepts only for Claude-Code-shaped requests — so the Claude-Code
    * identity is prepended as the first system block. */
@@ -243,14 +266,20 @@ function buildRequest({
   const messages: WireMessage[] = turns.map((t) => ({ role: t.role, content: t.content }));
   // OAuth path: the Claude-Code identity leads as the first system block; the
   // cache breakpoint stays on the prompt block so identity + prompt cache together.
-  const promptBlock = { type: 'text' as const, text: systemPrompt, cache_control: EPHEMERAL_CACHE };
+  const cacheControl = cacheControlFor(cache);
+  const promptBlock = cacheControl
+    ? { type: 'text' as const, text: systemPrompt, cache_control: cacheControl }
+    : { type: 'text' as const, text: systemPrompt };
   const base: Record<string, unknown> = {
     model: model ?? models[modelClass],
     max_tokens: maxTokens ?? MAX_TOKENS,
     system: oauth
       ? [{ type: 'text' as const, text: oauthSystemIdentity() }, promptBlock]
       : [promptBlock],
-    messages: cacheConversation ? withConversationCacheBreakpoint(messages) : messages,
+    messages:
+      cacheConversation && cacheControl
+        ? withConversationCacheBreakpoint(messages, cacheControl)
+        : messages,
   };
   if (tools && tools.length > 0) {
     base.tools = tools;
@@ -478,6 +507,40 @@ function shapeUsage(
   };
 }
 
+/** Running token counts across the underlying calls of one public call. The
+ * 5m/1h cache-write split stays `undefined` until a call actually reports
+ * it — see {@link TokenUsage.cacheCreationEphemeral5mInputTokens}'s
+ * "undefined when absent" contract: a sum defaulting to 0 would claim
+ * "reported zero" for calls that never saw the field. */
+type UsageCounts = StreamedResult['rawUsage'];
+
+function emptyUsageCounts(): UsageCounts {
+  return {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheCreationInputTokens: 0,
+    cacheReadInputTokens: 0,
+    cacheCreationEphemeral5mInputTokens: undefined,
+    cacheCreationEphemeral1hInputTokens: undefined,
+  };
+}
+
+/** Add one call's counts into `total`, in place. */
+function addUsageCounts(total: UsageCounts, call: UsageCounts): void {
+  total.inputTokens += call.inputTokens;
+  total.outputTokens += call.outputTokens;
+  total.cacheCreationInputTokens += call.cacheCreationInputTokens;
+  total.cacheReadInputTokens += call.cacheReadInputTokens;
+  if (call.cacheCreationEphemeral5mInputTokens !== undefined) {
+    total.cacheCreationEphemeral5mInputTokens =
+      (total.cacheCreationEphemeral5mInputTokens ?? 0) + call.cacheCreationEphemeral5mInputTokens;
+  }
+  if (call.cacheCreationEphemeral1hInputTokens !== undefined) {
+    total.cacheCreationEphemeral1hInputTokens =
+      (total.cacheCreationEphemeral1hInputTokens ?? 0) + call.cacheCreationEphemeral1hInputTokens;
+  }
+}
+
 /** Collapse the routes seen across an aggregated result's underlying calls to
  * one {@link CredentialRoute} — the single route if every call agreed, else
  * `'mixed'`, reported rather than picking one arbitrarily and hiding the
@@ -529,19 +592,7 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
   // the continuation calls; onUsage fires per call.
   const MAX_PROGRESS_CONTINUATIONS = 4;
   let messages: Turn[] = [...options.turns];
-  const aggregate = {
-    inputTokens: 0,
-    outputTokens: 0,
-    cacheCreationInputTokens: 0,
-    cacheReadInputTokens: 0,
-    // Left undefined unless at least one attempt actually reports a value —
-    // see TokenUsage.cacheCreationEphemeral5mInputTokens's own "undefined
-    // when absent" contract. A plain running sum defaulting to 0 would
-    // report 0 (a claim of "reported zero") for a call that never saw
-    // this field at all.
-    cacheCreationEphemeral5mInputTokens: undefined as number | undefined,
-    cacheCreationEphemeral1hInputTokens: undefined as number | undefined,
-  };
+  const aggregate = emptyUsageCounts();
   const routesSeen: CredentialRoute[] = [];
 
   for (let attempt = 0; attempt <= MAX_PROGRESS_CONTINUATIONS; attempt++) {
@@ -555,6 +606,7 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
           tools: options.onProgress ? [REPORT_PROGRESS_TOOL] : undefined,
           // A continuation re-sends the growing history; cache its prefix.
           cacheConversation: attempt > 0,
+          cache: options.cache,
           oauth,
           model: options.model,
           maxTokens: options.maxTokens,
@@ -564,20 +616,7 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
     );
     routesSeen.push(streamed.route);
 
-    aggregate.inputTokens += streamed.rawUsage.inputTokens;
-    aggregate.outputTokens += streamed.rawUsage.outputTokens;
-    aggregate.cacheCreationInputTokens += streamed.rawUsage.cacheCreationInputTokens;
-    aggregate.cacheReadInputTokens += streamed.rawUsage.cacheReadInputTokens;
-    if (streamed.rawUsage.cacheCreationEphemeral5mInputTokens !== undefined) {
-      aggregate.cacheCreationEphemeral5mInputTokens =
-        (aggregate.cacheCreationEphemeral5mInputTokens ?? 0) +
-        streamed.rawUsage.cacheCreationEphemeral5mInputTokens;
-    }
-    if (streamed.rawUsage.cacheCreationEphemeral1hInputTokens !== undefined) {
-      aggregate.cacheCreationEphemeral1hInputTokens =
-        (aggregate.cacheCreationEphemeral1hInputTokens ?? 0) +
-        streamed.rawUsage.cacheCreationEphemeral1hInputTokens;
-    }
+    addUsageCounts(aggregate, streamed.rawUsage);
     await fireUsageHook(
       options.onUsage,
       shapeUsage(streamed.rawUsage, modelClass, streamed.route, modelId, streamed.responseId),
@@ -668,6 +707,7 @@ export async function chatWithTools(options: ChatWithToolsOptions): Promise<Chat
         systemPrompt: options.systemPrompt,
         turns: options.turns,
         tools: augmentedTools,
+        cache: options.cache,
         oauth,
         model: options.model,
         maxTokens: options.maxTokens,
@@ -738,12 +778,7 @@ export async function chatWithToolLoop(
   // Counts only — the full TokenUsage (provider/model/direction/route) is
   // built at each return site via shapeUsage, once the routes every
   // underlying call actually used are known.
-  const aggregateUsage = {
-    inputTokens: 0,
-    outputTokens: 0,
-    cacheCreationInputTokens: 0,
-    cacheReadInputTokens: 0,
-  };
+  const aggregateUsage = emptyUsageCounts();
 
   let iteration = 0;
   while (iteration < maxIterations) {
@@ -768,6 +803,7 @@ export async function chatWithToolLoop(
           // the last message lets the next iteration read this prefix
           // from cache instead of reprocessing it.
           cacheConversation: true,
+          cache: options.cache,
           oauth,
           model: options.model,
           maxTokens: options.maxTokens,
@@ -780,10 +816,7 @@ export async function chatWithToolLoop(
 
     // Per-iteration usage hook + aggregate tally.
     const iterUsage = shapeUsage(streamed.rawUsage, modelClass, streamed.route, modelId);
-    aggregateUsage.inputTokens += iterUsage.inputTokens;
-    aggregateUsage.outputTokens += iterUsage.outputTokens;
-    aggregateUsage.cacheCreationInputTokens += iterUsage.cacheCreationInputTokens;
-    aggregateUsage.cacheReadInputTokens += iterUsage.cacheReadInputTokens;
+    addUsageCounts(aggregateUsage, streamed.rawUsage);
     await fireUsageHook(options.onUsage, iterUsage, 'anthropic.chatWithToolLoop');
 
     if (options.onIteration) {
@@ -875,6 +908,7 @@ export async function chatWithToolLoop(
           turns: messages,
           tools: [], // no tools → the model must answer in text
           cacheConversation: true,
+          cache: options.cache,
           oauth,
           model: options.model,
           maxTokens: options.maxTokens,
@@ -884,10 +918,7 @@ export async function chatWithToolLoop(
     );
     routesSeen.push(finalStreamed.route);
     const finalUsage = shapeUsage(finalStreamed.rawUsage, modelClass, finalStreamed.route, modelId);
-    aggregateUsage.inputTokens += finalUsage.inputTokens;
-    aggregateUsage.outputTokens += finalUsage.outputTokens;
-    aggregateUsage.cacheCreationInputTokens += finalUsage.cacheCreationInputTokens;
-    aggregateUsage.cacheReadInputTokens += finalUsage.cacheReadInputTokens;
+    addUsageCounts(aggregateUsage, finalStreamed.rawUsage);
     await fireUsageHook(options.onUsage, finalUsage, 'anthropic.chatWithToolLoop');
     return {
       text: finalStreamed.text,

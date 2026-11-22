@@ -138,6 +138,18 @@ unmatched model as `unpriced`, never `0`. The older `estimateCostUSD`,
 `RatesTable` / `RateTuple`, `catalogEntryFor`, and `uncoveredModels` are kept
 for back-compat but `@deprecated` — new code should use `createPriceBook`.
 
+`ChatOptions.cache` (`'none' | 'default'`) controls prompt
+caching per call. Only `@verevoir/llm/anthropic` acts on it (`chat`,
+`chatWithTools`, every `chatWithToolLoop` call); every other adapter accepts
+and ignores it. `'default'` / omitted: the adapter's standard cache breakpoints
+with the provider's five-minute lifetime. `'none'`: no `cache_control` anywhere
+in the request — for a one-off call whose prefix nothing reads again, so it
+pays no cache-write premium. Any other value is treated as `'default'`.
+`TokenUsage` reports
+`cacheReadInputTokens` / `cacheCreationInputTokens`, plus
+`cacheCreationEphemeral5mInputTokens` / `cacheCreationEphemeral1hInputTokens`
+when the provider returns the split; `book.costOf` prices each at its own rate.
+
 The `direction` field carries the model-class semantic (`reasoning` /
 `drafting` / `extraction`) so per-conversation / per-project rollups can break
 down "spent X on reasoning + Y on extraction" natively.

@@ -348,6 +348,28 @@ export interface ChatOptions {
    */
   maxTokens?: number;
   /**
+   * Optional control over provider prompt caching for this call.
+   *
+   * - `'default'` (and absent) — the adapter's standard cache breakpoints
+   *   with the provider's default lifetime (five minutes on Anthropic).
+   * - `'none'` — no cache breakpoint anywhere in the request, so the call
+   *   writes nothing to the cache (and, having no breakpoint, reads nothing
+   *   from it). For a call whose prefix nothing will read again: a cache
+   *   write is billed at a premium over plain input, and that premium only
+   *   pays back when a later call reads the entry.
+   *
+   * There are deliberately only these two: a longer cache lifetime costs
+   * more to write and nothing needs it, and an option nobody asks for is
+   * surface to maintain. Any other value, from an untyped caller, is treated
+   * as `'default'`.
+   *
+   * Only `@verevoir/llm/anthropic` acts on this, on `chat`, `chatWithTools`
+   * and every call `chatWithToolLoop` makes. Every other adapter accepts and
+   * ignores it: they place no cache breakpoints of their own, so there is
+   * nothing for it to change.
+   */
+  cache?: 'none' | 'default';
+  /**
    * Optional EXACT model id, bypassing `modelClass` resolution entirely.
    *
    * `modelClass` is deliberately class-based — a family-level semantic
