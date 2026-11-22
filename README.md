@@ -148,21 +148,19 @@ pays back when a later call reads it, so the caller can choose per call:
 
 ```ts
 await anthropic.chat({ systemPrompt, turns, cache: 'none' }); // write nothing
-await anthropic.chat({ systemPrompt, turns, cache: 'extended' }); // one-hour lifetime
 ```
 
 - `'default'` (or omitted): the adapter's standard breakpoints with the
   provider's five-minute lifetime.
 - `'none'`: no `cache_control` anywhere in the request. For a one-off call
   whose prefix nothing will read again.
-- `'extended'`: the same breakpoints, each with the one-hour lifetime. For a
-  prefix whose next reader arrives more than five minutes later. One-hour
-  writes are billed at a higher rate; when the provider returns the split,
-  `cacheCreationEphemeral5mInputTokens` / `cacheCreationEphemeral1hInputTokens`
-  carry it and `book.costOf(usage)` prices each part at its own rate.
 
 It applies to `chat`, `chatWithTools` and every call `chatWithToolLoop` makes.
 Every other adapter accepts the option and ignores it.
+
+When the provider returns the cache-write split by lifetime,
+`cacheCreationEphemeral5mInputTokens` / `cacheCreationEphemeral1hInputTokens`
+carry it and `book.costOf(usage)` prices each part at its own rate.
 
 **`costUsdReported` (claude-cli only).** `@verevoir/llm/claude-cli` relays the
 CLI's own `total_cost_usd` as the optional `TokenUsage.costUsdReported`. It is

@@ -163,27 +163,22 @@ const REPORT_PROGRESS_TOOL: ToolDef = {
 };
 
 /** The `cache_control` value carried by every breakpoint in one request. */
-type CacheControl = { type: 'ephemeral'; ttl?: '1h' };
+type CacheControl = { type: 'ephemeral' };
 
 /**
  * The breakpoint value for a call's {@link ChatOptions.cache} setting, or
  * `undefined` when the request carries no breakpoint at all.
  *
  * - `'none'` — no breakpoint: the request writes nothing to the cache.
- * - `'extended'` — the one-hour lifetime. `ttl` is a plain field of the
- *   stable Messages API's `cache_control` (`CacheControlEphemeral.ttl` in the
- *   SDK's `resources/messages` types), so it needs no beta header.
- * - `'default'` / absent — no `ttl`, which the provider reads as its default
- *   five-minute lifetime: long enough to span a tool loop's burst of
- *   correlated calls.
+ * - `'default'` / absent — a breakpoint with no lifetime field, which the
+ *   provider reads as its default five-minute lifetime: long enough to span
+ *   a tool loop's burst of correlated calls.
  *
- * One value serves every breakpoint in a request, so lifetimes are never
- * mixed within it.
+ * Anything else (a value outside the type, from an untyped caller) is
+ * treated as `'default'`. One value serves every breakpoint in a request.
  */
 function cacheControlFor(cache: ChatOptions['cache']): CacheControl | undefined {
-  if (cache === 'none') return undefined;
-  if (cache === 'extended') return { type: 'ephemeral', ttl: '1h' };
-  return { type: 'ephemeral' };
+  return cache === 'none' ? undefined : { type: 'ephemeral' };
 }
 
 type WireMessage = { role: string; content: unknown };
@@ -248,8 +243,8 @@ function buildRequest({
    * Default false — single-shot calls only benefit from the system /
    * tools breakpoint below. */
   cacheConversation?: boolean;
-  /** Whether the request carries cache breakpoints, and with which
-   * lifetime — see {@link ChatOptions.cache} and {@link cacheControlFor}.
+  /** Whether the request carries cache breakpoints — see
+   * {@link ChatOptions.cache} and {@link cacheControlFor}.
    * `'none'` wins over `cacheConversation`: no breakpoint is placed
    * anywhere. */
   cache?: ChatOptions['cache'];

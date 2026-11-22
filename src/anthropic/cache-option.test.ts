@@ -18,7 +18,7 @@ import { chat, chatWithToolLoop, chatWithTools, models } from './index.js';
 import type { ChatOptions, TokenUsage, ToolDef } from '../index.js';
 
 type CacheOption = ChatOptions['cache'];
-type CacheControl = { type: 'ephemeral'; ttl?: '1h' };
+type CacheControl = { type: 'ephemeral' };
 type Request = Record<string, unknown>;
 
 interface FakeBlock {
@@ -206,12 +206,19 @@ describe('anthropic ChatOptions.cache', () => {
   it.each<[string, CacheOption]>([
     ['absent', undefined],
     ["'default'", 'default'],
+    // Outside the type: what an untyped caller could still pass.
+    ["an unknown value ('extended', untyped)", 'extended' as unknown as CacheOption],
   ])(
-    'cache %s sends the default-lifetime breakpoints, with no ttl, from every entry point',
+    'cache %s sends the default breakpoints, with no lifetime field, from every entry point',
     async (_label, cache) => {
       const requests = await sendEveryRequest(cache);
 
       expectRequestsToBe(requests, { type: 'ephemeral' });
+      for (const request of requests) {
+        for (const control of cacheControlsIn(request)) {
+          expect(control).toStrictEqual({ type: 'ephemeral' });
+        }
+      }
       // One on the system prompt everywhere; one more on the conversation
       // wherever a growing history is re-sent.
       expect(requests.map((r) => cacheControlsIn(r).length)).toEqual([1, 2, 1, 2, 2, 2]);
@@ -234,20 +241,8 @@ describe('anthropic ChatOptions.cache', () => {
     expect(requests[index]).toStrictEqual(expectedRequests(undefined, requests[0].tools)[index]);
   });
 
-  it("cache 'extended' puts ttl '1h' on every breakpoint the default places, and no others", async () => {
-    const byDefault = await sendEveryRequest('default');
-    const extended = await sendEveryRequest('extended');
-
-    expectRequestsToBe(extended, { type: 'ephemeral', ttl: '1h' });
-    for (const [i, request] of extended.entries()) {
-      const controls = cacheControlsIn(request);
-      expect(controls).toHaveLength(cacheControlsIn(byDefault[i]).length);
-      for (const control of controls) expect(control).toEqual({ type: 'ephemeral', ttl: '1h' });
-    }
-  });
-
-  it("cache 'extended' sends no beta header or client option: the request alone asks for it", async () => {
-    await sendEveryRequest('extended');
+  it('sends no beta header or per-request option for any cache setting', async () => {
+    await sendEveryRequest('default');
 
     // `messages.stream(request)` — one argument, no per-request options.
     for (const call of mockStream.mock.calls) expect(call).toHaveLength(1);
@@ -288,7 +283,6 @@ describe('anthropic ChatOptions.cache — usage accounting', () => {
           systemPrompt: SYSTEM,
           apiKey: 'sk-test',
           turns: [{ role: 'user', content: 'hi' }],
-          cache: 'extended',
         });
         return reply.usage;
       },
@@ -303,7 +297,6 @@ describe('anthropic ChatOptions.cache — usage accounting', () => {
           apiKey: 'sk-test',
           turns: [{ role: 'user', content: 'hi' }],
           tools: [NOOP],
-          cache: 'extended',
         });
         return reply.usage;
       },
@@ -321,7 +314,6 @@ describe('anthropic ChatOptions.cache — usage accounting', () => {
           turns: [{ role: 'user', content: 'go' }],
           tools: [NOOP],
           executor: async () => 'ok',
-          cache: 'extended',
         });
         return reply.usage;
       },
@@ -340,7 +332,6 @@ describe('anthropic ChatOptions.cache — usage accounting', () => {
           tools: [NOOP],
           executor: async () => 'ok',
           maxIterations: 1,
-          cache: 'extended',
         });
         return reply.usage;
       },

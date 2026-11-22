@@ -357,19 +357,18 @@ export interface ChatOptions {
    *   from it). For a call whose prefix nothing will read again: a cache
    *   write is billed at a premium over plain input, and that premium only
    *   pays back when a later call reads the entry.
-   * - `'extended'` — the same breakpoints as `'default'`, each with the
-   *   provider's one-hour lifetime. For a prefix whose next reader arrives
-   *   more than five minutes later. One-hour writes are billed at a higher
-   *   rate than five-minute ones; {@link TokenUsage}'s
-   *   `cacheCreationEphemeral1hInputTokens` reports them when the provider
-   *   returns the split.
+   *
+   * There are deliberately only these two: a longer cache lifetime costs
+   * more to write and nothing needs it, and an option nobody asks for is
+   * surface to maintain. Any other value, from an untyped caller, is treated
+   * as `'default'`.
    *
    * Only `@verevoir/llm/anthropic` acts on this, on `chat`, `chatWithTools`
    * and every call `chatWithToolLoop` makes. Every other adapter accepts and
    * ignores it: they place no cache breakpoints of their own, so there is
    * nothing for it to change.
    */
-  cache?: 'none' | 'default' | 'extended';
+  cache?: 'none' | 'default';
   /**
    * Optional EXACT model id, bypassing `modelClass` resolution entirely.
    *
