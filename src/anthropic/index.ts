@@ -14,12 +14,13 @@
  *
  * The calls themselves (request building, cache breakpoints, streaming,
  * retries, the tool loop) are implemented in `./adapter.js`, which is internal.
- * This file is the direct-API route over it: it supplies the client and the
- * credential rules from `./client.js`.
+ * This file is the direct-API route over it: it supplies the client, the
+ * credential rules and the subscription-token system identity from
+ * `./client.js`, which the shared implementation never imports.
  */
 
 import * as adapter from './adapter.js';
-import { isAuthError, noteOAuthRejected, resolveClient } from './client.js';
+import { isAuthError, noteOAuthRejected, oauthSystemIdentity, resolveClient } from './client.js';
 import { PROVIDER, CATALOG, CONNECTION } from './catalog.js';
 import {
   type ChatOptions,
@@ -77,14 +78,17 @@ registerProviderConnection(CONNECTION);
 
 // Credential resolution, client construction, and the OAuth→API-key fallback live
 // in ./client.js (internal — off the public surface): `resolveClient`,
-// `isAuthError` and `noteOAuthRejected` (imported above), plus
+// `isAuthError`, `noteOAuthRejected` and `oauthSystemIdentity` (imported above), plus
 // `resolveAnthropicAuth` + the reset seam the co-located tests import. The
 // mutable client/latch state is private to that module.
 
 /**
  * The direct-API transport: the client `./client.js` resolves, reported as
  * `'subscription-oauth'` or `'api-key'`, with a one-time, session-wide
- * OAuth→API-key fallback on an authentication error. The subscription-OAuth
+ * OAuth→API-key fallback on an authentication error. A request on the
+ * subscription token carries the Claude-Code identity as its first system
+ * block, which Anthropic requires of that credential; a request on an API key
+ * carries nothing extra. The subscription-OAuth
  * path leans on undocumented headers + an identity gate that can change; rather
  * than hard-fail every call when they do, a 401 falls back to the metered key —
  * but LOUDLY (see {@link noteOAuthRejected}), never silently resuming the spend
@@ -94,12 +98,20 @@ registerProviderConnection(CONNECTION);
 const transport: adapter.AnthropicTransport = {
   provider: PROVIDER,
   resolveClient(perCallApiKey) {
-    const resolved = resolveClient(perCallApiKey);
-    return { ...resolved, route: resolved.oauth ? 'subscription-oauth' : 'api-key' };
+    const { client, oauth } = resolveClient(perCallApiKey);
+    return { client, route: oauth ? 'subscription-oauth' : 'api-key' };
+  },
+  systemPrefix(resolved) {
+    return resolved.route === 'subscription-oauth'
+      ? [{ type: 'text', text: oauthSystemIdentity() }]
+      : [];
   },
   switchCredentialAfter(failed, perCallApiKey, err) {
     const canFallBack =
-      failed.oauth && !perCallApiKey && isAuthError(err) && !!process.env.ANTHROPIC_API_KEY?.trim();
+      failed.route === 'subscription-oauth' &&
+      !perCallApiKey &&
+      isAuthError(err) &&
+      !!process.env.ANTHROPIC_API_KEY?.trim();
     if (canFallBack) noteOAuthRejected(err); // the next resolve is the metered-key client
     return canFallBack;
   },

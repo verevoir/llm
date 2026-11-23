@@ -20,8 +20,9 @@ function specifiers(source: string): string[] {
   return patterns.flatMap((p) => [...source.matchAll(p)].map((m) => m[1]));
 }
 
-/** Every package named anywhere in the module graph under `entry`. */
-function packagesReachedFrom(entry: string): Set<string> {
+/** The module graph under `entry`: every source file in it, relative to `src`,
+ * and every package named anywhere in it. */
+function graphFrom(entry: string): { modules: Set<string>; packages: Set<string> } {
   const packages = new Set<string>();
   const seen = new Set<string>();
   const queue = [join(SRC_DIR, entry)];
@@ -34,8 +35,14 @@ function packagesReachedFrom(entry: string): Set<string> {
       else packages.add(spec);
     }
   }
-  return packages;
+  return { modules: new Set([...seen].map((file) => relative(SRC_DIR, file))), packages };
 }
+
+/** Every package named anywhere in the module graph under `entry`. */
+const packagesReachedFrom = (entry: string) => graphFrom(entry).packages;
+
+/** Every source file in the module graph under `entry`, relative to `src`. */
+const modulesReachedFrom = (entry: string) => graphFrom(entry).modules;
 
 const reachesVertexSdk = (entry: string) =>
   [...packagesReachedFrom(entry)].some((p) => p === VERTEX_SDK || p.startsWith(`${VERTEX_SDK}/`));
@@ -77,5 +84,31 @@ describe('the Vertex SDK is imported by the vertex subpath only', () => {
       )
       .map((file) => relative(SRC_DIR, file));
     expect(naming).toEqual([join('vertex', 'client.ts')]);
+  });
+});
+
+// The direct route's client module holds that route's credential rules, its
+// SDK client and its fallback state. The shared implementation and the Vertex
+// route have no business with any of it, so neither may reach the module —
+// by a type-only import either.
+describe("the direct route's client module is reached by the direct route only", () => {
+  const DIRECT_CLIENT = join('anthropic', 'client.ts');
+  const SHARED_ADAPTER = join('anthropic', 'adapter.ts');
+
+  it('the scan sees the graph (it must never pass vacuously)', () => {
+    expect(existsSync(join(SRC_DIR, DIRECT_CLIENT))).toBe(true);
+    // The direct route does reach its own client module…
+    expect(modulesReachedFrom(join('anthropic', 'index.ts'))).toContain(DIRECT_CLIENT);
+    // …and the walks below do go through the shared implementation.
+    expect(modulesReachedFrom(SHARED_ADAPTER)).toContain(join('anthropic', 'catalog.ts'));
+    expect(modulesReachedFrom(join('vertex', 'index.ts'))).toContain(SHARED_ADAPTER);
+  });
+
+  it('the shared Anthropic implementation does not reach it', () => {
+    expect(modulesReachedFrom(SHARED_ADAPTER)).not.toContain(DIRECT_CLIENT);
+  });
+
+  it('the vertex subpath does not reach it', () => {
+    expect(modulesReachedFrom(join('vertex', 'index.ts'))).not.toContain(DIRECT_CLIENT);
   });
 });

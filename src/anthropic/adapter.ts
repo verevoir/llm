@@ -6,14 +6,15 @@
  * the call is reported as) and exports the three calls bound to it:
  * `./index.ts` for the direct API, `../vertex/index.ts` for Vertex AI.
  *
- * Nothing here constructs a client or reads a credential; the SDK is imported
- * for its types only.
+ * Nothing here constructs a client or reads a credential, and nothing here
+ * knows how a route authenticated: whatever a route adds to a request because
+ * of its credential comes from its transport. The SDK is imported for its types
+ * only, and no route's client module is imported at all.
  */
 
 import type Anthropic from '@anthropic-ai/sdk';
 import { fireUsageHook } from '../audit-hook.js';
 import { withGenAISpan } from '../otel.js';
-import { oauthSystemIdentity } from './client.js';
 import { CATALOG } from './catalog.js';
 import {
   type ChatOptions,
@@ -49,14 +50,14 @@ export const models: Readonly<Record<ModelClass, string>> = Object.fromEntries(
 /** The part of an SDK client this implementation drives. */
 export type MessagesClient = { messages: Pick<Anthropic['messages'], 'stream'> };
 
-/** The client for one call, and how the call is shaped and reported. */
+/** A text block in a request's `system` array. */
+export type SystemTextBlock = { type: 'text'; text: string };
+
+/** The client for one call, and what the call is reported as. */
 export interface ResolvedClient {
   client: MessagesClient;
   /** The credential mechanism, reported as {@link TokenUsage.route}. */
   route: CredentialRoute;
-  /** True when the request must carry the Claude-Code system identity — the
-   * direct route's subscription OAuth token. False on every other route. */
-  oauth: boolean;
 }
 
 /** How one route reaches the Messages API. */
@@ -66,6 +67,10 @@ export interface AnthropicTransport {
   /** The client for a call. Throws a plain error when the route is not
    * configured — before any request is built or sent. */
   resolveClient(perCallApiKey: string | null): ResolvedClient;
+  /** The system blocks a request made on `resolved` must carry ahead of the
+   * caller's system prompt, because of how that client authenticates. Asked
+   * each time a request is built. A transport without one adds none. */
+  systemPrefix?(resolved: ResolvedClient): readonly SystemTextBlock[];
   /** Asked once, when a call has failed for good. Returning true means the
    * transport has switched credential, and the call is made once more with a
    * freshly resolved client. A transport without one never re-resolves. */
@@ -85,23 +90,25 @@ export interface AnthropicTransport {
  * When the call fails for good, a transport that has a second credential to
  * move to ({@link AnthropicTransport.switchCredentialAfter} — the direct
  * route's OAuth→API-key fallback, in `./index.ts`) is asked once whether to
- * switch; if it does, the call is made once more. `makeRequest(oauth)` rebuilds
- * the payload for the client actually used (the OAuth path carries the
- * Claude-Code identity system block; no other path does), so the second request
- * is correctly shaped — not the first one replayed against another credential.
+ * switch; if it does, the call is made once more. `makeRequest(systemPrefix)`
+ * rebuilds the payload for the client actually used, with the system blocks the
+ * transport asks for on that client ({@link AnthropicTransport.systemPrefix}),
+ * so the second request is correctly shaped — not the first one replayed
+ * against another credential.
  */
 async function streamedCall(
   transport: AnthropicTransport,
   perCallApiKey: string | null,
-  makeRequest: (oauth: boolean) => Record<string, unknown>,
+  makeRequest: (systemPrefix: readonly SystemTextBlock[]) => Record<string, unknown>,
   onProgress?: (info: ProgressInfo) => Promise<void>,
   onRetry?: (info: ChatRetryInfo) => Promise<void>
 ): Promise<StreamedResult & { route: CredentialRoute }> {
   const { provider } = transport;
+  const prefixFor = (resolved: ResolvedClient) => transport.systemPrefix?.(resolved) ?? [];
   const first = transport.resolveClient(perCallApiKey);
   try {
     const result = await callWithRetries(
-      () => callStreamed(provider, first.client, makeRequest(first.oauth), onProgress),
+      () => callStreamed(provider, first.client, makeRequest(prefixFor(first)), onProgress),
       onRetry
     );
     return { ...result, route: first.route };
@@ -109,7 +116,7 @@ async function streamedCall(
     if (!transport.switchCredentialAfter?.(first, perCallApiKey, err)) throw err;
     const fallback = transport.resolveClient(perCallApiKey);
     const result = await callWithRetries(
-      () => callStreamed(provider, fallback.client, makeRequest(fallback.oauth), onProgress),
+      () => callStreamed(provider, fallback.client, makeRequest(prefixFor(fallback)), onProgress),
       onRetry
     );
     return { ...result, route: fallback.route };
@@ -221,7 +228,7 @@ function buildRequest({
   tools,
   cacheConversation = false,
   cache,
-  oauth = false,
+  systemPrefix = [],
   model,
   maxTokens,
 }: {
@@ -240,10 +247,9 @@ function buildRequest({
    * anywhere. `'prefix'` wins over it too: the system prompt keeps its
    * breakpoint and the conversation never gets one. */
   cache?: ChatOptions['cache'];
-  /** When true the request authenticates with a subscription OAuth token, which
-   * Anthropic accepts only for Claude-Code-shaped requests — so the Claude-Code
-   * identity is prepended as the first system block. */
-  oauth?: boolean;
+  /** System blocks sent ahead of the prompt block, as the transport supplied
+   * them — see {@link AnthropicTransport.systemPrefix}. Default none. */
+  systemPrefix?: readonly SystemTextBlock[];
   /** Exact model id to send, overriding the catalog's `models[modelClass]`
    * resolution — see {@link ChatOptions.model}'s own doc comment for why
    * this exists and when to reach for it. `undefined` uses the catalog. */
@@ -256,8 +262,8 @@ function buildRequest({
   // the (single) system block caches the tools + system prefix
   // together — no separate tool breakpoint needed.
   const messages: WireMessage[] = turns.map((t) => ({ role: t.role, content: t.content }));
-  // OAuth path: the Claude-Code identity leads as the first system block; the
-  // cache breakpoint stays on the prompt block so identity + prompt cache together.
+  // Any transport-supplied blocks lead the system array; the cache breakpoint
+  // stays on the prompt block, so the prefix and the prompt cache together.
   const cacheControl = cacheControlFor(cache);
   const promptBlock = cacheControl
     ? { type: 'text' as const, text: systemPrompt, cache_control: cacheControl }
@@ -265,9 +271,7 @@ function buildRequest({
   const base: Record<string, unknown> = {
     model: model ?? models[modelClass],
     max_tokens: maxTokens ?? MAX_TOKENS,
-    system: oauth
-      ? [{ type: 'text' as const, text: oauthSystemIdentity() }, promptBlock]
-      : [promptBlock],
+    system: [...systemPrefix, promptBlock],
     messages:
       cacheConversation && cacheControl && cache !== 'prefix'
         ? withConversationCacheBreakpoint(messages, cacheControl)
@@ -597,7 +601,7 @@ export async function chat(
     const streamed = await streamedCall(
       transport,
       options.apiKey ?? null,
-      (oauth) =>
+      (systemPrefix) =>
         buildRequest({
           modelClass,
           systemPrompt: options.systemPrompt,
@@ -606,7 +610,7 @@ export async function chat(
           // A continuation re-sends the growing history; cache its prefix.
           cacheConversation: attempt > 0,
           cache: options.cache,
-          oauth,
+          systemPrefix,
           model: options.model,
           maxTokens: options.maxTokens,
         }),
@@ -713,14 +717,14 @@ export async function chatWithTools(
   const streamed = await streamedCall(
     transport,
     options.apiKey ?? null,
-    (oauth) =>
+    (systemPrefix) =>
       buildRequest({
         modelClass,
         systemPrompt: options.systemPrompt,
         turns: options.turns,
         tools: augmentedTools,
         cache: options.cache,
-        oauth,
+        systemPrefix,
         model: options.model,
         maxTokens: options.maxTokens,
       }),
@@ -814,7 +818,7 @@ export async function chatWithToolLoop(
     const streamed = await streamedCall(
       transport,
       options.apiKey ?? null,
-      (oauth) =>
+      (systemPrefix) =>
         buildRequest({
           modelClass,
           systemPrompt: options.systemPrompt,
@@ -825,7 +829,7 @@ export async function chatWithToolLoop(
           // from cache instead of reprocessing it.
           cacheConversation: true,
           cache: options.cache,
-          oauth,
+          systemPrefix,
           model: options.model,
           maxTokens: options.maxTokens,
         }),
@@ -935,7 +939,7 @@ export async function chatWithToolLoop(
     const finalStreamed = await streamedCall(
       transport,
       options.apiKey ?? null,
-      (oauth) =>
+      (systemPrefix) =>
         buildRequest({
           modelClass,
           systemPrompt: options.systemPrompt,
@@ -943,7 +947,7 @@ export async function chatWithToolLoop(
           tools: [], // no tools → the model must answer in text
           cacheConversation: true,
           cache: options.cache,
-          oauth,
+          systemPrefix,
           model: options.model,
           maxTokens: options.maxTokens,
         }),

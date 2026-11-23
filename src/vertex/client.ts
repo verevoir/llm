@@ -36,7 +36,7 @@ export const resolveClient: AnthropicTransport['resolveClient'] = (perCallApiKey
   if (kept?.projectId !== projectId || kept.region !== region) {
     kept = { projectId, region, client: new AnthropicVertex({ projectId, region }) };
   }
-  return { client: kept.client, route: 'google-cloud', oauth: false };
+  return { client: kept.client, route: 'google-cloud' };
 };
 
 /** Test seam: drop the kept client between tests. INTERNAL — imported directly

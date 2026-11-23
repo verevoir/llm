@@ -40,7 +40,8 @@ export const PROVIDER = 'vertex';
 export type { ContentBlock };
 
 // No `switchCredentialAfter`: this route has one credential mechanism, so a
-// failed call is never made again on another.
+// failed call is never made again on another. No `systemPrefix`: nothing about
+// Google Cloud authentication adds a block to a request.
 const transport: adapter.AnthropicTransport = { provider: PROVIDER, resolveClient };
 
 /**

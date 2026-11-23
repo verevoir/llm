@@ -18,10 +18,13 @@ SDK does not enter your bundle.
 - `@verevoir/llm/vertex` — Claude on Google Cloud Vertex AI: the Anthropic
   adapter with a different client (`chat`, `chatWithTools`, `chatWithToolLoop`,
   `PROVIDER`, namespaced `vertex`). Requires `@anthropic-ai/vertex-sdk`, an
-  optional peer that only this subpath imports. The requests, the cache
-  breakpoints for each `cache` value, the tool loop, the retries and the usage
-  figures (cache writes and reads and the five-minute / one-hour split
-  included) are the Anthropic adapter's own, from one shared implementation.
+  optional peer that only this subpath imports; that package declares
+  `@anthropic-ai/sdk` as its own dependency, so it is not installed separately,
+  and this subpath does not load the direct route's client module. The
+  requests, the cache breakpoints for each `cache` value, the tool loop, the
+  retries and the usage figures (cache writes and reads and the five-minute /
+  one-hour split included) are the Anthropic adapter's own, from one shared
+  implementation.
   Authentication is Google Cloud's standard credentials flow, run by the Vertex
   SDK; there is no API key (a per-call `apiKey` is refused, and
   `ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN` are never read). The project

@@ -9,7 +9,8 @@ import { resolveBaseUrl } from '../index.js';
 // module-private, encapsulated behind functions rather than exposed as an object.
 
 // The cached default client + the session OAuth-fallback latch. The latch is set
-// only when a metered key was available to fall back to (see streamedCall), so once
+// only when a metered key was available to fall back to (see the transport in
+// ./index.ts), so once
 // latched, later calls use ANTHROPIC_API_KEY instead of re-hitting the 401 — and if
 // that key is no longer set, resolveClient fails clearly rather than silently
 // re-attempting the OAuth token that just 401'd. Private — reset only via
@@ -30,7 +31,8 @@ function oauthBetaHeader(env: NodeJS.ProcessEnv = process.env): string {
 /** The identity Anthropic requires as the FIRST system block when a request is
  * authenticated with a subscription OAuth token — the token is authorised only
  * for Claude-Code-shaped requests. Overridable via `ANTHROPIC_OAUTH_SYSTEM` for
- * resilience if the required string changes. Used by the adapter's buildRequest. */
+ * resilience if the required string changes. Supplied to the shared adapter by
+ * the direct route's transport, in `./index.ts`. */
 export function oauthSystemIdentity(env: NodeJS.ProcessEnv = process.env): string {
   return (
     env.ANTHROPIC_OAUTH_SYSTEM?.trim() ||
@@ -96,7 +98,8 @@ export function resolveClient(perCallApiKey: string | null): {
     );
   }
   // A prior 401 latched OAuth off — fall back to the metered key. The latch can
-  // only have been set when a key was present (see streamedCall); if that key is
+  // only have been set when a key was present (see the transport in ./index.ts);
+  // if that key is
   // since gone, fail clearly rather than silently re-attempting the token that 401'd.
   if (auth.kind === 'oauth' && oauthDisabled) {
     const apiKey = process.env.ANTHROPIC_API_KEY?.trim();

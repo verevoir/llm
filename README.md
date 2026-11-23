@@ -219,6 +219,13 @@ and `PROVIDER`, plus the namespaced `vertex`.
 npm install @verevoir/llm @anthropic-ai/vertex-sdk
 ```
 
+Those two are the whole install for this route. `@anthropic-ai/vertex-sdk`
+declares `@anthropic-ai/sdk` and `google-auth-library` as dependencies of its
+own, so neither is installed separately, and this subpath imports no other
+provider SDK. `@opentelemetry/api` is a required peer of `@verevoir/llm` on
+every route: npm installs it with the line above, and a package manager that
+does not install peers needs it named.
+
 ```ts
 import { vertex } from '@verevoir/llm/vertex';
 
