@@ -16,7 +16,12 @@ vi.mock('@anthropic-ai/sdk', () => ({
 }));
 
 import { chat, chatWithTools } from './index.js';
-import { setModelSpanSink, type ModelSpan } from '../index.js';
+import {
+  classifyLlmError,
+  EmptyResponseError,
+  setModelSpanSink,
+  type ModelSpan,
+} from '../index.js';
 
 interface FakeUsage {
   input_tokens: number;
@@ -132,6 +137,21 @@ describe('chat — progress-only tool turn', () => {
     await expect(
       chat({ systemPrompt: 's', turns: [{ role: 'user', content: 'x' }], apiKey: 'sk-test' })
     ).rejects.toThrow(/no text content/);
+  });
+
+  it('that empty-response error keeps its message and name, and is recognisable without reading either', async () => {
+    mockStream.mockReturnValue(fakeStream([], 'tool_use'));
+    const rejection = await chat({
+      systemPrompt: 's',
+      turns: [{ role: 'user', content: 'x' }],
+      apiKey: 'sk-test',
+    }).catch((e: unknown) => e);
+    expect(rejection).toBeInstanceOf(EmptyResponseError);
+    expect((rejection as Error).name).toBe('Error');
+    expect((rejection as Error).message).toBe(
+      'anthropic.chat: response had no text content (stop_reason=tool_use)'
+    );
+    expect(classifyLlmError(rejection)).toEqual({ kind: 'empty-response', retryable: false });
   });
 
   it('returns text-only responses unchanged (no continuation)', async () => {

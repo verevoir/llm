@@ -35,6 +35,7 @@ import {
   type ToolUse,
   type TokenUsage,
   type Turn,
+  EmptyResponseError,
   registerModelCatalog,
   registerProviderConnection,
 } from '../index.js';
@@ -669,7 +670,7 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
     }
 
     // No text and nothing to continue on — a genuinely empty response.
-    throw new Error(
+    throw new EmptyResponseError(
       `anthropic.chat: response had no text content (stop_reason=${streamed.stopReason})`
     );
   }

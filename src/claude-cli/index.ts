@@ -312,6 +312,7 @@ import type {
 import { ALLOWED_ENV_VARS, allowedEnv, CLAUDE_CLI_CREDENTIAL_ENV_VAR, PROVIDER } from './env.js';
 import { readReportedCost } from './cost.js';
 import {
+  CLAUDE_CLI_SESSION_TURN_TIMEOUT_CODE,
   closeSession,
   createSession,
   resetClaudeCliSessionsForTests,
@@ -338,6 +339,7 @@ export { ALLOWED_ENV_VARS, allowedEnv, CLAUDE_CLI_CREDENTIAL_ENV_VAR, PROVIDER }
 // HOLDING TRANSPORT header section below for the design, and each
 // re-exported name's own doc comment in session.ts for its contract.
 export {
+  CLAUDE_CLI_SESSION_TURN_TIMEOUT_CODE,
   closeSession,
   createSession,
   resetClaudeCliSessionsForTests,

@@ -21,6 +21,7 @@ import {
   type ModelClass,
   type RatesTable,
   type TokenUsage,
+  EmptyResponseError,
   registerModelLabels,
   registerProviderConnection,
   resolveBaseUrl,
@@ -311,7 +312,9 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
   await fireUsageHook(options.onUsage, usage, 'openai.chat');
 
   if (!raw.text) {
-    throw new Error(`openai.chat: response had no text content (status=${raw.status})`);
+    throw new EmptyResponseError(
+      `openai.chat: response had no text content (status=${raw.status})`
+    );
   }
 
   return {

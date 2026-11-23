@@ -17,7 +17,13 @@ vi.mock('@google/genai', () => ({
 
 // Import AFTER vi.mock so the mocked constructor is the one captured.
 import { chat } from './index.js';
-import { setModelSpanSink, type ModelSpan, type TokenUsage } from '../index.js';
+import {
+  classifyLlmError,
+  EmptyResponseError,
+  setModelSpanSink,
+  type ModelSpan,
+  type TokenUsage,
+} from '../index.js';
 
 interface FakeUsage {
   promptTokenCount: number;
@@ -166,6 +172,22 @@ describe('google.chat', () => {
         apiKey: 'sk-test',
       })
     ).rejects.toThrow(/no text content.*SAFETY/);
+  });
+
+  it('that empty-response error keeps its message and name, and is recognisable without reading either', async () => {
+    mockGenerateContent.mockResolvedValue(fakeResponse('', 'SAFETY'));
+
+    const rejection = await chat({
+      systemPrompt: 'sys',
+      turns: [{ role: 'user', content: 'q' }],
+      apiKey: 'sk-test',
+    }).catch((e: unknown) => e);
+    expect(rejection).toBeInstanceOf(EmptyResponseError);
+    expect((rejection as Error).name).toBe('Error');
+    expect((rejection as Error).message).toBe(
+      'google.chat: response had no text content (finish_reason=SAFETY)'
+    );
+    expect(classifyLlmError(rejection)).toEqual({ kind: 'empty-response', retryable: false });
   });
 
   it('throws the abort reason when the signal is already aborted', async () => {

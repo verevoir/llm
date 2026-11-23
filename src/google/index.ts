@@ -14,7 +14,7 @@
 import { GoogleGenAI } from '@google/genai';
 import { fireUsageHook } from '../audit-hook.js';
 import { withGenAISpan } from '../otel.js';
-import { collapseContentToText } from '../index.js';
+import { collapseContentToText, EmptyResponseError } from '../index.js';
 import {
   type ChatOptions,
   type ChatReply,
@@ -315,7 +315,7 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
   await fireUsageHook(options.onUsage, usage, 'google.chat');
 
   if (!raw.text) {
-    throw new Error(
+    throw new EmptyResponseError(
       `google.chat: response had no text content (finish_reason=${raw.finishReason})`
     );
   }

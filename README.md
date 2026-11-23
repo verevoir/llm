@@ -73,6 +73,87 @@ runtime; only real silence is. Default 10 minutes; override per call with
 
 **`claude-cli` environment.** The child `claude` sees only `PATH`, `HOME`, `TMPDIR`, `CLAUDE_CODE_OAUTH_TOKEN` and `CLAUDE_CONFIG_DIR` (a path, not a secret; see the CHANGELOG `SECURITY:` entry for 0.36.0); nothing else is passed through.
 
+## Failures
+
+A failed call rejects with what it always rejected with: the provider SDK's own
+error, or this library's own plain `Error`. To find out what went wrong without
+knowing which provider answered, pass the caught error to `classifyLlmError`:
+
+```ts
+import { classifyLlmError } from '@verevoir/llm';
+
+try {
+  await anthropic.chat({ systemPrompt, turns });
+} catch (err) {
+  const { kind, retryable } = classifyLlmError(err);
+  // kind: 'authentication' | 'permission' | 'rate-limited' | ...
+  // retryable: may a later attempt succeed?
+  // err is untouched: err.status, err.message and instanceof still work.
+}
+```
+
+- **It returns a plain `LlmFailure` object, `{ kind, retryable }`.** Nothing is
+  thrown as one, and the error you pass in is only read, never wrapped or
+  changed.
+- **`kind`** is one of a closed union, `LlmErrorKind` (table below).
+- **`retryable`** says whether a later attempt at the same call may succeed. It
+  does not say how long to wait, and the adapter has already made its own
+  retries (three, with backoff, on the API adapters) before the error reaches
+  you.
+
+| `kind`            | Recognised by                                                                                                                                             | `retryable` |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
+| `authentication`  | HTTP status 401                                                                                                                                           | no          |
+| `permission`      | HTTP status 403                                                                                                                                           | no          |
+| `rate-limited`    | HTTP status 429; or, with no status, error type `rate_limit_error`                                                                                        | yes         |
+| `overloaded`      | HTTP status 529; or, with no status, error type `overloaded_error`                                                                                        | yes         |
+| `unavailable`     | Any other HTTP 5xx; or, with no status, error type `api_error` or an SDK `APIConnectionError`                                                             | yes         |
+| `invalid-request` | Any other HTTP 4xx                                                                                                                                        | no          |
+| `timeout`         | HTTP status 408; or, with no status, error type `timeout_error` or an SDK `APIConnectionTimeoutError`; a `claude-cli` idle or turn timeout, by its `code` | yes         |
+| `empty-response`  | An `EmptyResponseError`: the call succeeded but `chat()` got no text back                                                                                 | no          |
+| `other`           | Anything else, including every shape not listed above                                                                                                     | no          |
+
+Read in this order, first match wins: the `EmptyResponseError` class; a `code`
+of `CLAUDE_CLI_IDLE_TIMEOUT` or `CLAUDE_CLI_SESSION_TURN_TIMEOUT`; the numeric
+`status` on the SDK's error (a status that is not a number is never coerced);
+the string `type` the Anthropic SDK puts on an error that arrives part-way
+through a streamed response, where there is no failing status to read; the
+class names the Anthropic and OpenAI SDKs give a request that never got a
+response. The error's message text is never read. You can also call it on an
+error from your own SDK call.
+
+**What is new on a thrown error.** Thrown errors are otherwise unchanged; there
+are two additions:
+
+- **`EmptyResponseError`.** When `chat()` gets no text back, the error is now an
+  instance of this exported class (`extends Error`) where it was a plain
+  `Error`. Its `message` is exactly what it was
+  (`<provider>.chat: response had no text content (…)`, with the finish reason)
+  and its `name` is still `Error`, so `instanceof Error`, a message match and a
+  logged error all read as before.
+- **A `code` on the `claude-cli` held-session turn timeout.** That error now
+  carries `.code === 'CLAUDE_CLI_SESSION_TURN_TIMEOUT'` (exported from
+  `@verevoir/llm/claude-cli` as `CLAUDE_CLI_SESSION_TURN_TIMEOUT_CODE`),
+  alongside its unchanged message. The idle timeout already carried
+  `CLAUDE_CLI_IDLE_TIMEOUT`.
+
+What cannot be told apart:
+
+- **Overload** is its own kind only on Anthropic (529). The other providers
+  report it as an ordinary 5xx, which is `unavailable`.
+- **A network failure or timeout on Google** is `other`: that SDK throws the
+  platform's own fetch error, with no status and no class of its own.
+- **`claude-cli`** reports why it failed only as free text, so everything except
+  its two timeouts is `other` — a login failure included. The text is the
+  error's own `message`, as it always was.
+- **A 4xx is `invalid-request` whatever its cause** — a malformed request, an
+  unknown model and an over-long prompt are not distinguished.
+- **An abort.** A call cancelled through `abortSignal` rejects with the signal's
+  own `reason` (or an `AbortError` when it has none), which is `other`. There is
+  no `aborted` kind: you hold the signal, so `signal.aborted` already tells you.
+- **The library's own argument and configuration checks** — no turns, no tools,
+  a missing API key, an `UnsupportedContentBlockError` — are `other` too.
+
 ## Provider endpoints & routing
 
 Every adapter authenticates with `<PROVIDER>_API_KEY` and can be pointed at a

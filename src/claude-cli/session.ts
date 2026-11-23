@@ -669,6 +669,14 @@ export async function getOrCreateSession(
  * left for its own pass rather than folded in unannounced. */
 export const SESSION_TURN_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
 
+/** The `.code` on the error a turn rejects with when
+ * {@link SESSION_TURN_TIMEOUT_MS} runs out, so a caller (and the core's
+ * `classifyLlmError`) can recognise that timeout structurally rather
+ * than by message text. Distinct from the one-shot path's
+ * `CLAUDE_CLI_IDLE_TIMEOUT`: that one measures silence, this one the
+ * whole turn. */
+export const CLAUDE_CLI_SESSION_TURN_TIMEOUT_CODE = 'CLAUDE_CLI_SESSION_TURN_TIMEOUT' as const;
+
 /**
  * One entry from the terminal envelope's `permission_denials` array — a
  * field CONFIRMED to exist (the operator's own channel to the CLI; also
@@ -832,12 +840,15 @@ export async function runSessionTurn(options: SessionTurnOptions): Promise<Sessi
         void killHeld(session);
         HELD.delete(session.id);
         reject(
-          new Error(
-            `claude-cli: session ${session.id} timed out after ${SESSION_TURN_TIMEOUT_MS}ms waiting ` +
-              'for a terminal stream-json "result" event. The streaming wire shape this adapter ' +
-              'assumes is relayed from documentation, not confirmed against a real invocation (see ' +
-              "this file's WIRE-SHAPE VERIFICATION HISTORY above) — this may mean the assumption " +
-              "doesn't hold. Refusing rather than hanging; the held process has been killed."
+          Object.assign(
+            new Error(
+              `claude-cli: session ${session.id} timed out after ${SESSION_TURN_TIMEOUT_MS}ms waiting ` +
+                'for a terminal stream-json "result" event. The streaming wire shape this adapter ' +
+                'assumes is relayed from documentation, not confirmed against a real invocation (see ' +
+                "this file's WIRE-SHAPE VERIFICATION HISTORY above) — this may mean the assumption " +
+                "doesn't hold. Refusing rather than hanging; the held process has been killed."
+            ),
+            { code: CLAUDE_CLI_SESSION_TURN_TIMEOUT_CODE }
           )
         );
       }, SESSION_TURN_TIMEOUT_MS);

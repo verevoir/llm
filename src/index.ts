@@ -159,6 +159,168 @@ export function collapseContentToText(provider: string, content: TurnContent): s
   return parts.join('');
 }
 
+// ────────────────────────────────────────────────────────────────────
+// Classifying a failed call
+// ────────────────────────────────────────────────────────────────────
+
+/**
+ * What went wrong with a provider call, in terms that hold across every
+ * provider. A closed union: a caller can switch on it exhaustively.
+ * Every member is one {@link classifyLlmError} can return.
+ *
+ * - `authentication`: the provider rejected the credential (HTTP 401).
+ * - `permission`: the credential is valid but not allowed to do this
+ *   (HTTP 403).
+ * - `rate-limited`: the provider's rate limit was reached (HTTP 429).
+ * - `overloaded`: the provider said it is overloaded (HTTP 529). Only
+ *   Anthropic signals this separately; the others report overload as an
+ *   ordinary 5xx, which is `unavailable`.
+ * - `unavailable`: the provider failed on its side or could not be
+ *   reached (any other HTTP 5xx, or a connection failure).
+ * - `invalid-request`: the provider refused the request itself (any
+ *   other HTTP 4xx).
+ * - `timeout`: the call ran out of time (HTTP 408, an SDK request
+ *   timeout, or a claude-cli idle / turn timeout).
+ * - `empty-response`: the call succeeded but the reply had no text (an
+ *   {@link EmptyResponseError}).
+ * - `other`: anything not recognised as one of the above.
+ *
+ * There is deliberately no `aborted` kind: a call cancelled through
+ * {@link ChatOptions.abortSignal} rejects with the signal's own reason,
+ * which the caller already holds.
+ */
+export type LlmErrorKind =
+  | 'authentication'
+  | 'permission'
+  | 'rate-limited'
+  | 'overloaded'
+  | 'unavailable'
+  | 'invalid-request'
+  | 'timeout'
+  | 'empty-response'
+  | 'other';
+
+/** What {@link classifyLlmError} says about an error a call rejected
+ * with. A plain object: nothing is thrown as, or wrapped in, one. */
+export interface LlmFailure {
+  /** What went wrong — see {@link LlmErrorKind}. */
+  kind: LlmErrorKind;
+  /** Whether a later attempt at the same call may succeed. It says
+   * nothing about how long to wait, and the adapter has already made its
+   * own retries (where it has them) before the error reached the caller. */
+  retryable: boolean;
+}
+
+/** The kinds a later attempt may get past. Every other kind is not
+ * retryable. */
+const RETRYABLE_KINDS: ReadonlySet<LlmErrorKind> = new Set<LlmErrorKind>([
+  'rate-limited',
+  'overloaded',
+  'unavailable',
+  'timeout',
+]);
+
+/**
+ * What every adapter's `chat()` throws when the call succeeded but the
+ * reply had no text. Its `message` is the adapter's own, unchanged
+ * (`<provider>.chat: response had no text content (…)`, with the finish
+ * reason), and its `name` is left as `Error`, so everything a caller
+ * could already read on this error reads the same. The class exists so
+ * {@link classifyLlmError} — or a caller's own `instanceof` — can
+ * recognise the failure without reading that message.
+ */
+export class EmptyResponseError extends Error {}
+
+/** The `code` the claude-cli adapter puts on its two timeout errors: the
+ * one-shot idle timeout and the held-session turn timeout. Spelled out
+ * here, not imported, so the core does not load that adapter; a test
+ * holds them equal to the adapter's own exported constants. */
+const CLAUDE_CLI_TIMEOUT_CODES: ReadonlySet<unknown> = new Set([
+  'CLAUDE_CLI_IDLE_TIMEOUT',
+  'CLAUDE_CLI_SESSION_TURN_TIMEOUT',
+]);
+
+/** Provider error-type strings that identify a failure when the error
+ * carries no HTTP status. The Anthropic SDK reports an error that arrives
+ * part-way through a streamed response this way: the stream opened with
+ * a 200, so there is no failing status, only the event's `type`. */
+const ERROR_TYPE_KINDS: Readonly<Record<string, LlmErrorKind>> = {
+  overloaded_error: 'overloaded',
+  rate_limit_error: 'rate-limited',
+  api_error: 'unavailable',
+  timeout_error: 'timeout',
+};
+
+/** Class names the Anthropic and OpenAI SDKs give a failure that never
+ * got an HTTP response. Matched by name so the core stays SDK-free. */
+const ERROR_CLASS_KINDS: Readonly<Record<string, LlmErrorKind>> = {
+  APIConnectionTimeoutError: 'timeout',
+  APIConnectionError: 'unavailable',
+};
+
+function kindForStatus(status: number): LlmErrorKind | undefined {
+  if (status === 401) return 'authentication';
+  if (status === 403) return 'permission';
+  if (status === 408) return 'timeout';
+  if (status === 429) return 'rate-limited';
+  if (status === 529) return 'overloaded';
+  if (status >= 400 && status <= 499) return 'invalid-request';
+  if (status >= 500 && status <= 599) return 'unavailable';
+  return undefined;
+}
+
+function kindOf(err: unknown): LlmErrorKind {
+  if (err === null || err === undefined) return 'other';
+  if (err instanceof EmptyResponseError) return 'empty-response';
+  const candidate = err as { status?: unknown; type?: unknown; code?: unknown };
+  // Set membership is by identity, so a code that is not one of these very
+  // strings — a number, an object that stringifies to one — never matches.
+  if (CLAUDE_CLI_TIMEOUT_CODES.has(candidate.code)) return 'timeout';
+  if (typeof candidate.status === 'number') {
+    const byStatus = kindForStatus(candidate.status);
+    if (byStatus) return byStatus;
+  }
+  if (typeof candidate.type === 'string' && Object.hasOwn(ERROR_TYPE_KINDS, candidate.type)) {
+    return ERROR_TYPE_KINDS[candidate.type];
+  }
+  // `constructor` is absent on a null-prototype object; no row matches then.
+  const className = err.constructor?.name;
+  if (Object.hasOwn(ERROR_CLASS_KINDS, className)) return ERROR_CLASS_KINDS[className];
+  return 'other';
+}
+
+/**
+ * Say what went wrong with a call, given the error it rejected with. The
+ * adapters throw what they always threw — the provider SDK's own error,
+ * or this library's own — and a caller that wants a provider-neutral
+ * answer passes the caught error here. Nothing is wrapped or changed:
+ * the error is only read.
+ *
+ * Read in this order, first match wins:
+ *
+ * 1. An {@link EmptyResponseError}: `empty-response`.
+ * 2. A string `code` that is one of the claude-cli adapter's two timeout
+ *    codes (`CLAUDE_CLI_IDLE_TIMEOUT`, `CLAUDE_CLI_SESSION_TURN_TIMEOUT`):
+ *    `timeout`.
+ * 3. A numeric `status` (the HTTP status every SDK here puts on its API
+ *    errors): 401, 403, 408, 429 and 529 each have their own kind; any
+ *    other 4xx is `invalid-request` and any other 5xx is `unavailable`.
+ *    A status outside 400–599, or one that is not a number (it is never
+ *    coerced), identifies nothing.
+ * 4. A string `type` naming a provider error type, for an error with no
+ *    usable status (see {@link ERROR_TYPE_KINDS}).
+ * 5. The error's class name, for a failure that never got a response
+ *    (see {@link ERROR_CLASS_KINDS}).
+ * 6. Otherwise `other`.
+ *
+ * The error's message text is never read: a message can hold anything,
+ * including a number that only looks like a status.
+ */
+export function classifyLlmError(err: unknown): LlmFailure {
+  const kind = kindOf(err);
+  return { kind, retryable: RETRYABLE_KINDS.has(kind) };
+}
+
 /** A single message in a conversation. */
 export interface Turn {
   role: 'user' | 'assistant';

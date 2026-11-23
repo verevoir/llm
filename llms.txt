@@ -120,6 +120,43 @@ tool_result; inside a user turn the caller built, it throws. The
 `ChatWithTools*` / `ChatWithToolLoop*` option/result shapes live on the
 core export.
 
+## Failures
+
+A failed call rejects with what it always rejected with — the provider SDK's
+own error, or this library's own plain `Error` — unwrapped. To classify one,
+pass the caught error to `classifyLlmError(err)` (core export). It only reads
+the error and returns a plain `LlmFailure` object:
+
+- `kind: LlmErrorKind` — a closed union: `'authentication'` | `'permission'` |
+  `'rate-limited'` | `'overloaded'` | `'unavailable'` | `'invalid-request'` |
+  `'timeout'` | `'empty-response'` | `'other'`.
+- `retryable: boolean` — whether a later attempt may succeed. True for
+  `rate-limited`, `overloaded`, `unavailable`, `timeout`; false for the rest.
+
+How a kind is recognised, first match wins: an `EmptyResponseError`
+(`empty-response`); a `code` of `CLAUDE_CLI_IDLE_TIMEOUT` or
+`CLAUDE_CLI_SESSION_TURN_TIMEOUT` (`timeout`); a numeric `status` — 401 `authentication`, 403
+`permission`, 408 `timeout`, 429 `rate-limited`, 529 `overloaded`, any other 4xx
+`invalid-request`, any other 5xx `unavailable`; a non-numeric status is never
+coerced. Then, with no usable status, a string `type` — `overloaded_error`,
+`rate_limit_error`, `api_error` (`unavailable`), `timeout_error` (what the
+Anthropic SDK gives an error arriving mid-stream). Then the class name —
+`APIConnectionTimeoutError` (`timeout`), `APIConnectionError` (`unavailable`).
+Otherwise `other`. Message text is never read. `claude-cli` errors classify
+only as `timeout` (its idle and turn timeouts) or `other` (it reports every
+other failure as free text). An aborted `abortSignal`'s `reason` and the
+library's own argument / configuration checks (no turns, no tools, a missing
+API key, `UnsupportedContentBlockError`) are `other`; there is no `aborted`
+kind.
+
+Thrown errors are unchanged apart from two additions. `EmptyResponseError`
+(core export, `extends Error`) is what every adapter's `chat()` throws when
+the reply has no text, where it threw a plain `Error`: its `message` is
+unchanged (`<provider>.chat: response had no text content (…)`) and its `name`
+is still `Error`. The `claude-cli` held-session turn timeout now carries
+`.code === 'CLAUDE_CLI_SESSION_TURN_TIMEOUT'`
+(`CLAUDE_CLI_SESSION_TURN_TIMEOUT_CODE` on `@verevoir/llm/claude-cli`).
+
 ## Cost accounting
 
 Every call returns a `TokenUsage` typed
