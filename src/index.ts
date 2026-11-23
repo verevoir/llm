@@ -343,11 +343,13 @@ export interface Turn {
  * {@link ChatWithToolLoopResult.usage}, which sums usage across several
  * underlying calls) whose calls did not all use the same route — reported
  * rather than picking one arbitrarily and hiding that the other happened.
+ * `'google-cloud'` is Google Cloud's standard credentials flow, with no API
+ * key — the `@verevoir/llm/vertex` route.
  *
  * New adapters or new mechanisms add new values here rather than reusing
  * one that does not describe them.
  */
-export type CredentialRoute = 'api-key' | 'subscription-oauth' | 'mixed';
+export type CredentialRoute = 'api-key' | 'subscription-oauth' | 'google-cloud' | 'mixed';
 
 /**
  * The kind of malformation recorded when a provider's reported cost is not a

@@ -3,6 +3,7 @@ import { describe, it, expect } from 'vitest';
 // reads the shapes they actually throw. (Tests may import an SDK; the core
 // under test does not.)
 import Anthropic from '@anthropic-ai/sdk';
+import * as VertexErrors from '@anthropic-ai/vertex-sdk/core/error';
 import OpenAI from 'openai';
 import { ApiError as GoogleApiError } from '@google/genai';
 import { EmptyResponseError, classifyLlmError, type LlmErrorKind } from './index.js';
@@ -284,6 +285,15 @@ describe('classifyLlmError — the errors the real SDKs construct', () => {
   it('Anthropic connection failures are recognised by class name', () => {
     expect(kindOf(new Anthropic.APIConnectionTimeoutError())).toBe('timeout');
     expect(kindOf(new Anthropic.APIConnectionError({ message: 'x' }))).toBe('unavailable');
+  });
+
+  it('the Vertex SDK throws the Anthropic SDK’s own error classes, so it needs no rows of its own', () => {
+    // Every Anthropic row above therefore holds for a call made through
+    // `@verevoir/llm/vertex`. If the Vertex SDK ever ships classes of its
+    // own, this fails and the rows are owed.
+    expect(VertexErrors.APIError).toBe(Anthropic.APIError);
+    expect(VertexErrors.APIConnectionError).toBe(Anthropic.APIConnectionError);
+    expect(VertexErrors.APIConnectionTimeoutError).toBe(Anthropic.APIConnectionTimeoutError);
   });
 
   it.each([

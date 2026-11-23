@@ -268,6 +268,16 @@ describe('anthropic client — 401 OAuth→API-key fallback (loud, once)', () =>
     expect(mockClientCtor).toHaveBeenCalledTimes(1); // OAuth only — no fallback client built
   });
 
+  it('does NOT fall back when the rejected call was already on the metered key — the 401 propagates, once, with no warning', async () => {
+    process.env.ANTHROPIC_API_KEY = 'sk-env';
+    mockStream.mockReturnValue(failStream(401));
+    await expect(
+      chat({ systemPrompt: 's', turns: [{ role: 'user', content: 'x' }] })
+    ).rejects.toMatchObject({ status: 401 });
+    expect(mockStream).toHaveBeenCalledTimes(1);
+    expect(errSpy).not.toHaveBeenCalled();
+  });
+
   it('latches: after one fallback, later calls go straight to the key (no repeat OAuth attempt or warning)', async () => {
     process.env.CLAUDE_CODE_OAUTH_TOKEN = 'oat-bad';
     process.env.ANTHROPIC_API_KEY = 'sk-fallback';

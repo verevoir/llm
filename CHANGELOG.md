@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.40.0] — 2026-11-24
+
+**New subpath `@verevoir/llm/vertex`: Claude on Google Cloud Vertex AI, as the Anthropic adapter with a different client.** It exports `chat`, `chatWithTools`, `chatWithToolLoop` and `PROVIDER` (`'vertex'`), plus the namespaced `vertex`. Additive: nothing existing changes, and there is nothing to migrate.
+
+- **One implementation, two clients.** The request building, the cache breakpoints for each `cache` value (`'none' | 'default' | 'prefix'`), the streaming, the retries, the tool loop and the usage accounting are the Anthropic adapter's own code, now in an internal module that both subpaths call. A Vertex request is the request `@verevoir/llm/anthropic` sends on an API key, for `chat`, `chatWithTools` and every call `chatWithToolLoop` makes. Only the client differs: an `AnthropicVertex` from `@anthropic-ai/vertex-sdk`.
+- **`@verevoir/llm/anthropic` is unchanged.** Its exports, its credential rules and the requests it sends are the same as before, byte for byte. It does not import the Vertex package; only `@verevoir/llm/vertex` does.
+- **New optional peer dependency: `@anthropic-ai/vertex-sdk`.** Install it only to import `@verevoir/llm/vertex`.
+- **Credentials.** Authentication is Google Cloud's standard credentials flow, run by the Vertex SDK. There is no API key: a per-call `apiKey` is refused with a plain error, and `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` are never read. The direct adapter's subscription-token identity block and its fallback to the metered key are not part of this route; a rejected call is not made again on another credential.
+- **Project and region** come from the environment variables the Vertex SDK itself reads, `ANTHROPIC_VERTEX_PROJECT_ID` and `CLOUD_ML_REGION`, on each call; `ChatOptions` has no field for them. If either is unset or blank the call is refused before anything is sent, with a plain error naming the variable and no value. One client is kept and reused while both stay the same.
+- **Model names are sent exactly as given:** `model` when set, otherwise the Anthropic catalogue's id for the `modelClass`. There is no mapping to Vertex AI's names; where Vertex AI names a model differently, pass that name as `model`.
+- **Usage is reported as on the direct route**, including cache writes, cache reads and the five-minute / one-hour cache-write split, with `provider: 'vertex'` and `route: 'google-cloud'`. `CredentialRoute` gains the value `'google-cloud'`; only this subpath reports it. The price book has no entry of its own for provider `vertex`: a call is priced only if the exact model name sent (or `vertex/<model>`) has an entry, and is `unpriced` otherwise. Pricing Vertex calls is the caller's concern.
+- **Failures.** `classifyLlmError` gives the same kind for the same status: the Vertex SDK throws the Anthropic SDK's own error classes, so no recognition rule was added. The library's own errors and the model span's `scope` read `vertex.chat`, `vertex.chatWithTools` and `vertex.chatWithToolLoop`.
+- **Nothing is registered** into the model catalogue or the connection registry by this subpath, so `isProviderConfigured`, `resolveModel` and the other routing helpers do not know a `vertex` provider.
+- **Development dependency note.** The development dependency on `@anthropic-ai/sdk` moved to the 1.x line in the previous commit. The peer range is unchanged.
+
 ## [0.39.0] — 2026-11-23
 
 **New `ChatOptions.cache` value `'prefix'`: cache the system prompt and never the conversation.** For a caller whose calls share a system prompt with sibling calls, but whose own conversation nothing else will read. Until now it had to choose between writing its conversation to the cache on every tool-loop iteration (`'default'`) and giving up the shared prefix as well (`'none'`). Acted on by `@verevoir/llm/anthropic` only, on `chat`, `chatWithTools` and every call `chatWithToolLoop` makes.
