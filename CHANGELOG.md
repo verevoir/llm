@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.39.0] — 2026-11-23
+
+**New `ChatOptions.cache` value `'prefix'`: cache the system prompt and never the conversation.** For a caller whose calls share a system prompt with sibling calls, but whose own conversation nothing else will read. Until now it had to choose between writing its conversation to the cache on every tool-loop iteration (`'default'`) and giving up the shared prefix as well (`'none'`). Acted on by `@verevoir/llm/anthropic` only, on `chat`, `chatWithTools` and every call `chatWithToolLoop` makes.
+
+- **`'prefix'` sends one breakpoint, on the system prompt, and none on the conversation.** The breakpoint on the system prompt caches the tools and the system prompt together, with the provider's five-minute default lifetime, exactly as under `'default'`. The messages go out as the caller sent them, on every call, including a `chat` continuation, every tool-loop iteration and the loop's final call after the iteration cap.
+- **It is a trade within one tool loop, not a saving in every case.** Under `'default'` each iteration writes the growing conversation to the cache and the next iteration reads it back. Under `'prefix'` each iteration re-sends the whole conversation uncached: more plain input tokens per iteration, in exchange for never paying the cache-write premium on the conversation. That pays only when the conversation is short, or when nothing will read it again. For a long loop, `'default'` is usually the cheaper choice.
+- **The provider's minimum cacheable length still applies to the system prompt.** A prefix shorter than it is not cached at all, under any value; `'prefix'` does not change that.
+- **`'default'`, `'none'` and leaving the option out change nothing.** Their requests are the same as before, byte for byte. A value outside the three, from an untyped caller, is still treated as `'default'`.
+- **Every other adapter accepts the value and ignores it**, as it does the other two.
+
 ## [0.38.0] — 2026-11-23
 
 **New `classifyLlmError(err)`: pass it the error a call rejected with and it says what went wrong, as `{ kind, retryable }`, so a caller can tell an authentication failure from a rate limit, an overload, a bad request or a timeout without knowing which provider answered.** Exported from the main entry, with the types `LlmErrorKind` and `LlmFailure` and the class `EmptyResponseError`.

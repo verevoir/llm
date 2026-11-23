@@ -103,25 +103,33 @@ async function sendEveryRequest(cache: CacheOption): Promise<Request[]> {
 
 /**
  * The six requests of {@link sendEveryRequest}, written out literally, with
- * `breakpoint` at every place the adapter puts a cache breakpoint (or no
- * `cache_control` key at all when `breakpoint` is undefined).
+ * `breakpoint` on the system prompt and, unless `placement` is
+ * `'system only'`, on the end of every re-sent conversation (or no
+ * `cache_control` key anywhere when `breakpoint` is undefined).
  *
  * `progressTools` is the adapter's own auto-injected progress tool list,
  * taken from the sent request: it is the same for every cache setting and
  * never carries a breakpoint (the no-`cache_control` walk covers it).
  */
-function expectedRequests(breakpoint: CacheControl | undefined, progressTools: unknown): Request[] {
-  const mark = <T extends object>(block: T): T =>
+function expectedRequests(
+  breakpoint: CacheControl | undefined,
+  progressTools: unknown,
+  placement: 'system and conversation' | 'system only' = 'system and conversation'
+): Request[] {
+  const conversationBreakpoint = placement === 'system only' ? undefined : breakpoint;
+  const markSystem = <T extends object>(block: T): T =>
     breakpoint ? { ...block, cache_control: breakpoint } : block;
+  const mark = <T extends object>(block: T): T =>
+    conversationBreakpoint ? { ...block, cache_control: conversationBreakpoint } : block;
   const head = {
     model: models.reasoning,
     max_tokens: 16384,
-    system: [mark({ type: 'text', text: SYSTEM })],
+    system: [markSystem({ type: 'text', text: SYSTEM })],
   };
   /** A user string turn at the end of a re-sent history: a marked text
    * block when there is a breakpoint to carry, the plain string otherwise. */
   const lastUserText = (t: string) =>
-    breakpoint ? [mark({ type: 'text', text: t })] : (t as string | object[]);
+    conversationBreakpoint ? [mark({ type: 'text', text: t })] : (t as string | object[]);
   const toolResult = (id: string) => ({
     type: 'tool_result',
     tool_use_id: id,
@@ -240,6 +248,61 @@ describe('anthropic ChatOptions.cache', () => {
     // And nothing else about the request moved: the history stays as sent.
     expect(requests[index]).toStrictEqual(expectedRequests(undefined, requests[0].tools)[index]);
   });
+
+  it.each<[string, number]>([
+    ['a single call', 0],
+    ['a continuation of a single call', 1],
+    ['a call with tools', 2],
+    ['the first tool-loop iteration', 3],
+    ['a tool-loop iteration after the first', 4],
+    ['the tool-less final call of a capped tool loop', 5],
+  ])(
+    "cache 'prefix' sends one breakpoint, on the system prompt, and none on the conversation for %s",
+    async (_label, index) => {
+      const request = (await sendEveryRequest('prefix'))[index];
+
+      expect(cacheControlsIn(request)).toStrictEqual([{ type: 'ephemeral' }]);
+      expect(cacheControlsIn(request.system)).toStrictEqual([{ type: 'ephemeral' }]);
+      expect(JSON.stringify(request.messages)).not.toContain('cache_control');
+      // The whole body, key order included: the system prompt as under
+      // 'default', the conversation as sent.
+      const expected = expectedRequests({ type: 'ephemeral' }, request.tools, 'system only')[index];
+      expect(request).toStrictEqual(expected);
+      expect(JSON.stringify(request)).toBe(JSON.stringify(expected));
+    }
+  );
+
+  it("cache 'prefix' differs from 'default' only in the conversation, and from 'none' only in the system prompt", async () => {
+    const byDefault = await sendEveryRequest('default');
+    const prefix = await sendEveryRequest('prefix');
+    const none = await sendEveryRequest('none');
+
+    const without = (key: string) => (request: Request) =>
+      JSON.stringify({ ...request, [key]: undefined });
+    expect(prefix.map(without('messages'))).toEqual(byDefault.map(without('messages')));
+    expect(prefix.map(without('system'))).toEqual(none.map(without('system')));
+  });
+
+  it.each<[string, number[]]>([
+    ['chat', [0, 1]],
+    ['chatWithTools', [2]],
+    ['chatWithToolLoop', [3, 4, 5]],
+  ])(
+    "cache 'default' sends the same whole request bodies as leaving the option out, from %s",
+    async (_label, indices) => {
+      const absent = await sendEveryRequest(undefined);
+      const byDefault = await sendEveryRequest('default');
+      // The layout both must have, written out: a breakpoint on the system
+      // prompt and on the end of every re-sent conversation.
+      const literal = expectedRequests({ type: 'ephemeral' }, absent[0].tools);
+
+      for (const index of indices) {
+        expect(JSON.stringify(byDefault[index])).toBe(JSON.stringify(absent[index]));
+        expect(JSON.stringify(byDefault[index])).toBe(JSON.stringify(literal[index]));
+        expect(byDefault[index]).toStrictEqual(literal[index]);
+      }
+    }
+  );
 
   it('sends no beta header or per-request option for any cache setting', async () => {
     await sendEveryRequest('default');

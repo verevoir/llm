@@ -175,13 +175,21 @@ unmatched model as `unpriced`, never `0`. The older `estimateCostUSD`,
 `RatesTable` / `RateTuple`, `catalogEntryFor`, and `uncoveredModels` are kept
 for back-compat but `@deprecated` — new code should use `createPriceBook`.
 
-`ChatOptions.cache` (`'none' | 'default'`) controls prompt
+`ChatOptions.cache` (`'none' | 'default' | 'prefix'`) controls prompt
 caching per call. Only `@verevoir/llm/anthropic` acts on it (`chat`,
 `chatWithTools`, every `chatWithToolLoop` call); every other adapter accepts
 and ignores it. `'default'` / omitted: the adapter's standard cache breakpoints
 with the provider's five-minute lifetime. `'none'`: no `cache_control` anywhere
 in the request — for a one-off call whose prefix nothing reads again, so it
-pays no cache-write premium. Any other value is treated as `'default'`.
+pays no cache-write premium. `'prefix'`: one breakpoint on the system prompt
+(tools + system prompt cache together) and never one on the conversation — for
+a call that shares its system prompt with sibling calls but whose own
+conversation nothing else reads. Within one tool loop `'prefix'` re-sends the
+conversation uncached on every iteration: more plain input tokens per
+iteration, no cache-write premium on the conversation; it pays only when the
+conversation is short or nothing reads it again. The provider's minimum
+cacheable length still applies to the system prompt. Any other value is
+treated as `'default'`.
 `TokenUsage` reports
 `cacheReadInputTokens` / `cacheCreationInputTokens`, plus
 `cacheCreationEphemeral5mInputTokens` / `cacheCreationEphemeral1hInputTokens`

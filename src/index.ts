@@ -519,18 +519,28 @@ export interface ChatOptions {
    *   from it). For a call whose prefix nothing will read again: a cache
    *   write is billed at a premium over plain input, and that premium only
    *   pays back when a later call reads the entry.
+   * - `'prefix'` — one breakpoint, on the system prompt (which caches the
+   *   tools and the system prompt together), and never one on the
+   *   conversation. For a call that shares its system prompt with sibling
+   *   calls but whose own conversation nothing else will read. Within one
+   *   tool loop this means every iteration re-sends the conversation
+   *   uncached: more plain input tokens per iteration, in exchange for
+   *   never paying the cache-write premium on the conversation. That pays
+   *   only when the conversation is short or nothing will read it again.
+   *   The provider's minimum cacheable length still applies to the system
+   *   prompt: a prefix shorter than it is not cached under any value.
    *
-   * There are deliberately only these two: a longer cache lifetime costs
-   * more to write and nothing needs it, and an option nobody asks for is
-   * surface to maintain. Any other value, from an untyped caller, is treated
-   * as `'default'`.
+   * There is deliberately no longer-lifetime value: a longer cache lifetime
+   * costs more to write and nothing needs it, and an option nobody asks for
+   * is surface to maintain. Any other value, from an untyped caller, is
+   * treated as `'default'`.
    *
    * Only `@verevoir/llm/anthropic` acts on this, on `chat`, `chatWithTools`
    * and every call `chatWithToolLoop` makes. Every other adapter accepts and
    * ignores it: they place no cache breakpoints of their own, so there is
    * nothing for it to change.
    */
-  cache?: 'none' | 'default';
+  cache?: 'none' | 'default' | 'prefix';
   /**
    * Optional EXACT model id, bypassing `modelClass` resolution entirely.
    *
