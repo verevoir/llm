@@ -171,12 +171,14 @@ type CacheControl = { type: 'ephemeral' };
  * `undefined` when the request carries no breakpoint at all.
  *
  * - `'none'` — no breakpoint: the request writes nothing to the cache.
- * - `'default'` / absent — a breakpoint with no lifetime field, which the
- *   provider reads as its default five-minute lifetime: long enough to span
- *   a tool loop's burst of correlated calls.
+ * - `'default'` / `'prefix'` / absent — a breakpoint with no lifetime field,
+ *   which the provider reads as its default five-minute lifetime: long enough
+ *   to span a tool loop's burst of correlated calls.
  *
  * Anything else (a value outside the type, from an untyped caller) is
  * treated as `'default'`. One value serves every breakpoint in a request.
+ * Where the breakpoints go is {@link buildRequest}'s business: `'prefix'`
+ * differs from `'default'` only in never getting one on the conversation.
  */
 function cacheControlFor(cache: ChatOptions['cache']): CacheControl | undefined {
   return cache === 'none' ? undefined : { type: 'ephemeral' };
@@ -247,7 +249,8 @@ function buildRequest({
   /** Whether the request carries cache breakpoints — see
    * {@link ChatOptions.cache} and {@link cacheControlFor}.
    * `'none'` wins over `cacheConversation`: no breakpoint is placed
-   * anywhere. */
+   * anywhere. `'prefix'` wins over it too: the system prompt keeps its
+   * breakpoint and the conversation never gets one. */
   cache?: ChatOptions['cache'];
   /** When true the request authenticates with a subscription OAuth token, which
    * Anthropic accepts only for Claude-Code-shaped requests — so the Claude-Code
@@ -278,7 +281,7 @@ function buildRequest({
       ? [{ type: 'text' as const, text: oauthSystemIdentity() }, promptBlock]
       : [promptBlock],
     messages:
-      cacheConversation && cacheControl
+      cacheConversation && cacheControl && cache !== 'prefix'
         ? withConversationCacheBreakpoint(messages, cacheControl)
         : messages,
   };

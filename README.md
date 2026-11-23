@@ -235,6 +235,24 @@ await anthropic.chat({ systemPrompt, turns, cache: 'none' }); // write nothing
   provider's five-minute lifetime.
 - `'none'`: no `cache_control` anywhere in the request. For a one-off call
   whose prefix nothing will read again.
+- `'prefix'`: one breakpoint, on the system prompt (which caches the tools and
+  the system prompt together), and never one on the conversation. For a call
+  that shares its system prompt with sibling calls, but whose own conversation
+  nothing else will read.
+
+```ts
+await anthropic.chatWithToolLoop({ systemPrompt, turns, tools, executor, cache: 'prefix' });
+```
+
+`'prefix'` is a trade, not a saving in every case. Within one tool loop,
+`'default'` writes the growing conversation to the cache on each iteration so
+the next iteration can read it back; under `'prefix'` each iteration re-sends
+the whole conversation uncached. That costs more plain input tokens per
+iteration and saves the cache-write premium on the conversation. It pays only
+when the conversation is short, or when nothing will read it again; for a long
+loop `'default'` is usually the cheaper choice. The provider's minimum
+cacheable length still applies to the system prompt: a prefix shorter than it
+is not cached at all, under any value.
 
 It applies to `chat`, `chatWithTools` and every call `chatWithToolLoop` makes.
 Every other adapter accepts the option and ignores it.
