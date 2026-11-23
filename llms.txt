@@ -15,6 +15,31 @@ SDK does not enter your bundle.
   accounting, and the model catalog + provider-routing helpers. No SDK dependency.
 - `@verevoir/llm/anthropic` — Anthropic SDK adapter (`chat`, `chatWithTools`,
   `chatWithToolLoop`, live `onProgress`). Requires `@anthropic-ai/sdk`.
+- `@verevoir/llm/vertex` — Claude on Google Cloud Vertex AI: the Anthropic
+  adapter with a different client (`chat`, `chatWithTools`, `chatWithToolLoop`,
+  `PROVIDER`, namespaced `vertex`). Requires `@anthropic-ai/vertex-sdk`, an
+  optional peer that only this subpath imports; that package declares
+  `@anthropic-ai/sdk` as its own dependency, so it is not installed separately,
+  and this subpath does not load the direct route's client module. The
+  requests, the cache breakpoints for each `cache` value, the tool loop, the
+  retries and the usage figures (cache writes and reads and the five-minute /
+  one-hour split included) are the Anthropic adapter's own, from one shared
+  implementation.
+  Authentication is Google Cloud's standard credentials flow, run by the Vertex
+  SDK; there is no API key (a per-call `apiKey` is refused, and
+  `ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN` are never read). The project
+  and region come from `ANTHROPIC_VERTEX_PROJECT_ID` and `CLOUD_ML_REGION`
+  (`ChatOptions` has no field for them); a missing one is refused before any
+  call with a plain error naming the variable. The model name is sent exactly
+  as given — `model` when set, else the Anthropic catalogue's id for the
+  `modelClass` — with no mapping: where Vertex AI names a model differently,
+  pass that name as `model`. `TokenUsage.provider` is `'vertex'` and `route` is
+  `'google-cloud'`; the price book has no entry of its own for that provider,
+  so a call is priced only if the exact model name sent (or `vertex/<model>`)
+  has an entry, else `unpriced` — pricing Vertex calls is the caller's concern.
+  `classifyLlmError` gives the same kinds as on the direct route (the Vertex
+  SDK throws the Anthropic SDK's own error classes). Registers nothing into the
+  model catalogue or the connection registry, so routing does not know it.
 - `@verevoir/llm/google` — Google Gemini SDK adapter (`chat`, `chatWithTools`,
   `chatWithToolLoop` as of 0.13.0). Requires `@google/genai`.
 - `@verevoir/llm/openai` — OpenAI adapter via the Responses API
@@ -79,8 +104,8 @@ npm install @verevoir/llm @anthropic-ai/sdk
 ```
 
 The package's `peerDependencies` are marked optional — install only the SDK(s)
-you import (`@anthropic-ai/sdk`, `@google/genai`, `openai`; the OpenAI-compatible
-providers share `openai`).
+you import (`@anthropic-ai/sdk`, `@anthropic-ai/vertex-sdk`, `@google/genai`,
+`openai`; the OpenAI-compatible providers share `openai`).
 
 ## Canonical usage
 
@@ -113,8 +138,8 @@ Each adapter exposes, alongside `chat()`:
 Provider-agnostic types `ToolDef`, `ToolUse`, `ToolExecutor`, `ContentBlock`
 (`text` | `tool_use` | `tool_result` | `image` | `document`), plus
 `UnsupportedContentBlockError` and `collapseContentToText(provider, content)`:
-a provider that cannot carry a block type (only `@verevoir/llm/anthropic`
-carries `image`/`document`) throws this error, naming the provider and
+a provider that cannot carry a block type (only `@verevoir/llm/anthropic` and
+`@verevoir/llm/vertex` carry `image`/`document`) throws this error, naming the provider and
 block type. Inside a tool executor's result it becomes a named `is_error`
 tool_result; inside a user turn the caller built, it throws. The
 `ChatWithTools*` / `ChatWithToolLoop*` option/result shapes live on the
@@ -165,7 +190,7 @@ optional `substrateVersion` — which version of an external substrate, e.g. the
 `claude` CLI, served the call, `undefined` for a direct API adapter — and
 optional `cacheRead` / `cacheWrite` so prompt-cache savings price at their own
 rates). `route` (`CredentialRoute`, a core export: `'api-key'` |
-`'subscription-oauth'` | `'mixed'`) reports which credential mechanism actually
+`'subscription-oauth'` | `'google-cloud'` | `'mixed'`) reports which credential mechanism actually
 served a call, positively, never left to be inferred from what's absent. The
 core export ships `sumUsages` / `parseUsage` to roll up across calls,
 `totalTokens`, `formatTokensCompact` for compact displays, and
@@ -176,8 +201,8 @@ unmatched model as `unpriced`, never `0`. The older `estimateCostUSD`,
 for back-compat but `@deprecated` — new code should use `createPriceBook`.
 
 `ChatOptions.cache` (`'none' | 'default' | 'prefix'`) controls prompt
-caching per call. Only `@verevoir/llm/anthropic` acts on it (`chat`,
-`chatWithTools`, every `chatWithToolLoop` call); every other adapter accepts
+caching per call. Only `@verevoir/llm/anthropic` and `@verevoir/llm/vertex` act
+on it (`chat`, `chatWithTools`, every `chatWithToolLoop` call); every other adapter accepts
 and ignores it. `'default'` / omitted: the adapter's standard cache breakpoints
 with the provider's five-minute lifetime. `'none'`: no `cache_control` anywhere
 in the request — for a one-off call whose prefix nothing reads again, so it

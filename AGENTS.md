@@ -5,7 +5,9 @@
 catalog + provider-routing registries, the model-span audit hook, and the advisor-pair
 primitive. Provider SDK adapters live in subpaths (`@verevoir/llm/anthropic`, `/google`,
 `/openai`, `/deepseek`, `/samba`, `/mistral`, `/claude-cli`), so a consumer only pays for
-the SDK it imports. `/catalog` registers every catalogued provider's model data with no
+the SDK it imports. `/vertex` is the Anthropic adapter with an `AnthropicVertex` client:
+both call the shared, internal `src/anthropic/adapter.ts`, and only `src/vertex/` may
+import `@anthropic-ai/vertex-sdk`. `/catalog` registers every catalogued provider's model data with no
 SDK import at all.
 
 ## Stack & layout
