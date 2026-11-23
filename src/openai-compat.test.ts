@@ -11,6 +11,8 @@ vi.mock('openai', () => ({
 
 import { createOpenAICompatAdapter } from './openai-compat.js';
 import {
+  classifyLlmError,
+  EmptyResponseError,
   normalizeModelId,
   modelLabel,
   estimateCostUSD,
@@ -137,6 +139,22 @@ describe('createOpenAICompatAdapter', () => {
       apiKey: 'k',
     });
     expect(result.usage.providerRequestId).toBeUndefined();
+  });
+
+  it('chat: a response with no text rejects with an EmptyResponseError whose message and name are the plain error it always was', async () => {
+    chatCreateMock.mockResolvedValueOnce({
+      choices: [{ message: { content: '' }, finish_reason: 'length' }],
+      usage: { prompt_tokens: 10, completion_tokens: 0 },
+    });
+    const rejection = await a
+      .chat({ systemPrompt: 's', turns: [{ role: 'user', content: 'go' }], apiKey: 'k' })
+      .catch((e: unknown) => e);
+    expect(rejection).toBeInstanceOf(EmptyResponseError);
+    expect((rejection as Error).name).toBe('Error');
+    expect((rejection as Error).message).toBe(
+      'testco.chat: response had no text content (finishReason=length)'
+    );
+    expect(classifyLlmError(rejection)).toEqual({ kind: 'empty-response', retryable: false });
   });
 
   it('throws when the catalogue declares no modelClass anywhere', () => {

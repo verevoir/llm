@@ -35,6 +35,7 @@ import {
   type ToolDef,
   type ToolUse,
   type TokenUsage,
+  EmptyResponseError,
   registerModelCatalog,
   registerProviderConnection,
   resolveBaseUrl,
@@ -305,7 +306,7 @@ export function createOpenAICompatAdapter(config: OpenAICompatConfig): OpenAICom
     await fireUsageHook(options.onUsage, usage, `${provider}.chat`);
 
     if (!raw.text) {
-      throw new Error(
+      throw new EmptyResponseError(
         `${provider}.chat: response had no text content (finishReason=${raw.finishReason})`
       );
     }

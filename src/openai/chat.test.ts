@@ -18,6 +18,8 @@ vi.mock('openai', () => ({
 // Import AFTER vi.mock so the mocked constructor is the one captured.
 import { chat } from './index.js';
 import {
+  classifyLlmError,
+  EmptyResponseError,
   setModelSpanSink,
   UnsupportedContentBlockError,
   type ContentBlock,
@@ -208,6 +210,22 @@ describe('openai.chat', () => {
         apiKey: 'sk-test',
       })
     ).rejects.toThrow(/no text content.*incomplete/);
+  });
+
+  it('that empty-response error keeps its message and name, and is recognisable without reading either', async () => {
+    mockCreate.mockResolvedValue(fakeResponse('', 'incomplete'));
+
+    const rejection = await chat({
+      systemPrompt: 'sys',
+      turns: [{ role: 'user', content: 'q' }],
+      apiKey: 'sk-test',
+    }).catch((e: unknown) => e);
+    expect(rejection).toBeInstanceOf(EmptyResponseError);
+    expect((rejection as Error).name).toBe('Error');
+    expect((rejection as Error).message).toBe(
+      'openai.chat: response had no text content (status=incomplete)'
+    );
+    expect(classifyLlmError(rejection)).toEqual({ kind: 'empty-response', retryable: false });
   });
 
   it('throws the abort reason when the signal is already aborted', async () => {

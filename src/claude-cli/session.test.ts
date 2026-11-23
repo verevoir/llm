@@ -10,6 +10,7 @@ vi.mock('node:child_process', () => ({
 }));
 
 import {
+  CLAUDE_CLI_SESSION_TURN_TIMEOUT_CODE,
   closeSession,
   createSession,
   getOrCreateSession,
@@ -19,7 +20,7 @@ import {
   SESSION_MAX_HELD,
   SESSION_TURN_TIMEOUT_MS,
 } from './session.js';
-import type { ToolDef } from '../index.js';
+import { classifyLlmError, type ToolDef } from '../index.js';
 
 /** A fake `claude` child for the session-holding transport: stdout is an
  * EventEmitter tests push stream-json lines onto directly (`emitLine`),
@@ -646,6 +647,31 @@ describe('claude-cli session lifecycle (wave 2a)', () => {
       await vi.advanceTimersByTimeAsync(SESSION_TURN_TIMEOUT_MS + 1);
       await assertion;
       expect(child.kill).toHaveBeenCalledTimes(1);
+    });
+
+    it('the timeout rejection is a plain Error carrying a code to recognise it by, which classifies as a timeout', async () => {
+      vi.useFakeTimers();
+      const { child } = fakeChild();
+      mockSpawn.mockImplementationOnce(() => child);
+      const session = createSession();
+
+      const settled = runSessionTurn({
+        session,
+        systemPrompt: 'sys',
+        message: 'a',
+        tools: [],
+        maxToolCalls: 0,
+      }).catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(SESSION_TURN_TIMEOUT_MS + 1);
+      const rejection = await settled;
+
+      expect(rejection).toBeInstanceOf(Error);
+      expect((rejection as Error).name).toBe('Error');
+      expect((rejection as Error & { code?: string }).code).toBe(
+        CLAUDE_CLI_SESSION_TURN_TIMEOUT_CODE
+      );
+      expect(CLAUDE_CLI_SESSION_TURN_TIMEOUT_CODE).toBe('CLAUDE_CLI_SESSION_TURN_TIMEOUT');
+      expect(classifyLlmError(rejection)).toEqual({ kind: 'timeout', retryable: true });
     });
   });
 

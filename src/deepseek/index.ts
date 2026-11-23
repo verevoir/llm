@@ -23,6 +23,7 @@ import {
   type ModelClass,
   type RatesTable,
   type TokenUsage,
+  EmptyResponseError,
   registerModelLabels,
   registerProviderConnection,
   resolveBaseUrl,
@@ -325,7 +326,7 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
   await fireUsageHook(options.onUsage, usage, 'deepseek.chat');
 
   if (!raw.text) {
-    throw new Error(
+    throw new EmptyResponseError(
       `deepseek.chat: response had no text content (finishReason=${raw.finishReason})`
     );
   }
