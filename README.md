@@ -141,7 +141,8 @@ try {
 - **`retryable`** says whether a later attempt at the same call may succeed. It
   does not say how long to wait, and the adapter has already made its own
   retries (three, with backoff, on the API adapters) before the error reaches
-  you.
+  you. For the adapters that send through the `openai` SDK, what is retried is
+  set out [below](#retries-on-the-adapters-that-send-through-the-openai-sdk).
 
 | `kind`            | Recognised by                                                                                                                                             | `retryable` |
 | ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
@@ -195,6 +196,84 @@ What cannot be told apart:
   no `aborted` kind: you hold the signal, so `signal.aborted` already tells you.
 - **The library's own argument and configuration checks** — no turns, no tools,
   a missing API key, an `UnsupportedContentBlockError` — are `other` too.
+
+### Retries on the adapters that send through the `openai` SDK
+
+`@verevoir/llm/openai`, `/deepseek`, `/samba`, `/mistral` and `/vertex-openai`
+retry by one policy, the library's own. The SDK's own retries are off on their
+clients (`maxRetries: 0`), and the policy retries everything the SDK's did.
+
+| A request that fails with                                                  | Is sent       |
+| -------------------------------------------------------------------------- | ------------- |
+| HTTP 408, 409 or 429                                                       | up to 4 times |
+| Any HTTP status of 500 or above (500, 502, 503, 504, 529, …)               | up to 4 times |
+| A connection failure (the SDK's `APIConnectionError`)                      | up to 4 times |
+| A request timeout (the SDK's `APIConnectionTimeoutError`), see below       | up to 3 times |
+| Any status, with the response header `x-should-retry: true`                | up to 4 times |
+| A message naming a 429, 500, 502 or 503 (`rate limit`, …), see below       | up to 4 times |
+| Any status, with the response header `x-should-retry: false`               | once          |
+| Any other 4xx (400, 401, 403, 404, 422, …), without `x-should-retry: true` | once          |
+| Anything else                                                              | once          |
+| Any of the above, once `abortSignal` is aborted                            | not again     |
+
+The policy is four rules, each true of every call (in `chatWithToolLoop`, of
+each request of the loop separately):
+
+1. **Requests.** A request is sent once and, while it keeps failing in a retried
+   way, up to 3 times more: 4 requests at most, whatever the failures.
+2. **Waits.** A failure that is not a request timeout is retried after the next
+   unused wait, in order: 5 seconds, then 30, then 120.
+3. **A request timeout** is retried at once, with no wait, and at most 2 of a
+   call's retries follow a timeout. A request the SDK gave up waiting on has
+   already run to the SDK's request timeout, 10 minutes by default, which these
+   adapters do not change.
+4. **Nothing else** is retried, and an abort ends a wait and stops retrying.
+
+- **The bounds.** From the rules, every call, whatever mix of failures it meets,
+  makes at most 4 requests, waits at most 155 seconds in all (2 minutes 35
+  seconds), and meets at most 3 request timeouts. Each is reached. A request
+  that fails every time with a status or a connection failure is given up after
+  4 requests and 155 seconds of waiting, plus the time the requests themselves
+  take. A request that is never answered is given up after 3 requests and 30
+  minutes, with no waiting between them.
+- **`onRetry`** is called once before each retry, with `attempt` counting from
+  1, `maxAttempts` (the most retries a call makes: 3), `delayMs` (the wait; 0
+  after a request timeout) and a `reason`. Every request
+  after the first is preceded by one `onRetry` call.
+- **An abort.** Once `abortSignal` is aborted no request is started. Aborted
+  before the first request, the call sends nothing. Aborted during a wait, the
+  wait ends at once. Aborted while a request is in flight, that request is not
+  cut short, because the signal is not handed to the SDK: if it succeeds, `chat`
+  and `chatWithTools` return its reply and `chatWithToolLoop` stops before its
+  next request; if it fails in a retried way it is not sent again and `onRetry`
+  is not called. A request that is never answered can therefore run for up to
+  the SDK's request timeout after the abort. In each case the call rejects with
+  the signal's own `reason` (or an `AbortError` when it has none), which
+  `classifyLlmError` calls `other`.
+- **`x-should-retry`** is read as the SDK reads it: `true` and `false` decide,
+  whatever the status; any other value is ignored.
+- **Agreement with `classifyLlmError`.** A connection failure and a timeout are
+  recognised by the same SDK class names. Every SDK error it calls `retryable`
+  is retried here; a 409 is retried too, as the SDK did, though it is
+  `invalid-request` there.
+
+**Known difference from the SDK's own retries: `Retry-After` is not honoured.**
+The SDK waited as a `Retry-After` or `retry-after-ms` header asked, when it
+asked for under a minute; this policy waits its fixed 5, 30 and 120 seconds
+whatever the response says. The SDK's own waits are also shorter (from half a
+second, to eight at most): the 5, 30 and 120 seconds are the library's waits for
+a provider outage, applied as they stand to connection failures and to every
+retried status, and not tuned for those.
+
+**A message can still cause a retry.** An error whose message names a 429, 500,
+502 or 503 is retried even when its status is one the policy does not retry: a
+400 whose message says `rate limit`, or holds the number `500`, is sent four
+times. This rule is older than 0.43.0 and is unchanged by it.
+
+Before 0.43.0 only `/vertex-openai` had the SDK's retries off, and the policy
+retried 429, 500, 502 and 503 only. On the other four the SDK retried too, twice
+per attempt, so a status both layers retried reached the provider up to twelve
+times, with `onRetry` told of three.
 
 ## Provider endpoints & routing
 

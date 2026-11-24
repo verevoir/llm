@@ -6,7 +6,7 @@ import {
   InMemorySpanExporter,
   SimpleSpanProcessor,
 } from '@opentelemetry/sdk-trace-base';
-import { APIError } from 'openai';
+import { APIConnectionError, APIError } from 'openai';
 
 // No module is mocked: the real `openai` SDK builds and sends every request,
 // through a fake `fetch` and a fake token source handed to the client's test
@@ -528,47 +528,74 @@ describe('@verevoir/llm/vertex-openai — failures', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it('sends a 429 answered every time only as often as the library retry policy allows, each request with a token freshly asked for', async () => {
-    answer({ error: { message: 'slow down', status: 'RESOURCE_EXHAUSTED' } }, 429);
-    let asked = 0;
-    tokenSource.mockReset();
-    tokenSource.mockImplementation(async () => `tok-${++asked}`);
-    const retries: ChatRetryInfo[] = [];
+  it.each([
+    [
+      'a 429',
+      () => answer({ error: { message: 'slow down', status: 'RESOURCE_EXHAUSTED' } }, 429),
+      429,
+      { kind: 'rate-limited', retryable: true },
+    ],
+    [
+      'a 504',
+      () => answer({ error: { message: 'gateway timeout', status: 'DEADLINE_EXCEEDED' } }, 504),
+      504,
+      { kind: 'unavailable', retryable: true },
+    ],
+    [
+      'a connection failure',
+      () =>
+        fetchMock.mockImplementation(async () => {
+          throw new TypeError('fetch failed');
+        }),
+      undefined,
+      { kind: 'unavailable', retryable: true },
+    ],
+  ] as const)(
+    'sends %s met every time only as often as the library retry policy allows, each request with a token freshly asked for',
+    async (_name, arrange, status, failure) => {
+      arrange();
+      let asked = 0;
+      tokenSource.mockReset();
+      tokenSource.mockImplementation(async () => `tok-${++asked}`);
+      const retries: ChatRetryInfo[] = [];
 
-    // Every wait, the policy's backoffs included, runs on fake timers.
-    vi.useFakeTimers();
-    let err: unknown;
-    try {
-      const settled = rejection(
-        chat({
-          ...BASE,
-          onRetry: async (info) => {
-            retries.push(info);
-          },
-        })
+      // Every wait, the policy's backoffs included, runs on fake timers.
+      vi.useFakeTimers();
+      let err: unknown;
+      try {
+        const settled = rejection(
+          chat({
+            ...BASE,
+            onRetry: async (info) => {
+              retries.push(info);
+            },
+          })
+        );
+        await vi.runAllTimersAsync();
+        err = await settled;
+      } finally {
+        vi.useRealTimers();
+      }
+
+      expect(err).toBeInstanceOf(status === undefined ? APIConnectionError : APIError);
+      expect((err as APIError).status).toBe(status);
+      expect(classifyLlmError(err)).toEqual(failure);
+
+      // `callWithRetries` tells `onRetry` how many retries it allows. One
+      // first attempt, then that many, and nothing from the SDK on top.
+      const allowed = retries[0]?.maxAttempts ?? 0;
+      expect(allowed).toBeGreaterThan(0);
+      expect(retries.map((r) => r.attempt)).toEqual(
+        Array.from({ length: allowed }, (_, i) => i + 1)
       );
-      await vi.runAllTimersAsync();
-      err = await settled;
-    } finally {
-      vi.useRealTimers();
+      expect(fetchMock).toHaveBeenCalledTimes(1 + allowed);
+
+      expect(tokenSource).toHaveBeenCalledTimes(1 + allowed);
+      expect(requests().map((r) => r.headers.get('authorization'))).toEqual(
+        Array.from({ length: 1 + allowed }, (_, i) => `Bearer tok-${i + 1}`)
+      );
     }
-
-    expect(err).toBeInstanceOf(APIError);
-    expect((err as APIError).status).toBe(429);
-    expect(classifyLlmError(err)).toEqual({ kind: 'rate-limited', retryable: true });
-
-    // `callWithRetries` tells `onRetry` how many retries it allows. One
-    // first attempt, then that many, and nothing from the SDK on top.
-    const allowed = retries[0]!.maxAttempts;
-    expect(allowed).toBeGreaterThan(0);
-    expect(retries.map((r) => r.attempt)).toEqual(Array.from({ length: allowed }, (_, i) => i + 1));
-    expect(fetchMock).toHaveBeenCalledTimes(1 + allowed);
-
-    expect(tokenSource).toHaveBeenCalledTimes(1 + allowed);
-    expect(requests().map((r) => r.headers.get('authorization'))).toEqual(
-      Array.from({ length: 1 + allowed }, (_, i) => `Bearer tok-${i + 1}`)
-    );
-  });
+  );
 
   it.each(SHAPES)(
     '%s sends a 400 once: one request, one token asked for, no retry',
