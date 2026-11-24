@@ -1,11 +1,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-// The credentials library is mocked at the constructor, so this file holds
-// what the route asks of it when no test token source is in place: when the
-// object is built, with which scope, and how often a token is asked for. The
-// real `openai` SDK sends through a fake `fetch`. No network, no credential.
-const authCtor = vi.fn();
-const getAccessToken = vi.fn();
+// The credentials library is mocked at the constructor: these tests hold when
+// the route builds the object, with which scope, and how often it asks for a
+// token. The real `openai` SDK sends through a fake `fetch`: no network.
+// Hoisted with the mock: a module that built the object while this file's
+// imports load must reach a test's assertion, not fail the file's load.
+const { authCtor, getAccessToken } = vi.hoisted(() => ({
+  authCtor: vi.fn(),
+  getAccessToken: vi.fn(),
+}));
 
 vi.mock('google-auth-library', () => ({
   GoogleAuth: class GoogleAuth {
@@ -62,12 +65,27 @@ afterEach(() => {
 
 describe('@verevoir/llm/vertex-openai — the Google Cloud token source', () => {
   it('builds no credentials object on import, nor for a call refused before any request', async () => {
-    expect(authCtor).not.toHaveBeenCalled();
+    const built = vi.fn();
+    const asked = vi.fn(async () => 'tok');
+    const counts = () => ({ built: built.mock.calls.length, asked: asked.mock.calls.length });
+    vi.resetModules();
+    vi.doMock('google-auth-library', () => ({
+      GoogleAuth: class GoogleAuth {
+        getAccessToken = asked;
+        constructor(opts: unknown) {
+          built(opts);
+        }
+      },
+    }));
 
-    await expect(chat({ ...BASE, model: undefined })).rejects.toThrow('No model');
+    // A first evaluation of the module, with nothing reset after it.
+    const fresh = await import('./index.js');
 
-    expect(authCtor).not.toHaveBeenCalled();
-    expect(getAccessToken).not.toHaveBeenCalled();
+    expect(counts()).toEqual({ built: 0, asked: 0 });
+
+    await expect(fresh.chat({ ...BASE, model: undefined })).rejects.toThrow('No model');
+
+    expect(counts()).toEqual({ built: 0, asked: 0 });
   });
 
   it('builds one credentials object, for the cloud-platform scope, and asks it before every call', async () => {

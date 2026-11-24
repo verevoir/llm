@@ -8,11 +8,9 @@ import {
 } from '@opentelemetry/sdk-trace-base';
 import { APIError } from 'openai';
 
-// Nothing is mocked at the module level: the real `openai` SDK builds and
-// sends every request, through a fake `fetch` handed to the client module's
-// test seam, with a fake token source beside it. So the URL, the headers and
-// the body asserted here are the ones that would go on the wire. No test in
-// this file reaches a network or needs a Google credential.
+// No module is mocked: the real `openai` SDK builds and sends every request,
+// through a fake `fetch` and a fake token source handed to the client's test
+// seam. So the URL, headers and body asserted are what would go on the wire.
 import {
   PROVIDER,
   VertexOpenAIConfigError,

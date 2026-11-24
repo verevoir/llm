@@ -2,11 +2,9 @@ import { describe, it, expect } from 'vitest';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 
-// `google-auth-library` is an optional peer: only a caller that imports
-// `@verevoir/llm/vertex-openai` needs it installed. So no other entry point may
-// reach it. Checked at the source level, with no build: walk each entry
-// point's relative imports and collect every package it names along the way.
-// Type-only imports count too — the stricter reading, and the simpler scan.
+// `google-auth-library` is an optional peer that only this subpath's callers
+// install, so no other entry point may reach it. Checked on the source, with
+// no build; type-only imports count too (stricter, and a simpler scan).
 
 const SRC_DIR = join(process.cwd(), 'src');
 const AUTH_LIBRARY = 'google-auth-library';

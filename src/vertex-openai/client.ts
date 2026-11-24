@@ -1,12 +1,14 @@
+/**
+ * Internal client module for the Vertex AI OpenAI-compatible route: where the
+ * project and location come from, how the endpoint's URL is built, where the
+ * access token comes from, and the one kept client. It is NOT in the package
+ * `exports` map, so the test-only seam does not ship on the public
+ * `@verevoir/llm/vertex-openai` surface; the co-located tests import it
+ * directly. The two error classes are re-exported by `./index.js`.
+ */
+
 import OpenAI from 'openai';
 import { GoogleAuth } from 'google-auth-library';
-
-// Internal client module for the Vertex AI OpenAI-compatible route: where the
-// project and location come from, how the endpoint's URL is built, where the
-// access token comes from, and the one kept client. It is NOT in the package
-// `exports` map, so the test-only seam does not ship on the public
-// `@verevoir/llm/vertex-openai` surface; the co-located tests import it
-// directly. The two error classes are re-exported by `./index.js`.
 
 /** The environment variable holding the Google Cloud project id. */
 export const PROJECT_ENV = 'GOOGLE_CLOUD_PROJECT';
@@ -65,11 +67,13 @@ export class VertexOpenAITokenError extends Error {
 /** Where an access token comes from. Called before every request. */
 export type TokenSource = () => Promise<string | null | undefined>;
 
-// Built on first use, never at import: importing the subpath looks for no
-// credential. The library keeps the token it holds and replaces it shortly
-// before it expires, so asking before every request costs a network round
-// trip only when the token is due.
+/** The credentials object. Built on first use, never at import: importing the
+ * subpath looks for no credential. */
 let googleAuth: GoogleAuth | null = null;
+
+/** The real token source. The library keeps the token it holds and replaces
+ * it shortly before it expires, so asking before every request costs a
+ * network round trip only when the token is due. */
 const googleTokenSource: TokenSource = () => {
   googleAuth ??= new GoogleAuth({ scopes: SCOPE });
   return googleAuth.getAccessToken();
