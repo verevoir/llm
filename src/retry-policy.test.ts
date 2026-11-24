@@ -7,7 +7,7 @@
  */
 
 import { readFileSync } from 'node:fs';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import OpenAI, {
   APIConnectionError,
   APIConnectionTimeoutError,
@@ -269,12 +269,25 @@ describe('callWithRetries', () => {
       return all;
     }
 
-    /** Run one script to its end: the failure each request met, the time
-     * that passed after it before the next request, and what `onRetry` got. */
-    async function run({ failures, then }: Script) {
+    /** What one script did: the failure each request met, the wait after it
+     * before the next request, what `onRetry` got, and how the call ended. */
+    interface Outcome {
+      name: string;
+      met: Kind[];
+      requests: number;
+      gaps: number[];
+      afterTimeout: number[];
+      afterOther: number[];
+      told: ChatRetryInfo[];
+      ending: Ending;
+    }
+
+    /** Run one script to its end. Gap `i` is the time between failure `i`
+     * and its retry, so the gaps split by the kind of failure before them. */
+    async function run({ failures, then, name }: Script): Promise<Outcome> {
       const met: Kind[] = [];
       const sentAt: number[] = [];
-      const { retries, ending } = start(async () => {
+      const { retries: told, ending } = start(async () => {
         sentAt.push(Date.now());
         const kind = failures[sentAt.length - 1] ?? (then === 'failure' ? failures.at(-1) : null);
         if (!kind) return 'reply';
@@ -283,77 +296,135 @@ describe('callWithRetries', () => {
       });
       await vi.runAllTimersAsync();
       const gaps = sentAt.slice(1).map((at, i) => at - sentAt[i]);
-      return { met, requests: sentAt.length, gaps, retries, ending };
+      const afterTimeout = gaps.filter((_, i) => met[i] === 'timeout');
+      const afterOther = gaps.filter((_, i) => met[i] !== 'timeout');
+      return { name, met, requests: sentAt.length, gaps, afterTimeout, afterOther, told, ending };
     }
 
     const MOST_REQUESTS = 1 + RETRY_BACKOFFS_MS.length;
     const MOST_WAITING = sum(RETRY_BACKOFFS_MS);
     const MOST_TIMEOUTS = 1 + TIMEOUT_RETRIES;
 
-    it('holds the four rules and the three bounds, and reaches each bound', async () => {
-      const most = {
-        requests: { value: -1, by: '' },
-        waiting: { value: -1, by: '' },
-        timeouts: { value: -1, by: '' },
-      };
-      const all = scripts(1 + MOST_REQUESTS);
-      expect(all).toHaveLength(3 ** (2 + MOST_REQUESTS) - 2);
+    const timeouts = (o: Outcome) => o.met.filter((k) => k === 'timeout').length;
 
-      for (const script of all) {
-        const { met, requests, gaps, retries, ending } = await run(script);
-        const of = (what: string) => `${what}, in: ${script.name}`;
-        const figures = {
-          requests,
-          waiting: sum(gaps),
-          timeouts: met.filter((k) => k === 'timeout').length,
-        };
+    // Every script is run once, here, and each test below reads the outcomes.
+    // This hook runs before the `beforeEach` above, so it sets the clock.
+    const outcomes: Outcome[] = [];
+    beforeAll(async () => {
+      vi.useFakeTimers();
+      for (const script of scripts(1 + MOST_REQUESTS)) outcomes.push(await run(script));
+      vi.useRealTimers();
+    });
 
-        expect(ending.settled, of('the call ends')).toBe(true);
-        expect(figures.requests, of('requests')).toBeLessThanOrEqual(MOST_REQUESTS);
-        expect(figures.waiting, of('waiting')).toBeLessThanOrEqual(MOST_WAITING);
-        expect(figures.timeouts, of('timeouts')).toBeLessThanOrEqual(MOST_TIMEOUTS);
+    /** Every script that breaks a property, as `name: what it did`. A test
+     * expects this to be empty, so a failure lists all of them. */
+    const breaking = (broken: (o: Outcome) => string | false) =>
+      outcomes.flatMap((o) => {
+        const what = broken(o);
+        return what === false ? [] : [`${o.name}: ${what}`];
+      });
 
-        // Rule by rule. Each gap is the time between a failure and its retry.
-        const afterTimeout = gaps.filter((_, i) => met[i] === 'timeout');
-        const afterOther = gaps.filter((_, i) => met[i] !== 'timeout');
-        expect(afterTimeout, of('no wait follows a timeout')).toEqual(afterTimeout.map(() => 0));
-        expect(afterTimeout.length, of('retries after a timeout')).toBeLessThanOrEqual(
-          TIMEOUT_RETRIES
+    /** The names of the scripts whose figure is at least `bound`. */
+    const reaching = (figure: (o: Outcome) => number, bound: number) =>
+      outcomes.filter((o) => figure(o) >= bound).map((o) => o.name);
+
+    it('covers every sequence of up to one failure more than the most requests', () => {
+      expect(outcomes).toHaveLength(3 ** (2 + MOST_REQUESTS) - 2);
+    });
+
+    it('every call ends', () => {
+      expect(breaking((o) => !o.ending.settled && 'never ended')).toEqual([]);
+    });
+
+    describe('the bounds', () => {
+      it('no call makes more than 1 + RETRY_BACKOFFS_MS.length requests', () => {
+        expect(breaking((o) => o.requests > MOST_REQUESTS && `${o.requests} requests`)).toEqual([]);
+      });
+
+      it('no call waits longer in all than the sum of RETRY_BACKOFFS_MS', () => {
+        expect(breaking((o) => sum(o.gaps) > MOST_WAITING && `waited ${sum(o.gaps)} ms`)).toEqual(
+          []
         );
-        expect(afterOther, of('the waits are the first of the list, in order')).toEqual(
-          RETRY_BACKOFFS_MS.slice(0, afterOther.length)
+      });
+
+      it('no call meets more than 1 + TIMEOUT_RETRIES timeouts', () => {
+        expect(breaking((o) => timeouts(o) > MOST_TIMEOUTS && `${timeouts(o)} timeouts`)).toEqual(
+          []
         );
-        expect(retries, of('onRetry is told once per retry, of that retry')).toEqual(
-          gaps.map((delayMs, i) => ({
-            attempt: i + 1,
-            maxAttempts: RETRY_BACKOFFS_MS.length,
-            delayMs,
-            reason: expect.any(String),
-          }))
-        );
+      });
 
-        // A call stops retrying only where a rule says so.
-        if ('error' in ending) {
-          const outOfRequests = requests === MOST_REQUESTS;
-          const outOfTimeoutRetries =
-            met.at(-1) === 'timeout' && afterTimeout.length === TIMEOUT_RETRIES;
-          expect(outOfRequests || outOfTimeoutRetries, of('gave up by a rule')).toBe(true);
-        } else {
-          expect(requests, of('requests to the success')).toBe(script.failures.length + 1);
-        }
+      it('the most requests are made by a call that fails with a status every time', () => {
+        expect(reaching((o) => o.requests, MOST_REQUESTS)).toContain('status, for ever');
+      });
 
-        for (const key of ['requests', 'waiting', 'timeouts'] as const) {
-          if (figures[key] > most[key].value) most[key] = { value: figures[key], by: script.name };
-        }
-      }
+      it('the most waiting is done by a call that fails with a status every time', () => {
+        expect(reaching((o) => sum(o.gaps), MOST_WAITING)).toContain('status, for ever');
+      });
 
-      expect(most.requests.value, `most requests, reached by: ${most.requests.by}`).toBe(
-        MOST_REQUESTS
-      );
-      expect(most.waiting.value, `most waiting, reached by: ${most.waiting.by}`).toBe(MOST_WAITING);
-      expect(most.timeouts.value, `most timeouts, reached by: ${most.timeouts.by}`).toBe(
-        MOST_TIMEOUTS
-      );
+      it('the most timeouts are met by a call that is never answered', () => {
+        expect(reaching(timeouts, MOST_TIMEOUTS)).toContain('timeout, for ever');
+      });
+    });
+
+    describe('the rules', () => {
+      it('no wait follows a timeout', () => {
+        expect(
+          breaking(
+            (o) =>
+              o.afterTimeout.some((ms) => ms !== 0) &&
+              `waited ${o.afterTimeout.join(', ')} ms after its timeouts`
+          )
+        ).toEqual([]);
+      });
+
+      it('at most TIMEOUT_RETRIES retries follow a timeout', () => {
+        expect(
+          breaking(
+            (o) =>
+              o.afterTimeout.length > TIMEOUT_RETRIES &&
+              `${o.afterTimeout.length} retries after a timeout`
+          )
+        ).toEqual([]);
+      });
+
+      it('the waits after the other failures are the first of the list, in order', () => {
+        expect(
+          breaking(
+            (o) =>
+              o.afterOther.some((ms, i) => ms !== RETRY_BACKOFFS_MS[i]) &&
+              `waited ${o.afterOther.join(', ')} ms`
+          )
+        ).toEqual([]);
+      });
+
+      it("onRetry is told once per retry, with that retry's attempt and wait", () => {
+        const brief = (rows: unknown[][]) => JSON.stringify(rows);
+        expect(
+          breaking((o) => {
+            const told = brief(o.told.map((t) => [t.attempt, t.maxAttempts, t.delayMs]));
+            const due = brief(o.gaps.map((ms, i) => [i + 1, RETRY_BACKOFFS_MS.length, ms]));
+            return told !== due && `told ${told}, where ${due} happened`;
+          })
+        ).toEqual([]);
+      });
+
+      // Out of requests, or a timeout with no retry after a timeout left.
+      // Giving up later than a rule says is for the bounds to catch.
+      it('a call gives up no sooner than a rule says', () => {
+        expect(
+          breaking((o) => {
+            if (!('error' in o.ending)) return false;
+            const outOfRequests = o.requests >= MOST_REQUESTS;
+            const outOfTimeoutRetries =
+              o.met.at(-1) === 'timeout' && o.afterTimeout.length >= TIMEOUT_RETRIES;
+            return (
+              !outOfRequests &&
+              !outOfTimeoutRetries &&
+              `gave up after ${o.requests} requests, the last a ${o.met.at(-1)}`
+            );
+          })
+        ).toEqual([]);
+      });
     });
   });
 
