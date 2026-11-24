@@ -306,7 +306,7 @@ describe.each(CASES)('$title: the library retry policy is the only one', ({ ok, 
     expect(classOf(error)).toBe('APIConnectionTimeoutError');
     expect(fetchMock).toHaveBeenCalledTimes(1 + TIMEOUT_RETRIES);
     expect(retries.map((r) => [r.attempt, r.maxAttempts, r.delayMs])).toEqual(
-      Array.from({ length: TIMEOUT_RETRIES }, (_, i) => [i + 1, TIMEOUT_RETRIES, 0])
+      Array.from({ length: TIMEOUT_RETRIES }, (_, i) => [i + 1, RETRIES, 0])
     );
     expect(Date.now() - began).toBe((1 + TIMEOUT_RETRIES) * OpenAI.DEFAULT_TIMEOUT);
   });

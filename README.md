@@ -216,26 +216,29 @@ clients (`maxRetries: 0`), and the policy retries everything the SDK's did.
 | Anything else                                                              | once          |
 | Any of the above, once `abortSignal` is aborted                            | not again     |
 
-- **Attempts.** A request is sent once and, while it keeps failing in a retried
-  way, up to 3 times more: 4 requests at most. In `chatWithToolLoop`
-  that holds for each request of the loop separately.
-- **Waits.** 5 seconds before the first retry, 30 before the second, 120 before
-  the third.
-- **A request timeout** is the exception to both. A request the SDK gave up
-  waiting on has already run to the SDK's request timeout, 10 minutes by
-  default, which these adapters do not change. It is sent again at once, with no
-  wait, and only while the call has made fewer than 2 retries: 3 requests at
-  most.
-- **The worst case.** A request that fails every time with a status or a
-  connection failure is given up after 4 requests and 155 seconds of waiting (2
-  minutes 35 seconds), plus the time the requests themselves take. A request
-  that is never answered is given up after 3 requests and 30 minutes, with no
-  waiting between them. A call that meets both kinds can hold 3 timeouts and one
-  other failure: 4 requests, 30 minutes of timeouts and at most 120 seconds of
-  waiting.
-- **`onRetry`** is called once before each wait, with `attempt` counting from
-  1, `maxAttempts` (the retries allowed for that failure: 3, or 2 for a request
-  timeout), `delayMs` (0 for a request timeout) and a `reason`. Every request
+The policy is four rules, each true of every call (in `chatWithToolLoop`, of
+each request of the loop separately):
+
+1. **Requests.** A request is sent once and, while it keeps failing in a retried
+   way, up to 3 times more: 4 requests at most, whatever the failures.
+2. **Waits.** A failure that is not a request timeout is retried after the next
+   unused wait, in order: 5 seconds, then 30, then 120.
+3. **A request timeout** is retried at once, with no wait, and at most 2 of a
+   call's retries follow a timeout. A request the SDK gave up waiting on has
+   already run to the SDK's request timeout, 10 minutes by default, which these
+   adapters do not change.
+4. **Nothing else** is retried, and an abort ends a wait and stops retrying.
+
+- **The bounds.** From the rules, every call, whatever mix of failures it meets,
+  makes at most 4 requests, waits at most 155 seconds in all (2 minutes 35
+  seconds), and meets at most 3 request timeouts. Each is reached. A request
+  that fails every time with a status or a connection failure is given up after
+  4 requests and 155 seconds of waiting, plus the time the requests themselves
+  take. A request that is never answered is given up after 3 requests and 30
+  minutes, with no waiting between them.
+- **`onRetry`** is called once before each retry, with `attempt` counting from
+  1, `maxAttempts` (the most retries a call makes: 3), `delayMs` (the wait; 0
+  after a request timeout) and a `reason`. Every request
   after the first is preceded by one `onRetry` call.
 - **An abort.** Once `abortSignal` is aborted no request is started. Aborted
   before the first request, the call sends nothing. Aborted during a wait, the

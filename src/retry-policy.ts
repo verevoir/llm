@@ -18,8 +18,8 @@
 import type { ChatRetryInfo } from './index.js';
 
 /**
- * The wait before each retry. Its length is the number of retries: a request
- * is sent at most `1 + RETRY_BACKOFFS_MS.length` times.
+ * The waits before retries, used in order. Its length is the most retries a
+ * call makes: a request is sent at most `1 + RETRY_BACKOFFS_MS.length` times.
  *
  * **Where the figures come from.** They are inherited, not derived here. The
  * same list stands in `src/anthropic/adapter.ts`, whose comment gives its
@@ -50,7 +50,7 @@ import type { ChatRetryInfo } from './index.js';
  * failures. The record above is about outages; for connection failures and
  * for 408, 409 and the wider 5xx statuses the `openai` SDK's own rule waits
  * between half a second and eight seconds, and these figures have not been
- * tuned for them. A request timeout is retried too, but does not use the
+ * tuned for them. A request timeout is retried too, with no wait from the
  * list: see {@link TIMEOUT_RETRIES}.
  *
  * **What would say they are wrong.** `onRetry` is given `attempt`, `delayMs`
@@ -67,11 +67,12 @@ export const RETRY_BACKOFFS_MS: readonly number[] = [
 ];
 
 /**
- * How many times a request that timed out (the SDK's
- * `APIConnectionTimeoutError`) is retried, with no wait: the count of the
- * SDK's own rule. A timeout has already spent the SDK's request timeout (10
- * minutes by default) without an answer, so a wait adds nothing, and each
- * retry may spend as long again: three requests, 30 minutes at most.
+ * How many of a call's retries may follow a request that timed out (the SDK's
+ * `APIConnectionTimeoutError`): the count of the SDK's own rule. Such a retry
+ * is made with no wait: a timeout has already spent the SDK's request timeout
+ * (10 minutes by default) without an answer, so a wait adds nothing, and each
+ * retry may spend as long again. The bound this gives every call is stated on
+ * {@link callWithRetries}.
  */
 export const TIMEOUT_RETRIES = 2;
 
@@ -192,13 +193,36 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 /**
- * Make `call`, and make it again while it fails with an error
- * {@link retriableReason} retries: after each wait of
- * {@link RETRY_BACKOFFS_MS}, or, for a request timeout, at once and only
- * while fewer than {@link TIMEOUT_RETRIES} retries have been made. `onRetry`
- * is told before each wait, with the retries allowed for that failure as
- * `maxAttempts`; what it throws is logged and does not stop the retry. The
- * last error is thrown.
+ * Make `call`, and make it again while it fails, by four rules that each hold
+ * for every call:
+ *
+ * 1. A call makes at most `1 + RETRY_BACKOFFS_MS.length` requests, whatever
+ *    the failures.
+ * 2. A failure {@link retriableReason} retries that is not a request timeout
+ *    is retried after the next unused wait of {@link RETRY_BACKOFFS_MS}, in
+ *    order.
+ * 3. A request timeout is retried at once, and at most
+ *    {@link TIMEOUT_RETRIES} of a call's retries follow a timeout.
+ * 4. Nothing else is retried, and an abort ends a wait and stops retrying
+ *    (below).
+ *
+ * **The bounds, for every call**, whatever mix of failures it meets:
+ *
+ * - at most `1 + RETRY_BACKOFFS_MS.length` requests (4), by rule 1;
+ * - at most the sum of {@link RETRY_BACKOFFS_MS} of waiting (155 seconds):
+ *   by rule 2 each wait is used once at most, and by rule 3 a timeout adds
+ *   none;
+ * - at most `1 + TIMEOUT_RETRIES` request timeouts (3): a timeout that is not
+ *   retried is the call's last request, and rule 3 retries that many.
+ *
+ * Each is reached: the first two by a call that fails every time with a
+ * status or a connection failure, the third by a call that is never
+ * answered, which is therefore given up after `1 + TIMEOUT_RETRIES` requests.
+ *
+ * `onRetry` is told once before each retry: `attempt` counts the call's
+ * retries from 1, `maxAttempts` is `RETRY_BACKOFFS_MS.length`, and `delayMs`
+ * is the wait, 0 after a timeout. What it throws is logged and does not stop
+ * the retry. The last error is thrown.
  *
  * `signal` is the caller's `AbortSignal`. Once it is aborted no request is
  * started: an attempt is not made, a wait in progress ends at once, and a
@@ -213,21 +237,24 @@ export async function callWithRetries<T>(
   onRetry?: (info: ChatRetryInfo) => Promise<void>,
   signal?: AbortSignal
 ): Promise<T> {
-  for (let i = 0; ; i++) {
+  const maxAttempts = RETRY_BACKOFFS_MS.length;
+  let timeoutRetries = 0;
+  for (let retries = 0; ; retries++) {
     throwIfAborted(signal);
     try {
       return await call();
     } catch (err) {
       const reason = retriableReason(err, label);
-      if (!reason) throw err;
+      if (!reason || retries === maxAttempts) throw err;
       const timedOut = classNameOf(err as object) === TIMEOUT_CLASS;
-      const maxAttempts = timedOut ? TIMEOUT_RETRIES : RETRY_BACKOFFS_MS.length;
-      if (i >= maxAttempts) throw err;
+      if (timedOut && timeoutRetries === TIMEOUT_RETRIES) throw err;
       throwIfAborted(signal);
-      const delayMs = timedOut ? 0 : RETRY_BACKOFFS_MS[i];
+      // The retries that did not follow a timeout have each used one wait.
+      const delayMs = timedOut ? 0 : RETRY_BACKOFFS_MS[retries - timeoutRetries];
+      if (timedOut) timeoutRetries++;
       if (onRetry) {
         try {
-          await onRetry({ attempt: i + 1, maxAttempts, delayMs, reason });
+          await onRetry({ attempt: retries + 1, maxAttempts, delayMs, reason });
         } catch (notifyErr) {
           console.warn('callWithRetries: onRetry callback threw', notifyErr);
         }

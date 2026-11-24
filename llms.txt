@@ -244,16 +244,20 @@ request timeout (the SDK's `APIConnectionError` and
 any response with the header `x-should-retry: true`; and an error whose
 message names a 429, 500, 502 or 503. Never retried: a response with
 `x-should-retry: false`, any other 4xx (400, 401, 403, 404, 422). A retried
-request is sent again up to three times, after waits of 5 s, 30 s and 120 s:
-four requests at most, per request of a tool loop. A request timeout is the
-exception: it is sent again at once, with no wait, and only while the call
-has made fewer than 2 retries (3 requests at most). Worst case for a request
-that fails every time with a status or a connection failure: 4 requests and
-155 s of waiting, plus the requests' own time; if it is never answered, each
-request runs to the SDK's 10-minute timeout: 3 requests, 30 min. A call that
-meets both: at most 3 timeouts, one other failure and 120 s of waiting.
-`onRetry` is called once before each wait (`attempt` from 1, `maxAttempts` 3,
-or 2 for a request timeout, `delayMs`, 0 for a request timeout, `reason`).
+call (each request of a tool loop) follows four rules: (1) it makes at most 4
+requests, whatever the failures; (2) a failure that is not a request timeout
+is retried after the next unused wait, in order: 5 seconds, then
+30, then 120; (3) a request timeout is retried at once, with no wait, and at
+most 2 of a call's retries follow a timeout; (4) nothing else is retried, and
+an abort ends a wait and stops retrying. The bounds, for every call, whatever
+mix of failures it meets: at most 4 requests, at most 155 seconds of waiting
+in all, at most 3 request timeouts. Each is reached: a request that fails
+every time with a status or a connection failure is given up after 4 requests
+and 155 seconds of waiting, plus the requests' own time; one that is never
+answered runs each request to the SDK's 10-minute timeout and is given up
+after 3 requests, 30 minutes. `onRetry` is called once before each retry
+(`attempt` from 1, `maxAttempts` 3, `delayMs` the wait, 0 after a request
+timeout, `reason`).
 An aborted `abortSignal` stops the policy: no request is started once it is
 aborted, a wait in progress ends at once, and the call rejects with the
 signal's `reason`. The signal is not handed to the SDK, so a request in

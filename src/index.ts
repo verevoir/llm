@@ -474,7 +474,7 @@ export interface ProgressInfo {
 export interface ChatRetryInfo {
   /** 1-indexed retry attempt; the original call is attempt 0. */
   attempt: number;
-  /** Total retries that will be made before giving up. */
+  /** The most retries that will be made before giving up. */
   maxAttempts: number;
   /** Milliseconds we're about to wait before this retry. */
   delayMs: number;
