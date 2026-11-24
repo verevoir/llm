@@ -20,6 +20,8 @@ SDK import at all.
 - `src/openai-compat.ts` — the shared factory for the OpenAI-compatible providers
   (deepseek / samba / mistral / openai tool-calling). Imports the `openai` SDK, so it is
   reached only via provider subpaths — never from the core export.
+- `src/retry-policy.ts` — the one retry policy of the adapters that send through the
+  `openai` SDK, whose clients have the SDK's own retries off. Internal and SDK-free.
 - `src/<provider>/` — one directory per adapter, each mapped in `package.json#exports`.
 - Tests are colocated `*.test.ts` beside the code, mocking the provider SDKs via `vi.mock`.
 

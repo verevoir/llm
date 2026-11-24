@@ -234,6 +234,25 @@ is still `Error`. The `claude-cli` held-session turn timeout now carries
 `.code === 'CLAUDE_CLI_SESSION_TURN_TIMEOUT'`
 (`CLAUDE_CLI_SESSION_TURN_TIMEOUT_CODE` on `@verevoir/llm/claude-cli`).
 
+Retries on the adapters that send through the `openai` SDK (`/openai`,
+`/deepseek`, `/samba`, `/mistral`, `/vertex-openai`): one policy, the
+library's own; the SDK's own retries are off on their clients
+(`maxRetries: 0`) and the policy retries what the SDK's did. Retried: HTTP
+408, 409, 429 and any status of 500 or above; a connection failure and a
+request timeout (the SDK's `APIConnectionError` and
+`APIConnectionTimeoutError`, by class name, as `classifyLlmError` reads them);
+any response with the header `x-should-retry: true`; and an error whose
+message names a 429, 500, 502 or 503. Never retried: a response with
+`x-should-retry: false`, any other 4xx (400, 401, 403, 404, 422), an abort.
+A retried request is sent again up to three times, after waits of 5 s, 30 s
+and 120 s: four requests at most, per request of a tool loop. Worst case for a
+request that fails every time: 4 requests and 155 s of waiting, plus the
+requests' own time; if it is never answered, each request runs to the SDK's
+10-minute timeout, 42 min 35 s in all. `onRetry` is called once before each
+wait (`attempt` from 1, `maxAttempts` 3, `delayMs`, `reason`). Known
+difference from the SDK's own retries: `Retry-After` is not honoured; the
+waits are fixed.
+
 ## Cost accounting
 
 Every call returns a `TokenUsage` typed

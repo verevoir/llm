@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.43.0] — 2026-11-24
+
+**The adapters that send through the `openai` SDK now retry a failed request at one layer, where four of them retried at two, and that one layer retries everything the two did.** `@verevoir/llm/openai`, `/deepseek`, `/samba` and `/mistral` each built its client with the SDK's default of two retries, and also wrapped every request in the library's own retry policy, so each attempt of that policy was itself up to three requests. The SDK's retries are now off on these clients (`maxRetries: 0`), as they already were on `/vertex-openai`, and the library's policy is widened to what the SDK's covered. This is a behaviour change for a call that meets a failure: the number of requests and the waits between them change (below). A call that succeeds first time is unchanged, as are the thrown errors and every export.
+
+- **What the policy retries now.** HTTP 408, 409, 429 and any status of 500 or above; a connection failure and a request timeout; and any response carrying `x-should-retry: true`. Before, it retried 429, 500, 502 and 503 only. As before, an error whose message names a 429, 500, 502 or 503 is retried too. 400, 401, 403, 404 and 422 are one request, as they were.
+- **A 429, 500, 502 or 503 answered every time: 12 requests fall to 4.** One request, then the policy's three retries, after waits of 5, 30 and 120 seconds. Before, each of those four attempts was three requests.
+- **A 408, 409, 504 or other 5xx, a connection failure, a request timeout: 3 requests become 4, on longer waits.** Only the SDK retried these, twice, after waits of about half a second and one second. The library's policy now does, three times, after 5, 30 and 120 seconds, and `onRetry` is told, as it never was for these.
+- **`x-should-retry` is read as the SDK read it.** `true` retries a response of any status; `false` stops a retry of any status. One case is retried less than before: a 429, 500, 502 or 503 with `x-should-retry: false` was sent four times, because the library's policy did not read the header, and is now sent once.
+- **`onRetry` is now told of every retry.** It was called three times while eleven requests followed the first; the eight the SDK made were never reported. Every request after the first is now preceded by one call.
+- **Known difference from the SDK's own retries: `Retry-After` is not honoured.** The SDK waited as a `Retry-After` or `retry-after-ms` header asked, within its own retries. The library's policy waits its fixed 5, 30 and 120 seconds whatever the response says.
+- **The worst case.** A request that fails every time is given up after 4 requests and 155 seconds of waiting, plus the requests' own time. One that is never answered runs each request to the SDK's 10-minute timeout: 42 minutes 35 seconds in all, where it was three requests and a little over 30 minutes.
+- **Where it applies.** `chat` on `openai` and `deepseek`. On `samba`, `mistral` and `vertex-openai`, and on any adapter built by the OpenAI-compatible factory: `chat`, `chatWithTools` and every request `chatWithToolLoop` makes. Both the client kept for the key in the environment and the client built for a per-call `apiKey`.
+- **`@verevoir/llm/vertex-openai` changes too.** Its client already had the SDK's retries off, so it retried 429, 500, 502 and 503 only; it now retries the wider list, where those other failures were one request.
+- **One policy in the source.** The three copies of the policy (the factory's, `openai`'s and `deepseek`'s) are one internal module, which no subpath exports. The reasons `onRetry` is given for 429, 500, 502 and 503 are worded as before.
+- The adapters that do not use the `openai` SDK are unchanged.
+
 ## [0.42.0] — 2026-11-24
 
 **New subpath `@verevoir/llm/vertex-openai`: Vertex AI's OpenAI-compatible Chat Completions endpoint, where Google Cloud serves models of several publishers.** It exports `chat`, `chatWithTools`, `chatWithToolLoop` and `PROVIDER` (`'vertex-openai'`), the namespaced `vertexOpenAI`, and the error classes `VertexOpenAIConfigError` and `VertexOpenAITokenError`. The subpath is new; no other subpath's exports or behaviour change, and no core type changes.

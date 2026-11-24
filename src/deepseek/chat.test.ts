@@ -144,7 +144,7 @@ describe('deepseek.chat', () => {
     });
 
     expect(mockClientCtor).toHaveBeenCalledTimes(1);
-    expect(mockClientCtor.mock.calls[0][0]).toEqual({
+    expect(mockClientCtor.mock.calls[0][0]).toMatchObject({
       apiKey: 'sk-test',
       baseURL: 'https://api.deepseek.com',
     });

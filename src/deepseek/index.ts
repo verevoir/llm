@@ -16,10 +16,10 @@
 import OpenAI from 'openai';
 import { fireUsageHook } from '../audit-hook.js';
 import { withGenAISpan } from '../otel.js';
+import { callWithRetries } from '../retry-policy.js';
 import {
   type ChatOptions,
   type ChatReply,
-  type ChatRetryInfo,
   type ModelClass,
   type RatesTable,
   type TokenUsage,
@@ -96,6 +96,18 @@ registerProviderConnection({
   defaultBaseUrl: BASE_URL,
 });
 
+/** A client for `apiKey`. `maxRetries: 0` turns the SDK's own retries off:
+ * {@link callWithRetries} is the only retry a request gets, and covers what
+ * the SDK's covered. With both on, each attempt of that policy was itself up
+ * to three requests, of which `onRetry` was told nothing. */
+function newClient(apiKey: string): OpenAI {
+  return new OpenAI({
+    apiKey,
+    baseURL: resolveBaseUrl('DEEPSEEK_BASE_URL', BASE_URL),
+    maxRetries: 0,
+  });
+}
+
 let defaultClient: OpenAI | null = null;
 
 function getDefaultClient(): OpenAI {
@@ -104,12 +116,12 @@ function getDefaultClient(): OpenAI {
   if (!apiKey) {
     throw new Error('DEEPSEEK_API_KEY is not set and no per-call apiKey was passed.');
   }
-  defaultClient = new OpenAI({ apiKey, baseURL: resolveBaseUrl('DEEPSEEK_BASE_URL', BASE_URL) });
+  defaultClient = newClient(apiKey);
   return defaultClient;
 }
 
 function getClient(apiKey: string | null): OpenAI {
-  if (apiKey) return new OpenAI({ apiKey, baseURL: resolveBaseUrl('DEEPSEEK_BASE_URL', BASE_URL) });
+  if (apiKey) return newClient(apiKey);
   return getDefaultClient();
 }
 
@@ -189,70 +201,6 @@ async function callChatCompletionsCreate(
   });
 }
 
-// DeepSeek outages and rate limits are handled with the same exponential-
-// backoff shape as the other adapters. Reason strings name the provider
-// so retry-narration messages stay informative across providers. Capped at 3
-// retries (~2 min total).
-const RETRY_BACKOFFS_MS = [
-  5_000, //   5 sec
-  30_000, //  30 sec
-  120_000, // 2 min
-];
-
-async function callWithRetries<T>(
-  call: () => Promise<T>,
-  onRetry?: (info: ChatRetryInfo) => Promise<void>
-): Promise<T> {
-  for (let i = 0; i <= RETRY_BACKOFFS_MS.length; i++) {
-    try {
-      return await call();
-    } catch (err) {
-      const reason = retriableReason(err);
-      if (!reason) throw err;
-      if (i === RETRY_BACKOFFS_MS.length) throw err;
-      const delayMs = RETRY_BACKOFFS_MS[i];
-      if (onRetry) {
-        try {
-          await onRetry({
-            attempt: i + 1,
-            maxAttempts: RETRY_BACKOFFS_MS.length,
-            delayMs,
-            reason,
-          });
-        } catch (notifyErr) {
-          console.warn('callWithRetries: onRetry callback threw', notifyErr);
-        }
-      }
-      await delay(delayMs);
-    }
-  }
-  throw new Error('callWithRetries: exited loop without return or throw');
-}
-
-function retriableReason(err: unknown): string | null {
-  if (!err || typeof err !== 'object') return null;
-  const candidate = err as { status?: number; message?: string };
-  const status = candidate.status;
-  const message = typeof candidate.message === 'string' ? candidate.message : '';
-  if (status === 503 || /\b503\b|service[_ ]unavailable/i.test(message)) {
-    return 'DeepSeek service unavailable (503)';
-  }
-  if (status === 500 || /\b500\b|internal_server_error/i.test(message)) {
-    return 'DeepSeek internal error (500)';
-  }
-  if (status === 429 || /\b429\b|rate[_ ]limit/i.test(message)) {
-    return 'DeepSeek rate-limited (429)';
-  }
-  if (status === 502 || /\b502\b|bad[_ ]gateway/i.test(message)) {
-    return 'DeepSeek bad gateway (502)';
-  }
-  return null;
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 /** `modelId` is the id that was sent: the caller's `model` when given,
  * otherwise `models[direction]`. `direction` stays the class. */
 function shapeUsage(
@@ -318,6 +266,7 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
 
   const raw = await callWithRetries(
     () => callChatCompletionsCreate(client, modelId, options.systemPrompt, options.turns),
+    'DeepSeek',
     options.onRetry
   );
 

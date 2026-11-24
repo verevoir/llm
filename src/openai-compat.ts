@@ -21,6 +21,7 @@ import OpenAI from 'openai';
 import { fireUsageHook } from './audit-hook.js';
 import { withGenAISpan } from './otel.js';
 import { collapseContentToText } from './index.js';
+import { callWithRetries as callWithPolicy } from './retry-policy.js';
 import {
   type ChatOptions,
   type ChatReply,
@@ -108,10 +109,6 @@ interface OpenAIToolCall {
   function: { name: string; arguments: string };
 }
 
-// Same exponential-backoff shape as the other adapters; reason strings name the
-// provider so retry narration stays informative across providers.
-const RETRY_BACKOFFS_MS = [5_000, 30_000, 120_000]; // Cap at 3 retries (~2 min total)
-
 /** Derive the class→model map from the catalogue, filling the tier ladder so
  * every class resolves: a missing `drafting` falls **up** to reasoning; a
  * missing tier borrows the nearest declared one. (Mirrors the DeepSeek
@@ -151,30 +148,6 @@ export interface CompatUsage {
   completion_tokens_details?: { reasoning_tokens?: number } | null;
 }
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function retriableReason(err: unknown, provider: string): string | null {
-  if (!err || typeof err !== 'object') return null;
-  const candidate = err as { status?: number; message?: string };
-  const status = candidate.status;
-  const message = typeof candidate.message === 'string' ? candidate.message : '';
-  if (status === 503 || /\b503\b|service[_ ]unavailable/i.test(message)) {
-    return `${provider} service unavailable (503)`;
-  }
-  if (status === 500 || /\b500\b|internal_server_error/i.test(message)) {
-    return `${provider} internal error (500)`;
-  }
-  if (status === 429 || /\b429\b|rate[_ ]limit/i.test(message)) {
-    return `${provider} rate-limited (429)`;
-  }
-  if (status === 502 || /\b502\b|bad[_ ]gateway/i.test(message)) {
-    return `${provider} bad gateway (502)`;
-  }
-  return null;
-}
-
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (!signal?.aborted) return;
   if (signal.reason instanceof Error) throw signal.reason;
@@ -202,17 +175,24 @@ export function createOpenAICompatAdapter(config: OpenAICompatConfig): OpenAICom
     defaultBaseUrl: baseURL,
   });
 
+  /** A client for `apiKey`. `maxRetries: 0` turns the SDK's own retries off:
+   * `callWithRetries` in `./retry-policy.js` is the only retry a request gets,
+   * and covers what the SDK's covered. With both on, each attempt of that
+   * policy was itself up to three requests, of which `onRetry` was told nothing. */
+  function newClient(apiKey: string): OpenAI {
+    return new OpenAI({ apiKey, baseURL: resolveBaseUrl(baseUrlEnv, baseURL), maxRetries: 0 });
+  }
+
   let defaultClient: OpenAI | null = null;
   function getClient(apiKey: string | null): OpenAI {
-    const url = resolveBaseUrl(baseUrlEnv, baseURL);
-    if (apiKey) return new OpenAI({ apiKey, baseURL: url });
+    if (apiKey) return newClient(apiKey);
     if (defaultClient) return defaultClient;
     const env =
       process.env[apiKeyEnv] || (keylessCapable ? localEndpointKey(baseUrlEnv) : undefined);
     if (!env) {
       throw new Error(`${apiKeyEnv} is not set and no per-call apiKey was passed.`);
     }
-    defaultClient = new OpenAI({ apiKey: env, baseURL: url });
+    defaultClient = newClient(env);
     return defaultClient;
   }
 
@@ -286,35 +266,11 @@ export function createOpenAICompatCalls(config: OpenAICompatCallsConfig): OpenAI
     });
   }
 
-  async function callWithRetries<T>(
+  /** The shared policy, with this provider's name in the reasons it gives. */
+  const callWithRetries = <T>(
     call: () => Promise<T>,
     onRetry?: (info: ChatRetryInfo) => Promise<void>
-  ): Promise<T> {
-    for (let i = 0; i <= RETRY_BACKOFFS_MS.length; i++) {
-      try {
-        return await call();
-      } catch (err) {
-        const reason = retriableReason(err, provider);
-        if (!reason) throw err;
-        if (i === RETRY_BACKOFFS_MS.length) throw err;
-        const delayMs = RETRY_BACKOFFS_MS[i];
-        if (onRetry) {
-          try {
-            await onRetry({
-              attempt: i + 1,
-              maxAttempts: RETRY_BACKOFFS_MS.length,
-              delayMs,
-              reason,
-            });
-          } catch (notifyErr) {
-            console.warn('callWithRetries: onRetry callback threw', notifyErr);
-          }
-        }
-        await delay(delayMs);
-      }
-    }
-    throw new Error('callWithRetries: exited loop without return or throw');
-  }
+  ): Promise<T> => callWithPolicy(call, provider, onRetry);
 
   /** `modelId` is the id that was sent: the caller's `model` when given,
    * otherwise the catalogue's id for the class. `direction` stays the class. */
