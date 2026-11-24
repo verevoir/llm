@@ -1,20 +1,22 @@
 /**
  * The adapters that send through the `openai` SDK retry at one layer only: the
- * library's own policy, which covers what the SDK's own retries covered. Each
- * test counts the requests that reach `fetch`, with the real SDK in between,
- * so a retry the SDK made on its own would be counted too. (The adapters'
- * other retry tests replace the SDK's `create`, and so cannot see what the SDK
- * does beneath it.) No network; every wait, the SDK's request timeout
- * included, runs on fake timers.
+ * library's own policy, which retries what the SDK's own rule retries, and
+ * which each adapter hands its caller's `abortSignal`. Each test counts the
+ * requests that reach `fetch`, with the real SDK in between, so a retry the
+ * SDK made on its own would be counted too. (The adapters' other retry tests
+ * replace the SDK's `create`, and so cannot see what the SDK does beneath it.)
+ * No network; every wait, the SDK's request timeout included, runs on fake
+ * timers.
  */
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import OpenAI from 'openai';
 import type { ChatRetryInfo, ToolDef } from './index.js';
 import * as deepseek from './deepseek/index.js';
 import * as mistral from './mistral/index.js';
 import * as openai from './openai/index.js';
 import * as samba from './samba/index.js';
-import { RETRY_BACKOFFS_MS } from './retry-policy.js';
+import { RETRY_BACKOFFS_MS, TIMEOUT_RETRIES } from './retry-policy.js';
 
 const fetchMock = vi.fn<(url: string | URL | Request, init?: RequestInit) => Promise<Response>>();
 
@@ -58,7 +60,11 @@ const TOOL: ToolDef = {
   input_schema: { type: 'object', properties: {} },
 };
 
-type Extra = { apiKey?: string; onRetry?: (info: ChatRetryInfo) => Promise<void> };
+type Extra = {
+  apiKey?: string;
+  onRetry?: (info: ChatRetryInfo) => Promise<void>;
+  abortSignal?: AbortSignal;
+};
 type Call = (extra: Extra) => Promise<unknown>;
 
 /** The three call shapes of an adapter built by the OpenAI-compatible factory. */
@@ -204,8 +210,8 @@ const RETRIES = RETRY_BACKOFFS_MS.length;
 
 type Row = [name: string, arrange: () => void, thrown: (error: unknown) => void];
 
-/** Every failure the policy retries: how to produce it, and what is thrown
- * once the retries are spent. */
+/** Every failure the policy retries on its list of waits: how to produce it,
+ * and what is thrown once the retries are spent. */
 const RETRIED: Row[] = [
   ...[408, 409, 429, 500, 502, 503, 504, 529].map((status): Row => [
     `a ${status}`,
@@ -216,11 +222,6 @@ const RETRIED: Row[] = [
     'a connection failure (fetch rejects)',
     failToConnect,
     (error) => expect(classOf(error)).toBe('APIConnectionError'),
-  ],
-  [
-    "a request timeout (the SDK's own, after no answer)",
-    neverAnswer,
-    (error) => expect(classOf(error)).toBe('APIConnectionTimeoutError'),
   ],
   [
     'a 400 with x-should-retry: true',
@@ -293,5 +294,65 @@ describe.each(CASES)('$title: the library retry policy is the only one', ({ ok, 
     expect(resolved).toBe(true);
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(retries.map((r) => r.attempt)).toEqual([1]);
+  });
+
+  it("sends a request never answered once, then TIMEOUT_RETRIES times more with no wait: the SDK's request timeout each time, and nothing between", async () => {
+    neverAnswer();
+    const began = Date.now();
+
+    const { resolved, error, retries } = await run(call, key);
+
+    expect(resolved).toBe(false);
+    expect(classOf(error)).toBe('APIConnectionTimeoutError');
+    expect(fetchMock).toHaveBeenCalledTimes(1 + TIMEOUT_RETRIES);
+    expect(retries.map((r) => [r.attempt, r.maxAttempts, r.delayMs])).toEqual(
+      Array.from({ length: TIMEOUT_RETRIES }, (_, i) => [i + 1, TIMEOUT_RETRIES, 0])
+    );
+    expect(Date.now() - began).toBe((1 + TIMEOUT_RETRIES) * OpenAI.DEFAULT_TIMEOUT);
+  });
+
+  it.each(RETRY_BACKOFFS_MS.map((ms, i) => [i + 1, ms / 1000, i] as const))(
+    "an abort of the caller's signal during wait %i (%i s) ends the call at once with the signal's reason, and no further request is sent",
+    async (_n, _seconds, i) => {
+      refuse(503)();
+      const controller = new AbortController();
+      const reason = new Error('the caller gave up');
+      let ended: { error: unknown } | undefined;
+      void call({ ...key, abortSignal: controller.signal }).then(
+        () => (ended = { error: undefined }),
+        (error: unknown) => (ended = { error })
+      );
+
+      // To the middle of this wait: every wait before it has run out.
+      const waited = RETRY_BACKOFFS_MS.slice(0, i).reduce((a, b) => a + b, 0);
+      await vi.advanceTimersByTimeAsync(waited + RETRY_BACKOFFS_MS[i] / 2);
+      expect(fetchMock).toHaveBeenCalledTimes(i + 1);
+      expect(ended).toBeUndefined();
+
+      controller.abort(reason);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(ended).toEqual({ error: reason });
+      expect(ended?.error).toBe(reason);
+      await vi.runAllTimersAsync();
+      expect(fetchMock).toHaveBeenCalledTimes(i + 1);
+    }
+  );
+
+  it("sends nothing when the caller's signal is aborted before the call", async () => {
+    answer(ok, 200);
+    const controller = new AbortController();
+    const reason = new Error('the caller gave up');
+    controller.abort(reason);
+
+    const { resolved, error, retries } = await run(call, {
+      ...key,
+      abortSignal: controller.signal,
+    });
+
+    expect(resolved).toBe(false);
+    expect(error).toBe(reason);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(retries).toEqual([]);
   });
 });

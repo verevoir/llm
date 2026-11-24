@@ -14,7 +14,7 @@
 import OpenAI from 'openai';
 import { fireUsageHook } from '../audit-hook.js';
 import { withGenAISpan } from '../otel.js';
-import { callWithRetries } from '../retry-policy.js';
+import { callWithRetries, throwIfAborted } from '../retry-policy.js';
 import {
   type ChatOptions,
   type ChatReply,
@@ -97,9 +97,9 @@ registerProviderConnection({
 });
 
 /** A client for `apiKey`. `maxRetries: 0` turns the SDK's own retries off:
- * {@link callWithRetries} is the only retry a request gets, and covers what
- * the SDK's covered. With both on, each attempt of that policy was itself up
- * to three requests, of which `onRetry` was told nothing. */
+ * {@link callWithRetries} is the only retry a request gets. With both on, each
+ * attempt of that policy would itself be up to three requests, and `onRetry`
+ * would be told of none of the SDK's. */
 function newClient(apiKey: string): OpenAI {
   return new OpenAI({ apiKey, baseURL: resolveBaseUrl('OPENAI_BASE_URL'), maxRetries: 0 });
 }
@@ -208,16 +208,6 @@ function shapeUsage(
   };
 }
 
-/** Throw the AbortSignal's reason (or a generic AbortError) when
- * the signal is aborted. No-op when no signal is provided or the
- * signal has not been aborted. */
-function throwIfAborted(signal: AbortSignal | undefined): void {
-  if (!signal?.aborted) return;
-  if (signal.reason instanceof Error) throw signal.reason;
-  if (signal.reason !== undefined) throw new Error(String(signal.reason));
-  throw new DOMException('Aborted', 'AbortError');
-}
-
 // ────────────────────────────────────────────────────────────────────
 // Public API
 // ────────────────────────────────────────────────────────────────────
@@ -244,7 +234,8 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
   const raw = await callWithRetries(
     () => callResponsesCreate(client, modelId, options.systemPrompt, options.turns),
     'OpenAI',
-    options.onRetry
+    options.onRetry,
+    options.abortSignal
   );
 
   if (raw.status && raw.status !== 'completed') {

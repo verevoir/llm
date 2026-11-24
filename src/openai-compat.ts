@@ -21,7 +21,7 @@ import OpenAI from 'openai';
 import { fireUsageHook } from './audit-hook.js';
 import { withGenAISpan } from './otel.js';
 import { collapseContentToText } from './index.js';
-import { callWithRetries as callWithPolicy } from './retry-policy.js';
+import { callWithRetries as callWithPolicy, throwIfAborted } from './retry-policy.js';
 import {
   type ChatOptions,
   type ChatReply,
@@ -148,13 +148,6 @@ export interface CompatUsage {
   completion_tokens_details?: { reasoning_tokens?: number } | null;
 }
 
-function throwIfAborted(signal: AbortSignal | undefined): void {
-  if (!signal?.aborted) return;
-  if (signal.reason instanceof Error) throw signal.reason;
-  if (signal.reason !== undefined) throw new Error(String(signal.reason));
-  throw new DOMException('Aborted', 'AbortError');
-}
-
 /** Build an OpenAI-compatible adapter for one provider. Registers the model
  * catalogue (decisions key on provider/family; labels + family pricing become
  * available) as an import side-effect, the same way the bespoke adapters
@@ -176,9 +169,9 @@ export function createOpenAICompatAdapter(config: OpenAICompatConfig): OpenAICom
   });
 
   /** A client for `apiKey`. `maxRetries: 0` turns the SDK's own retries off:
-   * `callWithRetries` in `./retry-policy.js` is the only retry a request gets,
-   * and covers what the SDK's covered. With both on, each attempt of that
-   * policy was itself up to three requests, of which `onRetry` was told nothing. */
+   * `callWithRetries` in `./retry-policy.js` is the only retry a request gets.
+   * With both on, each attempt of that policy would itself be up to three
+   * requests, and `onRetry` would be told of none of the SDK's. */
   function newClient(apiKey: string): OpenAI {
     return new OpenAI({ apiKey, baseURL: resolveBaseUrl(baseUrlEnv, baseURL), maxRetries: 0 });
   }
@@ -266,11 +259,13 @@ export function createOpenAICompatCalls(config: OpenAICompatCallsConfig): OpenAI
     });
   }
 
-  /** The shared policy, with this provider's name in the reasons it gives. */
+  /** The shared policy, with this provider's name in the reasons it gives.
+   * `signal` is required, so that no call site can leave the caller's out. */
   const callWithRetries = <T>(
     call: () => Promise<T>,
-    onRetry?: (info: ChatRetryInfo) => Promise<void>
-  ): Promise<T> => callWithPolicy(call, provider, onRetry);
+    onRetry: ((info: ChatRetryInfo) => Promise<void>) | undefined,
+    signal: AbortSignal | undefined
+  ): Promise<T> => callWithPolicy(call, provider, onRetry, signal);
 
   /** `modelId` is the id that was sent: the caller's `model` when given,
    * otherwise the catalogue's id for the class. `direction` stays the class. */
@@ -306,7 +301,8 @@ export function createOpenAICompatCalls(config: OpenAICompatCallsConfig): OpenAI
 
     const raw = await callWithRetries(
       () => callChatCompletionsCreate(client, modelId, options.systemPrompt, options.turns),
-      options.onRetry
+      options.onRetry,
+      options.abortSignal
     );
 
     if (raw.finishReason && raw.finishReason !== 'stop') {
@@ -424,7 +420,8 @@ export function createOpenAICompatCalls(config: OpenAICompatCallsConfig): OpenAI
     const r = await callWithRetries(
       () =>
         createWithTools(client, modelId, baseMessages(options.systemPrompt, options.turns), tools),
-      options.onRetry
+      options.onRetry,
+      options.abortSignal
     );
     const usage = shapeUsage(r.raw, modelClass, modelId);
     await fireUsageHook(options.onUsage, usage, `${provider}.chatWithTools`);
@@ -472,7 +469,8 @@ export function createOpenAICompatCalls(config: OpenAICompatCallsConfig): OpenAI
       throwIfAborted(options.abortSignal);
       const r = await callWithRetries(
         () => createWithTools(client, modelId, messages, tools),
-        options.onRetry
+        options.onRetry,
+        options.abortSignal
       );
       aggregate.inputTokens += r.raw.inputTokens;
       aggregate.outputTokens += r.raw.outputTokens;
@@ -534,7 +532,8 @@ export function createOpenAICompatCalls(config: OpenAICompatCallsConfig): OpenAI
     try {
       const fin = await callWithRetries(
         () => createWithTools(client, modelId, messages, toOpenAITools([])),
-        options.onRetry
+        options.onRetry,
+        options.abortSignal
       );
       aggregate.inputTokens += fin.raw.inputTokens;
       aggregate.outputTokens += fin.raw.outputTokens;

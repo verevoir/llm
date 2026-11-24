@@ -208,27 +208,45 @@ clients (`maxRetries: 0`), and the policy retries everything the SDK's did.
 | HTTP 408, 409 or 429                                                       | up to 4 times |
 | Any HTTP status of 500 or above (500, 502, 503, 504, 529, …)               | up to 4 times |
 | A connection failure (the SDK's `APIConnectionError`)                      | up to 4 times |
-| A request timeout (the SDK's `APIConnectionTimeoutError`)                  | up to 4 times |
+| A request timeout (the SDK's `APIConnectionTimeoutError`), see below       | up to 3 times |
 | Any status, with the response header `x-should-retry: true`                | up to 4 times |
 | A message naming a 429, 500, 502 or 503 (`rate limit`, …), see below       | up to 4 times |
 | Any status, with the response header `x-should-retry: false`               | once          |
 | Any other 4xx (400, 401, 403, 404, 422, …), without `x-should-retry: true` | once          |
-| An abort through `abortSignal`, or anything else                           | once          |
+| Anything else                                                              | once          |
+| Any of the above, once `abortSignal` is aborted                            | not again     |
 
 - **Attempts.** A request is sent once and, while it keeps failing in a retried
-  way, up to three times more: four requests at most. In `chatWithToolLoop`
+  way, up to 3 times more: 4 requests at most. In `chatWithToolLoop`
   that holds for each request of the loop separately.
 - **Waits.** 5 seconds before the first retry, 30 before the second, 120 before
   the third.
-- **The worst case.** A request that fails every time is given up after 4
-  requests and 155 seconds of waiting (2 minutes 35 seconds), plus the time the
-  four requests themselves take. When the failure is no answer at all, each
-  request runs to the SDK's request timeout, 10 minutes by default, which these
-  adapters do not change: 4 requests, 40 minutes of requests and 155 seconds of
-  waiting, 42 minutes 35 seconds in all.
+- **A request timeout** is the exception to both. A request the SDK gave up
+  waiting on has already run to the SDK's request timeout, 10 minutes by
+  default, which these adapters do not change. It is sent again at once, with no
+  wait, and only while the call has made fewer than 2 retries: 3 requests at
+  most.
+- **The worst case.** A request that fails every time with a status or a
+  connection failure is given up after 4 requests and 155 seconds of waiting (2
+  minutes 35 seconds), plus the time the requests themselves take. A request
+  that is never answered is given up after 3 requests and 30 minutes, with no
+  waiting between them. A call that meets both kinds can hold 3 timeouts and one
+  other failure: 4 requests, 30 minutes of timeouts and at most 120 seconds of
+  waiting.
 - **`onRetry`** is called once before each wait, with `attempt` counting from
-  1, `maxAttempts` (the retries allowed: 3), `delayMs` and a `reason`. Every
-  request after the first is preceded by one `onRetry` call.
+  1, `maxAttempts` (the retries allowed for that failure: 3, or 2 for a request
+  timeout), `delayMs` (0 for a request timeout) and a `reason`. Every request
+  after the first is preceded by one `onRetry` call.
+- **An abort.** Once `abortSignal` is aborted no request is started. Aborted
+  before the first request, the call sends nothing. Aborted during a wait, the
+  wait ends at once. Aborted while a request is in flight, that request is not
+  cut short, because the signal is not handed to the SDK: if it succeeds, `chat`
+  and `chatWithTools` return its reply and `chatWithToolLoop` stops before its
+  next request; if it fails in a retried way it is not sent again and `onRetry`
+  is not called. A request that is never answered can therefore run for up to
+  the SDK's request timeout after the abort. In each case the call rejects with
+  the signal's own `reason` (or an `AbortError` when it has none), which
+  `classifyLlmError` calls `other`.
 - **`x-should-retry`** is read as the SDK reads it: `true` and `false` decide,
   whatever the status; any other value is ignored.
 - **Agreement with `classifyLlmError`.** A connection failure and a timeout are
@@ -239,8 +257,10 @@ clients (`maxRetries: 0`), and the policy retries everything the SDK's did.
 **Known difference from the SDK's own retries: `Retry-After` is not honoured.**
 The SDK waited as a `Retry-After` or `retry-after-ms` header asked, when it
 asked for under a minute; this policy waits its fixed 5, 30 and 120 seconds
-whatever the response says. The SDK's own waits were also shorter (from half a
-second, to eight at most).
+whatever the response says. The SDK's own waits are also shorter (from half a
+second, to eight at most): the 5, 30 and 120 seconds are the library's waits for
+a provider outage, applied as they stand to connection failures and to every
+retried status, and not tuned for those.
 
 **A message can still cause a retry.** An error whose message names a 429, 500,
 502 or 503 is retried even when its status is one the policy does not retry: a
