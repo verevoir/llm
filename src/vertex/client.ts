@@ -34,7 +34,10 @@ export const resolveClient: AnthropicTransport['resolveClient'] = (perCallApiKey
   const region = process.env[REGION_ENV]?.trim();
   if (!region) throw new Error(`No Vertex AI region: set ${REGION_ENV}.`);
   if (kept?.projectId !== projectId || kept.region !== region) {
-    kept = { projectId, region, client: new AnthropicVertex({ projectId, region }) };
+    // maxRetries: 0 turns the SDK's own retries off: the library's retry policy,
+    // applied in the shared adapter, is the only retry a request gets.
+    const client = new AnthropicVertex({ projectId, region, maxRetries: 0 });
+    kept = { projectId, region, client };
   }
   return { client: kept.client, route: 'google-cloud' };
 };

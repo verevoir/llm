@@ -1,4 +1,4 @@
-import Anthropic from '@anthropic-ai/sdk';
+import Anthropic, { type ClientOptions } from '@anthropic-ai/sdk';
 import { resolveBaseUrl } from '../index.js';
 
 // Internal auth/client module for the Anthropic adapter: credential resolution,
@@ -62,24 +62,33 @@ function resolveAnthropicAuth(
   return null;
 }
 
+/** The one place this route constructs an SDK client. `maxRetries: 0` turns the
+ * SDK's own retries off: the library's retry policy (`../retry-policy.ts`),
+ * applied in `./adapter.ts`, is the only retry a request gets. */
+function newClient(credential: ClientOptions): Anthropic {
+  return new Anthropic({
+    ...credential,
+    baseURL: resolveBaseUrl('ANTHROPIC_BASE_URL'),
+    maxRetries: 0,
+  });
+}
+
 /** Construct an SDK client for a resolved credential. A subscription OAuth token
  * is sent as a bearer `authToken` with the required `anthropic-beta` header; an
  * API key is sent as `apiKey`. */
 function buildClient(auth: NonNullable<ReturnType<typeof resolveAnthropicAuth>>): Anthropic {
-  const baseURL = resolveBaseUrl('ANTHROPIC_BASE_URL');
   if (auth.kind === 'oauth') {
     // apiKey: null stops the SDK defaulting it from process.env.ANTHROPIC_API_KEY
     // and sending x-api-key beside the bearer token (which would bill the metered
     // key) — only the subscription token is sent.
-    return new Anthropic({
+    return newClient({
       apiKey: null,
       authToken: auth.authToken,
-      baseURL,
       defaultHeaders: { 'anthropic-beta': oauthBetaHeader() },
     });
   }
   // authToken: null so a stray ANTHROPIC_AUTH_TOKEN can't override an explicit key.
-  return new Anthropic({ apiKey: auth.apiKey, authToken: null, baseURL });
+  return newClient({ apiKey: auth.apiKey, authToken: null });
 }
 
 /** Resolve the client for a call plus whether it authenticates with a
@@ -117,7 +126,7 @@ export function resolveClient(perCallApiKey: string | null): {
 
 /** A 401 from the Anthropic SDK — an authentication rejection (a rejected or
  * expired OAuth token, a missing/blocked Claude-Code identity, a bad key), as
- * opposed to a transient 429/5xx that the caller's retry ladder handles. A 403 is
+ * opposed to a transient 429/5xx that the library's retry policy handles. A 403 is
  * deliberately EXCLUDED: it is authorization (permission denied on the org /
  * project), not a bad token, so it must not trigger the metered-key fallback. */
 export function isAuthError(err: unknown): boolean {

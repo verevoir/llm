@@ -12,8 +12,9 @@
  * registers it exactly as before, so nothing here changes for an existing
  * consumer of this subpath.
  *
- * The calls themselves (request building, cache breakpoints, streaming,
- * retries, the tool loop) are implemented in `./adapter.js`, which is internal.
+ * The calls themselves (request building, cache breakpoints, streaming, the
+ * tool loop, each request under the library's one retry policy) are
+ * implemented in `./adapter.js`, which is internal.
  * This file is the direct-API route over it: it supplies the client, the
  * credential rules and the subscription-token system identity from
  * `./client.js`, which the shared implementation never imports.

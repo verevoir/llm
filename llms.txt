@@ -234,16 +234,28 @@ is still `Error`. The `claude-cli` held-session turn timeout now carries
 `.code === 'CLAUDE_CLI_SESSION_TURN_TIMEOUT'`
 (`CLAUDE_CLI_SESSION_TURN_TIMEOUT_CODE` on `@verevoir/llm/claude-cli`).
 
-Retries on the adapters that send through the `openai` SDK (`/openai`,
-`/deepseek`, `/samba`, `/mistral`, `/vertex-openai`): one policy, the
-library's own; the SDK's own retries are off on their clients
-(`maxRetries: 0`) and the policy retries what the SDK's did. Retried: HTTP
-408, 409, 429 and any status of 500 or above; a connection failure and a
-request timeout (the SDK's `APIConnectionError` and
-`APIConnectionTimeoutError`, by class name, as `classifyLlmError` reads them);
-any response with the header `x-should-retry: true`; and an error whose
-message names a 429, 500, 502 or 503. Never retried: a response with
-`x-should-retry: false`, any other 4xx (400, 401, 403, 404, 422). A retried
+Retries on the adapters that send through the Anthropic SDK (`/anthropic`,
+`/vertex`) or the `openai` SDK (`/openai`, `/deepseek`, `/samba`, `/mistral`,
+`/vertex-openai`): one policy, the library's own; the SDK's own retries are
+off on their clients (`maxRetries: 0`), so a failed request is retried in one
+place only, and the policy retries what either SDK's own rule retries.
+(`/google` has retries of its own: three, on the same waits, for a 429, 500,
+503 or a transient gRPC error, with no abort during a wait. `/claude-cli`
+makes none.) Retried: HTTP
+408, 409, 429 and any status of 500 or above (Anthropic's 529 overloaded
+among them); a connection failure and a request timeout (the SDK's
+`APIConnectionError` and `APIConnectionTimeoutError`, by class name, as
+`classifyLlmError` reads them); any response with the header
+`x-should-retry: true`; an error with no status whose `type` is
+`overloaded_error`, `rate_limit_error`, `api_error` or `timeout_error` (an
+error event part-way through a streamed answer, as `classifyLlmError` reads
+it); and an error whose message names a 429, 500, 502 or 503. Never retried:
+a response with `x-should-retry: false`, any other 4xx (400, 401, 403, 404,
+422), a stream's error event of any other type, a stream cut off with no
+error event. Every `/anthropic` and `/vertex` request is streamed; the answer
+is read only from a stream that completed, so a retry never repeats text a
+failed stream delivered (an `onProgress` report the failed stream completed
+may be reported again by the retry). A retried
 call (each request of a tool loop) follows four rules: (1) it makes at most 4
 requests, whatever the failures; (2) a failure that is not a request timeout
 is retried after the next unused wait, in order: 5 seconds, then
@@ -265,7 +277,7 @@ flight is not cut short: it can run to the SDK's timeout after the abort, and
 if it succeeds `chat` / `chatWithTools` return its reply. The waits are the
 library's waits for a provider outage, applied as they stand to connection
 failures and every retried status, and not tuned for those. Known difference
-from the SDK's own retries: `Retry-After` is not honoured; the waits are
+from the SDKs' own retries: `Retry-After` is not honoured; the waits are
 fixed.
 
 ## Cost accounting

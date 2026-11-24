@@ -125,7 +125,7 @@ describe('@verevoir/llm/vertex — surface', () => {
 });
 
 describe('@verevoir/llm/vertex — credentials and addressing', () => {
-  it('builds the Vertex client from the project and region alone, with no credential option', async () => {
+  it("builds the Vertex client from the project and region, with the SDK's own retries off and no credential option", async () => {
     process.env.ANTHROPIC_VERTEX_PROJECT_ID = '  proj-a ';
     process.env.CLOUD_ML_REGION = ' region-a  ';
     vertexStream.mockReturnValue(text());
@@ -133,7 +133,9 @@ describe('@verevoir/llm/vertex — credentials and addressing', () => {
     const reply = await chat(BASE);
 
     expect(reply.content).toBe('ok');
-    expect(vertexCtor.mock.calls).toEqual([[{ projectId: 'proj-a', region: 'region-a' }]]);
+    expect(vertexCtor.mock.calls).toEqual([
+      [{ projectId: 'proj-a', region: 'region-a', maxRetries: 0 }],
+    ]);
     expect(directCtor).not.toHaveBeenCalled();
   });
 
@@ -223,12 +225,20 @@ describe('@verevoir/llm/vertex — credentials and addressing', () => {
 
     process.env.CLOUD_ML_REGION = 'region-b';
     await chat(BASE);
-    expect(vertexCtor).toHaveBeenLastCalledWith({ projectId: 'proj-a', region: 'region-b' });
+    expect(vertexCtor).toHaveBeenLastCalledWith({
+      projectId: 'proj-a',
+      region: 'region-b',
+      maxRetries: 0,
+    });
     expect(vertexCtor).toHaveBeenCalledTimes(2);
 
     process.env.ANTHROPIC_VERTEX_PROJECT_ID = 'proj-b';
     await chat(BASE);
-    expect(vertexCtor).toHaveBeenLastCalledWith({ projectId: 'proj-b', region: 'region-b' });
+    expect(vertexCtor).toHaveBeenLastCalledWith({
+      projectId: 'proj-b',
+      region: 'region-b',
+      maxRetries: 0,
+    });
     expect(vertexCtor).toHaveBeenCalledTimes(3);
   });
 });

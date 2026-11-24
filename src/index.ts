@@ -613,9 +613,10 @@ export interface ChatOptions {
    * iterations start once the signal is aborted.
    *
    * On the adapters that send through the `openai` SDK (`/openai`,
-   * `/deepseek`, `/samba`, `/mistral`, `/vertex-openai`) it is also
-   * checked before every request and through every wait of the retry
-   * policy: an abort ends a wait at once, and no retry is sent.
+   * `/deepseek`, `/samba`, `/mistral`, `/vertex-openai`) or the
+   * Anthropic SDK (`/anthropic`, `/vertex`) it is also checked before
+   * every request and through every wait of the retry policy: an abort
+   * ends a wait at once, and no retry is sent.
    *
    * The canonical use case: an `onUsage` hook that aborts the
    * controller when an aggregate budget is exceeded. The hook's own

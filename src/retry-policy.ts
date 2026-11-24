@@ -1,33 +1,42 @@
 /**
  * @verevoir/llm — the retry policy of the adapters that send through the
  * `openai` SDK (`/openai`, `/deepseek`, and every adapter built by the
- * OpenAI-compatible factory). Internal: no subpath exports it.
+ * OpenAI-compatible factory) or the Anthropic SDK (`/anthropic`, `/vertex`).
+ * Internal: no subpath exports it.
  *
  * Those adapters build their clients with `maxRetries: 0`, so this policy is
- * the only retry a request gets. It retries what the SDK's own rule retries
- * (`shouldRetry` and the connection-failure branch of `makeRequest` in the
- * SDK's `client.ts`), on this policy's own fixed waits. Unlike the SDK's rule
- * it does not read `Retry-After`.
+ * the only retry a request gets. It retries what each SDK's own rule retries
+ * (`shouldRetry` and the connection-failure branch of `makeRequest` in each
+ * SDK's `client.ts`), on this policy's own fixed waits. The two SDKs' rules
+ * are the same in the statuses, the `x-should-retry` header and the two
+ * connection classes. They differ in one thing this policy does not mirror:
+ * the Anthropic SDK also sends a 401 again, once, after refreshing a token it
+ * caches for a credentials provider, and no client this library builds is
+ * given one. Unlike either SDK's rule the policy does not read `Retry-After`.
+ *
+ * It also retries a failure that carries no HTTP status but a provider error
+ * `type` that `classifyLlmError` calls retryable: how the Anthropic SDK
+ * reports an error that arrives part-way through a streamed response.
  *
  * A caller's `AbortSignal` ends the policy: see {@link callWithRetries}.
  *
  * SDK-free: an error is recognised by what it carries (`status`, `headers`,
- * its class name), never by `instanceof` a class of the SDK.
+ * `type`, its class name), never by `instanceof` a class of an SDK.
  */
 
-import type { ChatRetryInfo } from './index.js';
+import { classifyLlmError, type ChatRetryInfo } from './index.js';
 
 /**
  * The waits before retries, used in order. Its length is the most retries a
  * call makes: a request is sent at most `1 + RETRY_BACKOFFS_MS.length` times.
  *
- * **Where the figures come from.** They are inherited, not derived here. The
- * same list stands in `src/anthropic/adapter.ts`, whose comment gives its
- * purpose: to ride out a provider outage while the caller narrates the wait,
- * on a total "comfortably under typical serverless request timeouts".
- * `CHANGELOG.md` 0.16.0 records that the list is the first three steps of a
- * longer one, cut so that the retries stay bounded under a caller that
- * retries too. That is all the repository records: the total (155 seconds)
+ * **Where the figures come from.** They are inherited, not derived here.
+ * `CHANGELOG.md` holds the record. 0.44.0 gives the purpose the list was
+ * written for: to ride out a provider outage while the caller narrates the
+ * wait, on a total "comfortably under typical serverless request timeouts".
+ * 0.16.0 records that the list is the first three steps of a longer one, cut
+ * so that the retries stay bounded under a caller that retries too. That is
+ * all the repository records: the total (155 seconds)
  * has a stated reason, and no record exists of why the steps are 5, 30 and
  * 120 seconds rather than any others.
  *
@@ -48,7 +57,7 @@ import type { ChatRetryInfo } from './index.js';
  * **Not tuned for everything they are applied to.** The list is applied as it
  * stands to every status {@link retriableReason} retries and to connection
  * failures. The record above is about outages; for connection failures and
- * for 408, 409 and the wider 5xx statuses the `openai` SDK's own rule waits
+ * for 408, 409 and the wider 5xx statuses each SDK's own rule waits
  * between half a second and eight seconds, and these figures have not been
  * tuned for them. A request timeout is retried too, with no wait from the
  * list: see {@link TIMEOUT_RETRIES}.
@@ -68,9 +77,9 @@ export const RETRY_BACKOFFS_MS: readonly number[] = [
 
 /**
  * How many of a call's retries may follow a request that timed out (the SDK's
- * `APIConnectionTimeoutError`): the count of the SDK's own rule. Such a retry
+ * `APIConnectionTimeoutError`): the count of each SDK's own rule. Such a retry
  * is made with no wait: a timeout has already spent the SDK's request timeout
- * (10 minutes by default) without an answer, so a wait adds nothing, and each
+ * (10 minutes by default in both SDKs) without an answer, so a wait adds nothing, and each
  * retry may spend as long again. The bound this gives every call is stated on
  * {@link callWithRetries}.
  */
@@ -78,8 +87,8 @@ export const TIMEOUT_RETRIES = 2;
 
 const TIMEOUT_CLASS = 'APIConnectionTimeoutError';
 
-/** The SDK's classes for a request that got no HTTP response, by name: the
- * same test `classifyLlmError` makes (`ERROR_CLASS_KINDS` in `./index.ts`). */
+/** The classes both SDKs give a request that got no HTTP response, by name:
+ * the same test `classifyLlmError` makes (`ERROR_CLASS_KINDS` in `./index.ts`). */
 const CONNECTION_FAILURE_REASONS: Readonly<Record<string, string>> = {
   [TIMEOUT_CLASS]: 'request timed out',
   APIConnectionError: 'connection failed',
@@ -120,17 +129,22 @@ function shouldRetryHeader(err: object): string | null {
  * name as the reason should show it. First match wins:
  *
  * 1. A response with `x-should-retry: false` is never retried, and one with
- *    `x-should-retry: true` always is, whatever its status (the SDK's rule;
- *    any other value of the header is ignored).
+ *    `x-should-retry: true` always is, whatever its status (the rule of both
+ *    SDKs; any other value of the header is ignored).
  * 2. A numeric `status` of 408, 409, 429, or 500 and above is retried.
  * 3. A connection failure or a request timeout, by the SDK's class name.
- * 4. An error whose message names a 429, 500, 502 or 503, whatever its
+ * 4. An error with no numeric `status` and a string `type` that
+ *    `classifyLlmError` calls retryable (`overloaded_error`,
+ *    `rate_limit_error`, `api_error`, `timeout_error`): an error event inside
+ *    a streamed response, which opened with a 200 and so has no status. The
+ *    decision is `classifyLlmError`'s own, so the two cannot disagree on it.
+ * 5. An error whose message names a 429, 500, 502 or 503, whatever its
  *    status: one of these can be reported in the text of an error that
  *    carries no status, or a different one.
  */
 export function retriableReason(err: unknown, label: string): string | null {
   if (!err || typeof err !== 'object') return null;
-  const candidate = err as { status?: unknown; message?: unknown };
+  const candidate = err as { status?: unknown; type?: unknown; message?: unknown };
 
   const header = shouldRetryHeader(err);
   if (header === 'false') return null;
@@ -146,6 +160,11 @@ export function retriableReason(err: unknown, label: string): string | null {
   const className = classNameOf(err);
   if (className !== undefined && Object.hasOwn(CONNECTION_FAILURE_REASONS, className)) {
     return `${label} ${CONNECTION_FAILURE_REASONS[className]}`;
+  }
+
+  if (status === undefined && typeof candidate.type === 'string') {
+    const { kind, retryable } = classifyLlmError(err);
+    if (retryable) return `${label} ${kind} (${candidate.type})`;
   }
 
   const message = typeof candidate.message === 'string' ? candidate.message : '';

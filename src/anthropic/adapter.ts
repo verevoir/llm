@@ -1,7 +1,8 @@
 /**
  * The Anthropic Messages implementation, shared by every route that speaks it:
- * request building, cache breakpoints, streaming, retries, usage accounting and
- * the tool loop. INTERNAL — not in the package `exports` map. A public subpath
+ * request building, cache breakpoints, streaming, usage accounting and the tool
+ * loop, with every request made under the library's one retry policy
+ * (`../retry-policy.ts`). INTERNAL — not in the package `exports` map. A public subpath
  * supplies an {@link AnthropicTransport} (which client serves a call, and what
  * the call is reported as) and exports the three calls bound to it:
  * `./index.ts` for the direct API, `../vertex/index.ts` for Vertex AI.
@@ -34,6 +35,7 @@ import {
   type Turn,
   EmptyResponseError,
 } from '../index.js';
+import { callWithRetries, throwIfAborted } from '../retry-policy.js';
 
 /**
  * Concrete model id per {@link ModelClass}, derived from {@link CATALOG} — the
@@ -85,8 +87,18 @@ export interface AnthropicTransport {
 // Internal
 // ────────────────────────────────────────────────────────────────────
 
+/** The provider's name in the reason `onRetry` is given, on every route. */
+const RETRY_LABEL = 'Anthropic';
+
 /**
- * Run a streamed model call on the transport's client, with the retry ladder.
+ * Run a streamed model call on the transport's client, under the library's one
+ * retry policy (`../retry-policy.ts`): the clients are built with the SDK's own
+ * retries off, and nothing here retries or waits besides. `signal` is the
+ * caller's `AbortSignal`, handed to the policy so that an abort ends a wait and
+ * no further request is made. A request is one whole stream, and its result is
+ * read only from a stream that completed ({@link callStreamed}), so a stream
+ * that fails part-way contributes nothing to the answer of the retry.
+ *
  * When the call fails for good, a transport that has a second credential to
  * move to ({@link AnthropicTransport.switchCredentialAfter} — the direct
  * route's OAuth→API-key fallback, in `./index.ts`) is asked once whether to
@@ -101,7 +113,8 @@ async function streamedCall(
   perCallApiKey: string | null,
   makeRequest: (systemPrefix: readonly SystemTextBlock[]) => Record<string, unknown>,
   onProgress?: (info: ProgressInfo) => Promise<void>,
-  onRetry?: (info: ChatRetryInfo) => Promise<void>
+  onRetry?: (info: ChatRetryInfo) => Promise<void>,
+  signal?: AbortSignal
 ): Promise<StreamedResult & { route: CredentialRoute }> {
   const { provider } = transport;
   const prefixFor = (resolved: ResolvedClient) => transport.systemPrefix?.(resolved) ?? [];
@@ -109,7 +122,9 @@ async function streamedCall(
   try {
     const result = await callWithRetries(
       () => callStreamed(provider, first.client, makeRequest(prefixFor(first)), onProgress),
-      onRetry
+      RETRY_LABEL,
+      onRetry,
+      signal
     );
     return { ...result, route: first.route };
   } catch (err) {
@@ -117,7 +132,9 @@ async function streamedCall(
     const fallback = transport.resolveClient(perCallApiKey);
     const result = await callWithRetries(
       () => callStreamed(provider, fallback.client, makeRequest(prefixFor(fallback)), onProgress),
-      onRetry
+      RETRY_LABEL,
+      onRetry,
+      signal
     );
     return { ...result, route: fallback.route };
   }
@@ -420,71 +437,6 @@ async function callStreamed(
   });
 }
 
-// Anthropic outages of ~1 hour are real. Single-shot retry isn't
-// enough — keep trying with exponential backoff so the caller can
-// narrate the wait. Total budget ~2 min, comfortably under typical
-// serverless request timeouts. Outages longer than this exhaust the
-// budget and the underlying error surfaces.
-const RETRY_BACKOFFS_MS = [
-  5_000, //   5 sec
-  30_000, //  30 sec
-  120_000, // 2 min
-];
-
-async function callWithRetries<T>(
-  call: () => Promise<T>,
-  onRetry?: (info: ChatRetryInfo) => Promise<void>
-): Promise<T> {
-  for (let i = 0; i <= RETRY_BACKOFFS_MS.length; i++) {
-    try {
-      return await call();
-    } catch (err) {
-      const reason = retriableReason(err);
-      if (!reason) throw err;
-      if (i === RETRY_BACKOFFS_MS.length) throw err;
-      const delayMs = RETRY_BACKOFFS_MS[i];
-      if (onRetry) {
-        try {
-          await onRetry({
-            attempt: i + 1,
-            maxAttempts: RETRY_BACKOFFS_MS.length,
-            delayMs,
-            reason,
-          });
-        } catch (notifyErr) {
-          console.warn('callWithRetries: onRetry callback threw', notifyErr);
-        }
-      }
-      await delay(delayMs);
-    }
-  }
-  throw new Error('callWithRetries: exited loop without return or throw');
-}
-
-function retriableReason(err: unknown): string | null {
-  if (!err || typeof err !== 'object') return null;
-  const candidate = err as { status?: number; message?: string };
-  const status = candidate.status;
-  const message = typeof candidate.message === 'string' ? candidate.message : '';
-  if (status === 529 || /\b529\b|overloaded_error/i.test(message)) {
-    return 'Anthropic overloaded (529)';
-  }
-  if (status === 503 || /\b503\b|service[_ ]unavailable/i.test(message)) {
-    return 'Anthropic service unavailable (503)';
-  }
-  if (status === 500 || /\b500\b|internal_server_error/i.test(message)) {
-    return 'Anthropic internal error (500)';
-  }
-  if (status === 429 || /\b429\b|rate[_ ]limit/i.test(message)) {
-    return 'Anthropic rate-limited (429)';
-  }
-  return null;
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 function shapeUsage(
   provider: string,
   raw: StreamedResult['rawUsage'],
@@ -549,16 +501,6 @@ function combineRoutes(routes: readonly CredentialRoute[]): CredentialRoute {
   return distinct.size === 1 ? routes[0] : 'mixed';
 }
 
-/** Throw the AbortSignal's reason (or a generic AbortError) when
- * the signal is aborted. No-op when no signal is provided or the
- * signal has not been aborted. */
-function throwIfAborted(signal: AbortSignal | undefined): void {
-  if (!signal?.aborted) return;
-  if (signal.reason instanceof Error) throw signal.reason;
-  if (signal.reason !== undefined) throw new Error(String(signal.reason));
-  throw new DOMException('Aborted', 'AbortError');
-}
-
 // ────────────────────────────────────────────────────────────────────
 // The three calls, each taking the transport that serves it
 // ────────────────────────────────────────────────────────────────────
@@ -615,7 +557,8 @@ export async function chat(
           maxTokens: options.maxTokens,
         }),
       options.onProgress,
-      options.onRetry
+      options.onRetry,
+      options.abortSignal
     );
     routesSeen.push(streamed.route);
 
@@ -729,7 +672,8 @@ export async function chatWithTools(
         maxTokens: options.maxTokens,
       }),
     options.onProgress,
-    options.onRetry
+    options.onRetry,
+    options.abortSignal
   );
 
   if (
@@ -834,7 +778,8 @@ export async function chatWithToolLoop(
           maxTokens: options.maxTokens,
         }),
       options.onProgress,
-      options.onRetry
+      options.onRetry,
+      options.abortSignal
     );
 
     routesSeen.push(streamed.route);
@@ -952,7 +897,8 @@ export async function chatWithToolLoop(
           maxTokens: options.maxTokens,
         }),
       options.onProgress,
-      options.onRetry
+      options.onRetry,
+      options.abortSignal
     );
     routesSeen.push(finalStreamed.route);
     const finalUsage = shapeUsage(
