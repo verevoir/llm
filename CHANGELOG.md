@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.41.0] — 2026-11-24
+
+**`ChatOptions.model` is now honoured by `@verevoir/llm/samba`, `@verevoir/llm/mistral` and `@verevoir/llm/deepseek`: a call that names a model is sent that model.** Before, these adapters never read the option and sent their own id for the `modelClass`, so a caller that named a model was silently given the provider's default one. This is a behaviour change for any call to these three subpaths that already passes `model`: it now reaches the model it names. A call that does not pass `model` is unchanged.
+
+- **Where it applies.** On `samba` and `mistral`, which are built by the shared OpenAI-compatible factory: `chat`, `chatWithTools` and every call `chatWithToolLoop` makes, including each iteration and the loop's final call after the iteration cap. On `deepseek`, which has its own adapter file and exports `chat` only: `chat`.
+- **The id is sent exactly as given**, as `@verevoir/llm/anthropic` does. It is not looked up in the model catalogue, so a family name or other alias is not resolved to a current id, and nothing checks that the provider serves the model; a name the provider does not know fails as that provider's own error.
+- **Without `model`, the request is the same as before:** the adapter's id for the `modelClass`.
+- **Usage and spans report the id that was sent.** `TokenUsage.model` (on the result and on each `onUsage` call), the `ModelSpan` passed to the model-span sink, and the OpenTelemetry span's request model all carry the named id, where they used to carry the class's id.
+- **`TokenUsage.direction` is unchanged:** it is the `modelClass` the call asked for (`'reasoning'` when none was given), whether or not the named model belongs to that class.
+- **Cost.** A usage record is priced by the model name it carries, so a call that names a model is priced as that model; a name the price book cannot match is reported as `unpriced`.
+- **`@verevoir/llm/openai` and `@verevoir/llm/google` are unchanged.** They still accept `model` and ignore it, sending their own id for the `modelClass`.
+
 ## [0.40.0] — 2026-11-24
 
 **New subpath `@verevoir/llm/vertex`: Claude on Google Cloud Vertex AI, as the Anthropic adapter with a different client.** It exports `chat`, `chatWithTools`, `chatWithToolLoop` and `PROVIDER` (`'vertex'`), plus the namespaced `vertex`. The subpath is new, and the direct route's behaviour is unchanged. One exported type is wider, and it is the one thing an existing consumer may need to act on: `CredentialRoute` gains the value `'google-cloud'`, so an exhaustive `switch` over it with no `default` needs a case for the new value. Where exhaustiveness is checked, that code stops compiling until the case is added; where it is not, the new value falls through unhandled. Only `@verevoir/llm/vertex` reports the value.

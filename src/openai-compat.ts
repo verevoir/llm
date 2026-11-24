@@ -259,14 +259,17 @@ export function createOpenAICompatAdapter(config: OpenAICompatConfig): OpenAICom
     throw new Error('callWithRetries: exited loop without return or throw');
   }
 
+  /** `modelId` is the id that was sent: the caller's `model` when given,
+   * otherwise the catalogue's id for the class. `direction` stays the class. */
   function shapeUsage(
     raw: RawResult['rawUsage'],
     direction: ModelClass,
+    modelId: string,
     responseId?: string
   ): TokenUsage {
     return {
       provider,
-      model: models[direction],
+      model: modelId,
       direction,
       // This factory has exactly one credential mechanism (apiKeyEnv, or a
       // per-call key) — there is no second route to distinguish, so this is
@@ -289,7 +292,9 @@ export function createOpenAICompatAdapter(config: OpenAICompatConfig): OpenAICom
     throwIfAborted(options.abortSignal);
     const modelClass: ModelClass = options.modelClass ?? 'reasoning';
     const client = getClient(options.apiKey ?? null);
-    const modelId = models[modelClass];
+    // A caller's `model` is sent exactly as given (no catalogue lookup);
+    // without one, the catalogue's id for the class. See ChatOptions.model.
+    const modelId = options.model ?? models[modelClass];
 
     const raw = await callWithRetries(
       () => callChatCompletionsCreate(client, modelId, options.systemPrompt, options.turns),
@@ -302,7 +307,7 @@ export function createOpenAICompatAdapter(config: OpenAICompatConfig): OpenAICom
       );
     }
 
-    const usage = shapeUsage(raw.rawUsage, modelClass, raw.responseId);
+    const usage = shapeUsage(raw.rawUsage, modelClass, modelId, raw.responseId);
     await fireUsageHook(options.onUsage, usage, `${provider}.chat`);
 
     if (!raw.text) {
@@ -405,7 +410,7 @@ export function createOpenAICompatAdapter(config: OpenAICompatConfig): OpenAICom
     throwIfAborted(options.abortSignal);
     const modelClass: ModelClass = options.modelClass ?? 'reasoning';
     const client = getClient(options.apiKey ?? null);
-    const modelId = models[modelClass];
+    const modelId = options.model ?? models[modelClass];
     const tools = toOpenAITools(options.tools);
 
     const r = await callWithRetries(
@@ -413,7 +418,7 @@ export function createOpenAICompatAdapter(config: OpenAICompatConfig): OpenAICom
         createWithTools(client, modelId, baseMessages(options.systemPrompt, options.turns), tools),
       options.onRetry
     );
-    const usage = shapeUsage(r.raw, modelClass);
+    const usage = shapeUsage(r.raw, modelClass, modelId);
     await fireUsageHook(options.onUsage, usage, `${provider}.chatWithTools`);
     return {
       toolUses: r.rawCalls.map(parseToolUse),
@@ -435,7 +440,7 @@ export function createOpenAICompatAdapter(config: OpenAICompatConfig): OpenAICom
       throw new Error(`${provider}.chatWithToolLoop() requires at least one tool`);
     const modelClass: ModelClass = options.modelClass ?? 'reasoning';
     const client = getClient(options.apiKey ?? null);
-    const modelId = models[modelClass];
+    const modelId = options.model ?? models[modelClass];
     const tools = toOpenAITools(options.tools);
     const maxIterations = Math.max(1, options.maxIterations ?? 5);
 
@@ -467,7 +472,7 @@ export function createOpenAICompatAdapter(config: OpenAICompatConfig): OpenAICom
       aggregate.cacheReadInputTokens += r.raw.cachedInputTokens;
       await fireUsageHook(
         options.onUsage,
-        shapeUsage(r.raw, modelClass),
+        shapeUsage(r.raw, modelClass, modelId),
         `${provider}.chatWithToolLoop`
       );
       if (options.onIteration) {
@@ -529,7 +534,7 @@ export function createOpenAICompatAdapter(config: OpenAICompatConfig): OpenAICom
       aggregate.cacheReadInputTokens += fin.raw.cachedInputTokens;
       await fireUsageHook(
         options.onUsage,
-        shapeUsage(fin.raw, modelClass),
+        shapeUsage(fin.raw, modelClass, modelId),
         `${provider}.chatWithToolLoop`
       );
       return {

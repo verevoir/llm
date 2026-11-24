@@ -74,6 +74,44 @@ runtime; only real silence is. Default 10 minutes; override per call with
 
 **`claude-cli` environment.** The child `claude` sees only `PATH`, `HOME`, `TMPDIR`, `CLAUDE_CODE_OAUTH_TOKEN` and `CLAUDE_CONFIG_DIR` (a path, not a secret; see the CHANGELOG `SECURITY:` entry for 0.36.0); nothing else is passed through.
 
+## Naming a model
+
+Every call takes a `modelClass` (`'reasoning' | 'drafting' | 'extraction'`,
+default `'reasoning'`), which the adapter resolves to its own current model id.
+A call may also carry `model`, an exact model id:
+
+```ts
+import { samba } from '@verevoir/llm/samba';
+
+const reply = await samba.chat({
+  systemPrompt: '...',
+  turns: [{ role: 'user', content: '...' }],
+  model: 'DeepSeek-V3.2',
+});
+// reply.usage.model → 'DeepSeek-V3.2'
+```
+
+- **Which adapters act on it.** `@verevoir/llm/anthropic`, `/vertex`, `/samba`
+  and `/mistral` send `model` when it is set, on `chat`, `chatWithTools` and
+  every call `chatWithToolLoop` makes, including the loop's final call after
+  the iteration cap. `/deepseek` does so on `chat`, the one call it exports.
+  `/claude-cli` hands it to the CLI as `--model`, on `chat` and
+  `chatWithToolLoop`. `/openai` and `/google` accept `model` and ignore it:
+  they send their own id for the `modelClass`.
+- **The id is sent exactly as given.** It is not looked up in the model
+  catalogue, so a family name or other alias is not resolved to a current id,
+  and nothing checks that the provider serves the model. A name the provider
+  does not know fails as that provider's own error.
+- **Without `model`**, the adapter sends its id for the `modelClass`
+  (`models[modelClass]`); `/claude-cli`, which has no catalogue, leaves the
+  choice to the CLI.
+- **Usage and spans report the id that was sent.** `TokenUsage.model`, the
+  `ModelSpan` and the OpenTelemetry span's request model all carry it.
+  `TokenUsage.direction` is the `modelClass` the call asked for (`'reasoning'`
+  when none was given), whether or not the named model belongs to that class.
+- **Cost.** The cost API looks a usage record up by the model name it carries;
+  a name the price book cannot match is reported as `unpriced`.
+
 ## Failures
 
 A failed call rejects with what it always rejected with: the provider SDK's own

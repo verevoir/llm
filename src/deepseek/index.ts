@@ -253,14 +253,17 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** `modelId` is the id that was sent: the caller's `model` when given,
+ * otherwise `models[direction]`. `direction` stays the class. */
 function shapeUsage(
   raw: RawResult['rawUsage'],
   direction: ModelClass,
+  modelId: string,
   responseId?: string
 ): TokenUsage {
   return {
     provider: PROVIDER,
-    model: models[direction],
+    model: modelId,
     direction,
     // This adapter has exactly one credential mechanism (DEEPSEEK_API_KEY, or
     // a per-call key) — there is no second route to distinguish, so this is
@@ -309,7 +312,9 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
   throwIfAborted(options.abortSignal);
   const modelClass: ModelClass = options.modelClass ?? 'reasoning';
   const client = getClient(options.apiKey ?? null);
-  const modelId = models[modelClass];
+  // A caller's `model` is sent exactly as given; without one, the class's
+  // id. See ChatOptions.model.
+  const modelId = options.model ?? models[modelClass];
 
   const raw = await callWithRetries(
     () => callChatCompletionsCreate(client, modelId, options.systemPrompt, options.turns),
@@ -322,7 +327,7 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
     );
   }
 
-  const usage = shapeUsage(raw.rawUsage, modelClass, raw.responseId);
+  const usage = shapeUsage(raw.rawUsage, modelClass, modelId, raw.responseId);
   await fireUsageHook(options.onUsage, usage, 'deepseek.chat');
 
   if (!raw.text) {
