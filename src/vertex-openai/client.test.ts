@@ -1,10 +1,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-// The credentials library is mocked at the constructor: these tests hold when
-// the route builds the object, with which scope, and how often it asks for a
-// token. The real `openai` SDK sends through a fake `fetch`: no network.
-// Hoisted with the mock: a module that built the object while this file's
-// imports load must reach a test's assertion, not fail the file's load.
+/**
+ * The credentials library is mocked at the constructor: these tests hold when
+ * the route builds the object, with which scope, and how often it asks for a
+ * token. The real `openai` SDK sends through a fake `fetch`: no network.
+ * The mocks are hoisted with the mock, so that a module which built the object
+ * while this file's imports load reaches a test's assertion and does not fail
+ * the file's load.
+ */
 const { authCtor, getAccessToken } = vi.hoisted(() => ({
   authCtor: vi.fn(),
   getAccessToken: vi.fn(),
