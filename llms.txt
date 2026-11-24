@@ -71,7 +71,10 @@ SDK does not enter your bundle.
   `total_tokens` shows them reported apart). No price is added: a call is
   priced only if the price book holds the exact name sent (or
   `vertex-openai/<name>`), else `unpriced`. The `openai` SDK's errors are
-  thrown unchanged, so `classifyLlmError` reads their status as usual; a
+  thrown unchanged, so `classifyLlmError` reads their status as usual. The
+  SDK's own retries are off on this adapter (`maxRetries: 0`), so the library's
+  retry policy is the only one: at most three retries of a retryable status,
+  a token asked for before each request. A
   failure to obtain a token is a `VertexOpenAITokenError` (no request sent, no
   `status`, fixed message, the credentials library's error on `cause`), which
   classifies as `other`, not retryable, as does `VertexOpenAIConfigError`. The

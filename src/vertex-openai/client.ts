@@ -83,7 +83,9 @@ export interface TransportForTests {
 let seam: TransportForTests = {};
 
 /** The token for one request. The OpenAI SDK calls this before every request
- * it makes, a retry of its own included. */
+ * it sends, so the token is asked for before each request the adapter makes,
+ * an adapter retry included. The SDK makes no retry of its own on this client
+ * (see `maxRetries` in {@link resolveClient}). */
 async function accessToken(): Promise<string> {
   let token: string | null | undefined;
   try {
@@ -141,6 +143,11 @@ export function resolveClient(perCallApiKey: string | null): OpenAI {
       // OPENAI_PROJECT_ID and sends each as a header on every request.
       organization: null,
       project: null,
+      // The shared calls already retry each request (`callWithRetries` in
+      // `../openai-compat.js`). With the SDK's own retries left on, every
+      // adapter attempt would be several SDK attempts; off, there is one
+      // retry policy.
+      maxRetries: 0,
       fetch: seam.fetch,
     });
     kept = { project, location, client };

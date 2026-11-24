@@ -387,8 +387,11 @@ differs:
   exact model name sent, then by `vertex-openai/<that name>`; a name with no
   entry is `unpriced`.
 - **Failures.** The `openai` SDK's errors are thrown as they are, so
-  `classifyLlmError` reads the endpoint's status as on any other adapter. A
-  failure to obtain an access token is a `VertexOpenAITokenError`: no request
+  `classifyLlmError` reads the endpoint's status as on any other adapter. The
+  SDK's own retries are off on this adapter (`maxRetries: 0` on its client), so
+  the library's retry policy is the only one: a retryable status is sent again
+  only by that policy, three times at most, and an access token is asked for
+  before each of those requests. A failure to obtain an access token is a `VertexOpenAITokenError`: no request
   was sent, it carries no `status`, and it classifies as `other`, not
   retryable, so it does not read as the endpoint's refusal of the request or
   of the credential. Its message is fixed and holds no text from the

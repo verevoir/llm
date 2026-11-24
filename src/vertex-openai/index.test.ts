@@ -27,6 +27,7 @@ import {
   classifyLlmError,
   setModelSpanSink,
   type ChatOptions,
+  type ChatRetryInfo,
   type ModelSpan,
   type TokenUsage,
   type ToolDef,
@@ -528,6 +529,65 @@ describe('@verevoir/llm/vertex-openai — failures', () => {
     expect(classifyLlmError(err)).toEqual({ kind, retryable: false });
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
+
+  it('sends a 429 answered every time only as often as the library retry policy allows, each request with a token freshly asked for', async () => {
+    answer({ error: { message: 'slow down', status: 'RESOURCE_EXHAUSTED' } }, 429);
+    let asked = 0;
+    tokenSource.mockReset();
+    tokenSource.mockImplementation(async () => `tok-${++asked}`);
+    const retries: ChatRetryInfo[] = [];
+
+    // Every wait, the policy's backoffs included, runs on fake timers.
+    vi.useFakeTimers();
+    let err: unknown;
+    try {
+      const settled = rejection(
+        chat({
+          ...BASE,
+          onRetry: async (info) => {
+            retries.push(info);
+          },
+        })
+      );
+      await vi.runAllTimersAsync();
+      err = await settled;
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(err).toBeInstanceOf(APIError);
+    expect((err as APIError).status).toBe(429);
+    expect(classifyLlmError(err)).toEqual({ kind: 'rate-limited', retryable: true });
+
+    // The policy's own figure: `callWithRetries` tells `onRetry` how many
+    // retries it allows, which is the length of its backoff list (a constant
+    // its module does not export). One first attempt, then that many retries,
+    // and nothing from the SDK on top.
+    const allowed = retries[0]!.maxAttempts;
+    expect(allowed).toBeGreaterThan(0);
+    expect(retries.map((r) => r.attempt)).toEqual(Array.from({ length: allowed }, (_, i) => i + 1));
+    expect(fetchMock).toHaveBeenCalledTimes(1 + allowed);
+
+    expect(tokenSource).toHaveBeenCalledTimes(1 + allowed);
+    expect(requests().map((r) => r.headers.get('authorization'))).toEqual(
+      Array.from({ length: 1 + allowed }, (_, i) => `Bearer tok-${i + 1}`)
+    );
+  });
+
+  it.each(SHAPES)(
+    '%s sends a 400 once: one request, one token asked for, no retry',
+    async (_name, call) => {
+      answer({ error: { message: 'refused', status: 'INVALID_ARGUMENT' } }, 400);
+      const onRetry = vi.fn(async () => {});
+
+      const err = await rejection(call({ onRetry }));
+
+      expect((err as APIError).status).toBe(400);
+      expect(onRetry).not.toHaveBeenCalled();
+      expect(tokenSource).toHaveBeenCalledTimes(1);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    }
+  );
 
   it.each(SHAPES)(
     '%s rejects with a VertexOpenAITokenError when the token source fails: other, not retryable, never retried, nothing sent',
