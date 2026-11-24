@@ -143,10 +143,8 @@ export function resolveClient(perCallApiKey: string | null): OpenAI {
       // OPENAI_PROJECT_ID and sends each as a header on every request.
       organization: null,
       project: null,
-      // The shared calls already retry each request (`callWithRetries` in
-      // `../openai-compat.js`). With the SDK's own retries left on, every
-      // adapter attempt would be several SDK attempts; off, there is one
-      // retry policy.
+      // `callWithRetries` in `../openai-compat.js` already retries each
+      // request; the SDK's own retries are off so that policy is the only one.
       maxRetries: 0,
       fetch: seam.fetch,
     });

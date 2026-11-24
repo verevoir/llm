@@ -559,10 +559,8 @@ describe('@verevoir/llm/vertex-openai — failures', () => {
     expect((err as APIError).status).toBe(429);
     expect(classifyLlmError(err)).toEqual({ kind: 'rate-limited', retryable: true });
 
-    // The policy's own figure: `callWithRetries` tells `onRetry` how many
-    // retries it allows, which is the length of its backoff list (a constant
-    // its module does not export). One first attempt, then that many retries,
-    // and nothing from the SDK on top.
+    // `callWithRetries` tells `onRetry` how many retries it allows. One
+    // first attempt, then that many, and nothing from the SDK on top.
     const allowed = retries[0]!.maxAttempts;
     expect(allowed).toBeGreaterThan(0);
     expect(retries.map((r) => r.attempt)).toEqual(Array.from({ length: allowed }, (_, i) => i + 1));
