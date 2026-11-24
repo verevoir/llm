@@ -878,7 +878,8 @@ export async function chatWithToolLoop(
   // return an empty answer (the model never wrote its final response), make
   // one FINAL call with the tools removed — forcing it to synthesise a written
   // answer from the history it built, instead of nothing. If this final call
-  // itself fails, degrade to the empty text rather than throwing.
+  // itself fails, degrade to the empty text rather than throwing, unless the
+  // caller has aborted: then the abort's error is thrown.
   throwIfAborted(options.abortSignal);
   try {
     const finalStreamed = await streamedCall(
@@ -924,6 +925,8 @@ export async function chatWithToolLoop(
       ),
     };
   } catch (err) {
+    // An abort is the caller's, not a failure of the call: it is thrown.
+    throwIfAborted(options.abortSignal);
     console.warn(`${scope}: final synthesis call failed`, err);
     return {
       text: '',

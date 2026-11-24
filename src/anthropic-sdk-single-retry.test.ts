@@ -113,6 +113,29 @@ const failedPartWay = (text: string, errorType: string): Response =>
     { type: 'error', error: { type: errorType, message: 'the stream failed' } },
   ]);
 
+/** A whole streamed answer that asks for the tool, and says nothing. */
+const toolAsked = (id: string): Response =>
+  eventStream([
+    opening('')[0],
+    {
+      type: 'content_block_start',
+      index: 0,
+      content_block: { type: 'tool_use', id, name: 'lookup', input: {} },
+    },
+    {
+      type: 'content_block_delta',
+      index: 0,
+      delta: { type: 'input_json_delta', partial_json: '{}' },
+    },
+    { type: 'content_block_stop', index: 0 },
+    {
+      type: 'message_delta',
+      delta: { stop_reason: 'tool_use', stop_sequence: null },
+      usage: { output_tokens: 1 },
+    },
+    { type: 'message_stop' },
+  ]);
+
 const ANSWER = 'the whole answer';
 const PARTIAL = 'half an ans';
 
@@ -159,25 +182,35 @@ const ROUTES: {
   name: string;
   env: Record<string, string>;
   key: Extra;
+  adapter: typeof anthropic | typeof vertex;
   shapes: [string, Call][];
 }[] = [
-  { name: 'anthropic', env: {}, key: { apiKey: 'per-call-key' }, shapes: shapes(anthropic) },
+  {
+    name: 'anthropic',
+    env: {},
+    key: { apiKey: 'per-call-key' },
+    adapter: anthropic,
+    shapes: shapes(anthropic),
+  },
   {
     name: 'anthropic',
     env: { ANTHROPIC_API_KEY: 'environment-key' },
     key: {},
+    adapter: anthropic,
     shapes: shapes(anthropic),
   },
   {
     name: 'anthropic',
     env: { CLAUDE_CODE_OAUTH_TOKEN: 'environment-token' },
     key: {},
+    adapter: anthropic,
     shapes: shapes(anthropic),
   },
   {
     name: 'vertex',
     env: { ANTHROPIC_VERTEX_PROJECT_ID: 'proj', CLOUD_ML_REGION: 'region' },
     key: {},
+    adapter: vertex,
     shapes: shapes(vertex),
   },
 ];
@@ -485,6 +518,67 @@ describe.each(CASES)('$title: the library retry policy is the only one', ({ env,
   });
 });
 
+/** The body of the request `fetch` was given on its `n`th call, from 1. */
+const bodyOf = (n: number): Record<string, unknown> =>
+  JSON.parse(String(fetchMock.mock.calls[n - 1][1]?.body)) as Record<string, unknown>;
+
+describe.each(
+  ROUTES.map((route) => ({
+    ...route,
+    title: `${route.name}.chatWithToolLoop with ${credentialOf(route.env, route.key)}`,
+  }))
+)("$title: the request after the loop's iteration cap", ({ env, key, adapter }) => {
+  const CAP = 2;
+
+  beforeEach(() => {
+    Object.assign(process.env, env);
+  });
+
+  it("an abort of the caller's signal during the wait after that request is answered 503 ends the call at once with the signal's reason, and no further request is sent", async () => {
+    // The model asks for the tool on every iteration; what follows is a 503.
+    fetchMock.mockImplementation(async () =>
+      fetchMock.mock.calls.length <= CAP
+        ? toolAsked(`toolu_${fetchMock.mock.calls.length}`)
+        : json({ type: 'error', error: { type: 'refused_error', message: 'refused' } }, 503)
+    );
+    const executor = vi.fn(async () => 'looked up');
+    const controller = new AbortController();
+    const reason = new Error('the caller gave up');
+    let ended: { text?: string; error?: unknown } | undefined;
+    void adapter
+      .chatWithToolLoop({
+        ...BASE,
+        ...key,
+        tools: [TOOL],
+        executor,
+        maxIterations: CAP,
+        abortSignal: controller.signal,
+      })
+      .then(
+        ({ text }) => (ended = { text }),
+        (error: unknown) => (ended = { error })
+      );
+
+    // To the middle of the first wait, which follows the 503.
+    await vi.advanceTimersByTimeAsync(RETRY_BACKOFFS_MS[0] / 2);
+    expect(fetchMock).toHaveBeenCalledTimes(CAP + 1);
+    expect(executor).toHaveBeenCalledTimes(CAP);
+    // A request of an iteration offers the tool; the one after the cap
+    // offers none.
+    expect(bodyOf(CAP).tools).toHaveLength(1);
+    expect(bodyOf(CAP + 1).tools).toBeUndefined();
+    expect(ended).toBeUndefined();
+
+    controller.abort(reason);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(ended).toEqual({ error: reason });
+    expect(ended?.error).toBe(reason);
+    await vi.runAllTimersAsync();
+    expect(fetchMock).toHaveBeenCalledTimes(CAP + 1);
+  });
+});
+
 describe('the real clients these counts are taken through', () => {
   it("the Vertex client is built by the route's own module, with the SDK's retries off, and reaches Vertex AI's address", async () => {
     Object.assign(process.env, { ANTHROPIC_VERTEX_PROJECT_ID: 'proj', CLOUD_ML_REGION: 'region' });
@@ -586,4 +680,41 @@ describe('the real clients these counts are taken through', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(retries).toEqual([]);
   });
+
+  it.each(shapes(anthropic))(
+    "%s: an abort of the caller's signal during a wait of the call made on the metered key, after a subscription token is rejected with a 401, ends the call at once with the signal's reason, and no further request is sent",
+    async (_shape, call) => {
+      process.env.CLAUDE_CODE_OAUTH_TOKEN = 'environment-token';
+      process.env.ANTHROPIC_API_KEY = 'environment-key';
+      const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      refuse(503)();
+      fetchMock.mockImplementationOnce(async () =>
+        json({ type: 'error', error: { type: 'authentication_error', message: 'no' } }, 401)
+      );
+      const controller = new AbortController();
+      const reason = new Error('the caller gave up');
+      let ended: { error: unknown } | undefined;
+      void call({ abortSignal: controller.signal }).then(
+        () => (ended = { error: undefined }),
+        (error: unknown) => (ended = { error })
+      );
+
+      // To the middle of the first wait: the 401, then the key's 503.
+      await vi.advanceTimersByTimeAsync(RETRY_BACKOFFS_MS[0] / 2);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(
+        fetchMock.mock.calls.map(([, init]) => new Headers(init?.headers).get('authorization'))
+      ).toEqual(['Bearer environment-token', 'Bearer environment-key']);
+      expect(ended).toBeUndefined();
+
+      controller.abort(reason);
+      await vi.advanceTimersByTimeAsync(0);
+      stderr.mockRestore();
+
+      expect(ended).toEqual({ error: reason });
+      expect(ended?.error).toBe(reason);
+      await vi.runAllTimersAsync();
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    }
+  );
 });
