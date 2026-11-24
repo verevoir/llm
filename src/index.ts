@@ -580,6 +580,15 @@ export interface ChatOptions {
    * pinned until the caller updates it by hand, which is exactly what
    * `modelClass` exists to avoid for everyone without this specific
    * need.
+   *
+   * Acted on by `@verevoir/llm/anthropic`, `/vertex`, `/samba` and
+   * `/mistral` on `chat`, `chatWithTools` and every call `chatWithToolLoop`
+   * makes, and by `/deepseek` on `chat`. Each sends the id exactly as
+   * given: it is not looked up in the catalogue, so a family name or other
+   * alias is not resolved, and nothing checks that the provider serves it.
+   * `/claude-cli` hands it to the CLI as `--model` on `chat` and
+   * `chatWithToolLoop`. `@verevoir/llm/openai` and `/google` accept and
+   * ignore it: they send their own id for the `modelClass`.
    */
   model?: string;
   /**

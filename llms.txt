@@ -125,6 +125,16 @@ const reply = await anthropic.chat({
 // reply.usage:   { provider, model, direction, inputTokens, outputTokens, ... }
 ```
 
+`ChatOptions.model` is an optional exact model id. When set it is the id sent,
+exactly as given (no catalogue lookup, so a family name or alias is not
+resolved); when not set the adapter sends `models[modelClass]`. Acted on by
+`/anthropic`, `/vertex`, `/samba` and `/mistral` on `chat`, `chatWithTools` and
+every call `chatWithToolLoop` makes, and by `/deepseek` on `chat`;
+`/claude-cli` hands it to the CLI as `--model`; `/openai` and `/google` accept
+and ignore it. `usage.model` and the
+model span report the id sent; `usage.direction` stays the `modelClass` asked
+for (`'reasoning'` when none was given).
+
 ## Tool calling
 
 Each adapter exposes, alongside `chat()`:
