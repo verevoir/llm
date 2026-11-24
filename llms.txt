@@ -40,6 +40,46 @@ SDK does not enter your bundle.
   `classifyLlmError` gives the same kinds as on the direct route (the Vertex
   SDK throws the Anthropic SDK's own error classes). Registers nothing into the
   model catalogue or the connection registry, so routing does not know it.
+- `@verevoir/llm/vertex-openai` — Vertex AI's OpenAI-compatible Chat Completions
+  endpoint, where Google Cloud serves models of several publishers
+  (`…/v1/projects/{project}/locations/{location}/endpoints/openapi/chat/completions`).
+  Exports `chat`, `chatWithTools`, `chatWithToolLoop`, `PROVIDER`
+  (`'vertex-openai'`), namespaced `vertexOpenAI`, and the error classes
+  `VertexOpenAIConfigError` (with `setting`: `'model'` | `'apiKey'` |
+  `'GOOGLE_CLOUD_PROJECT'` | `'GOOGLE_CLOUD_LOCATION'`) and
+  `VertexOpenAITokenError`. Requires `openai` and `google-auth-library`, both
+  optional peers; only this subpath imports `google-auth-library`. The calls
+  are the shared OpenAI-compatible ones (`/samba`, `/mistral`). `model` is
+  REQUIRED, as `<publisher>/<model>` (e.g. `google/gemini-3.5-flash`), sent
+  exactly as given: there is no catalogue and no default, and a call without
+  one is refused before any token is asked for or request sent. Authentication
+  is Google Cloud's standard credentials flow (scope `cloud-platform`): the
+  access token is asked of `google-auth-library` before every request, so a
+  replaced token is the one sent; no credential is looked up at import; a
+  per-call `apiKey` is refused and no `OPENAI_*` variable is used. The project
+  comes from `GOOGLE_CLOUD_PROJECT` (missing: refused with
+  `No Vertex AI project: set GOOGLE_CLOUD_PROJECT.`) and the location from
+  `GOOGLE_CLOUD_LOCATION`, default `global` (host `aiplatform.googleapis.com`;
+  any other location uses `{location}-aiplatform.googleapis.com`; some models
+  answer only at `global`). These are not the variables `/vertex` reads. A
+  project or location that is not a plain identifier is refused; there is no
+  base-URL override. `TokenUsage.provider` is `'vertex-openai'`, `route` is
+  `'google-cloud'`; `cacheReadInputTokens` is the endpoint's
+  `prompt_tokens_details.cached_tokens`, or `0` when it reports none (absent or
+  `null`), `cacheCreationInputTokens` is always `0`; reasoning tokens are
+  within `outputTokens` (added to `completion_tokens` only where the response's
+  `total_tokens` shows them reported apart). No price is added: a call is
+  priced only if the price book holds the exact name sent (or
+  `vertex-openai/<name>`), else `unpriced`. The `openai` SDK's errors are
+  thrown unchanged, so `classifyLlmError` reads their status as usual. The
+  SDK's own retries are off on this adapter (`maxRetries: 0`), so the library's
+  retry policy is the only one: at most three retries of a retryable status,
+  a token asked for before each request. A
+  failure to obtain a token is a `VertexOpenAITokenError` (no request sent, no
+  `status`, fixed message, the credentials library's error on `cause`), which
+  classifies as `other`, not retryable, as does `VertexOpenAIConfigError`. The
+  token is in no error, span or log line this library writes. Registers
+  nothing into the model catalogue or the connection registry.
 - `@verevoir/llm/google` — Google Gemini SDK adapter (`chat`, `chatWithTools`,
   `chatWithToolLoop` as of 0.13.0). Requires `@google/genai`.
 - `@verevoir/llm/openai` — OpenAI adapter via the Responses API
@@ -105,7 +145,8 @@ npm install @verevoir/llm @anthropic-ai/sdk
 
 The package's `peerDependencies` are marked optional — install only the SDK(s)
 you import (`@anthropic-ai/sdk`, `@anthropic-ai/vertex-sdk`, `@google/genai`,
-`openai`; the OpenAI-compatible providers share `openai`).
+`openai`, `google-auth-library`; the OpenAI-compatible providers share
+`openai`, and `/vertex-openai` needs `google-auth-library` as well).
 
 ## Canonical usage
 
@@ -128,8 +169,9 @@ const reply = await anthropic.chat({
 `ChatOptions.model` is an optional exact model id. When set it is the id sent,
 exactly as given (no catalogue lookup, so a family name or alias is not
 resolved); when not set the adapter sends `models[modelClass]`. Acted on by
-`/anthropic`, `/vertex`, `/samba` and `/mistral` on `chat`, `chatWithTools` and
-every call `chatWithToolLoop` makes, and by `/deepseek` on `chat`;
+`/anthropic`, `/vertex`, `/vertex-openai`, `/samba` and `/mistral` on `chat`,
+`chatWithTools` and every call `chatWithToolLoop` makes (`/vertex-openai` has
+no `models` and refuses a call without `model`), and by `/deepseek` on `chat`;
 `/claude-cli` hands it to the CLI as `--model`; `/openai` and `/google` accept
 and ignore it. `usage.model` and the
 model span report the id sent; `usage.direction` stays the `modelClass` asked

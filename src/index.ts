@@ -344,7 +344,7 @@ export interface Turn {
  * underlying calls) whose calls did not all use the same route — reported
  * rather than picking one arbitrarily and hiding that the other happened.
  * `'google-cloud'` is Google Cloud's standard credentials flow, with no API
- * key — the `@verevoir/llm/vertex` route.
+ * key — the `@verevoir/llm/vertex` and `@verevoir/llm/vertex-openai` routes.
  *
  * New adapters or new mechanisms add new values here rather than reusing
  * one that does not describe them.

@@ -29,6 +29,7 @@ import {
   type ChatWithToolLoopResult,
   type ChatWithToolsOptions,
   type ChatWithToolsResult,
+  type CredentialRoute,
   type ModelCatalogEntry,
   type ModelClass,
   type RatesTable,
@@ -74,6 +75,32 @@ export interface OpenAICompatAdapter {
   chatWithToolLoop: (options: ChatWithToolLoopOptions) => Promise<ChatWithToolLoopResult>;
 }
 
+/** The three call shapes, as every adapter built here exposes them. */
+export type OpenAICompatCalls = Pick<
+  OpenAICompatAdapter,
+  'chat' | 'chatWithTools' | 'chatWithToolLoop'
+>;
+
+/** What the call shapes need from the adapter they are built for: its id, its
+ * credential route, where a client comes from and which model id a call sends.
+ * {@link createOpenAICompatAdapter} fills this from a key, a base URL and a
+ * catalogue; an adapter with none of those fills it itself and calls
+ * {@link createOpenAICompatCalls} directly. */
+export interface OpenAICompatCallsConfig {
+  /** Provider id reported on every {@link TokenUsage}. */
+  provider: string;
+  /** The credential mechanism reported on every {@link TokenUsage}. */
+  route: CredentialRoute;
+  /** The client for one call, given its per-call `apiKey` (or null). May throw
+   * to refuse the call; nothing has been sent at that point. */
+  getClient: (perCallApiKey: string | null) => OpenAI;
+  /** The model id to send, given the caller's `model` (if any) and the class
+   * asked for. May throw to refuse the call. */
+  modelFor: (named: string | undefined, modelClass: ModelClass) => string;
+  /** Output tokens for one response's usage. Default: `completion_tokens`. */
+  outputTokensOf?: (usage: CompatUsage) => number;
+}
+
 /** OpenAI Chat Completions tool-call shape we read off a response. */
 interface OpenAIToolCall {
   id: string;
@@ -114,12 +141,14 @@ interface RawResult {
 
 /** OpenAI-compatible usage shape, including the cache fields some providers
  * report (DeepSeek's `prompt_cache_hit_tokens`, or the standard
- * `prompt_tokens_details.cached_tokens`). */
-interface CompatUsage {
+ * `prompt_tokens_details.cached_tokens`). A details member may be null. */
+export interface CompatUsage {
   prompt_tokens?: number;
   completion_tokens?: number;
+  total_tokens?: number;
   prompt_cache_hit_tokens?: number;
-  prompt_tokens_details?: { cached_tokens?: number };
+  prompt_tokens_details?: { cached_tokens?: number } | null;
+  completion_tokens_details?: { reasoning_tokens?: number } | null;
 }
 
 function delay(ms: number): Promise<void> {
@@ -187,6 +216,34 @@ export function createOpenAICompatAdapter(config: OpenAICompatConfig): OpenAICom
     return defaultClient;
   }
 
+  const calls = createOpenAICompatCalls({
+    provider,
+    // This factory has exactly one credential mechanism (apiKeyEnv, or a
+    // per-call key) — there is no second route to distinguish, so this is
+    // a constant rather than a computed value. See CredentialRoute.
+    route: 'api-key',
+    getClient,
+    // A caller's `model` is sent exactly as given (no catalogue lookup);
+    // without one, the catalogue's id for the class. See ChatOptions.model.
+    modelFor: (named, modelClass) => named ?? models[modelClass],
+  });
+
+  return {
+    PROVIDER: provider,
+    BASE_URL: baseURL,
+    models,
+    rates,
+    ...calls,
+  };
+}
+
+/** Build the three call shapes — `chat`, `chatWithTools`, `chatWithToolLoop` —
+ * over the Chat Completions API. Registers nothing and reads no environment
+ * variable: the client and the model id come from `config`. */
+export function createOpenAICompatCalls(config: OpenAICompatCallsConfig): OpenAICompatCalls {
+  const { provider, route, getClient, modelFor } = config;
+  const outputTokensOf = config.outputTokensOf ?? ((u: CompatUsage) => u.completion_tokens ?? 0);
+
   async function callChatCompletionsCreate(
     client: OpenAI,
     modelId: string,
@@ -210,7 +267,7 @@ export function createOpenAICompatAdapter(config: OpenAICompatConfig): OpenAICom
         text: choice?.message?.content ?? '',
         rawUsage: {
           inputTokens: Math.max(0, (u.prompt_tokens ?? 0) - cachedInputTokens),
-          outputTokens: u.completion_tokens ?? 0,
+          outputTokens: outputTokensOf(u),
           cachedInputTokens,
         },
         finishReason: choice?.finish_reason ?? '',
@@ -271,10 +328,7 @@ export function createOpenAICompatAdapter(config: OpenAICompatConfig): OpenAICom
       provider,
       model: modelId,
       direction,
-      // This factory has exactly one credential mechanism (apiKeyEnv, or a
-      // per-call key) — there is no second route to distinguish, so this is
-      // a constant rather than a computed value. See CredentialRoute.
-      route: 'api-key',
+      route,
       inputTokens: raw.inputTokens,
       outputTokens: raw.outputTokens,
       cacheCreationInputTokens: 0,
@@ -292,9 +346,7 @@ export function createOpenAICompatAdapter(config: OpenAICompatConfig): OpenAICom
     throwIfAborted(options.abortSignal);
     const modelClass: ModelClass = options.modelClass ?? 'reasoning';
     const client = getClient(options.apiKey ?? null);
-    // A caller's `model` is sent exactly as given (no catalogue lookup);
-    // without one, the catalogue's id for the class. See ChatOptions.model.
-    const modelId = options.model ?? models[modelClass];
+    const modelId = modelFor(options.model, modelClass);
 
     const raw = await callWithRetries(
       () => callChatCompletionsCreate(client, modelId, options.systemPrompt, options.turns),
@@ -382,7 +434,7 @@ export function createOpenAICompatAdapter(config: OpenAICompatConfig): OpenAICom
         rawCalls: msg.tool_calls ?? [],
         raw: {
           inputTokens: Math.max(0, (u.prompt_tokens ?? 0) - cachedInputTokens),
-          outputTokens: u.completion_tokens ?? 0,
+          outputTokens: outputTokensOf(u),
           cachedInputTokens,
         },
         finishReason: choice?.finish_reason ?? '',
@@ -410,7 +462,7 @@ export function createOpenAICompatAdapter(config: OpenAICompatConfig): OpenAICom
     throwIfAborted(options.abortSignal);
     const modelClass: ModelClass = options.modelClass ?? 'reasoning';
     const client = getClient(options.apiKey ?? null);
-    const modelId = options.model ?? models[modelClass];
+    const modelId = modelFor(options.model, modelClass);
     const tools = toOpenAITools(options.tools);
 
     const r = await callWithRetries(
@@ -440,7 +492,7 @@ export function createOpenAICompatAdapter(config: OpenAICompatConfig): OpenAICom
       throw new Error(`${provider}.chatWithToolLoop() requires at least one tool`);
     const modelClass: ModelClass = options.modelClass ?? 'reasoning';
     const client = getClient(options.apiKey ?? null);
-    const modelId = options.model ?? models[modelClass];
+    const modelId = modelFor(options.model, modelClass);
     const tools = toOpenAITools(options.tools);
     const maxIterations = Math.max(1, options.maxIterations ?? 5);
 
@@ -451,8 +503,7 @@ export function createOpenAICompatAdapter(config: OpenAICompatConfig): OpenAICom
       provider,
       model: modelId,
       direction: modelClass,
-      // Single credential mechanism — see shapeUsage's comment above.
-      route: 'api-key',
+      route,
       inputTokens: 0,
       outputTokens: 0,
       cacheCreationInputTokens: 0,
@@ -556,13 +607,5 @@ export function createOpenAICompatAdapter(config: OpenAICompatConfig): OpenAICom
     }
   }
 
-  return {
-    PROVIDER: provider,
-    BASE_URL: baseURL,
-    models,
-    rates,
-    chat,
-    chatWithTools,
-    chatWithToolLoop,
-  };
+  return { chat, chatWithTools, chatWithToolLoop };
 }

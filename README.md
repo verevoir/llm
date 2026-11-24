@@ -46,18 +46,19 @@ The core export (`@verevoir/llm`) carries provider-agnostic types — `TokenUsag
 Each adapter lives under its own subpath so the unused provider SDK never
 enters the consumer's bundle:
 
-| Subpath                    | SDK dep                    | Status                  |
-| -------------------------- | -------------------------- | ----------------------- |
-| `@verevoir/llm`            | none                       | shipped                 |
-| `@verevoir/llm/anthropic`  | `@anthropic-ai/sdk`        | shipped                 |
-| `@verevoir/llm/vertex`     | `@anthropic-ai/vertex-sdk` | shipped                 |
-| `@verevoir/llm/google`     | `@google/genai`            | `chat()` only (`0.4.0`) |
-| `@verevoir/llm/openai`     | `openai`                   | `chat()` only (`0.5.0`) |
-| `@verevoir/llm/deepseek`   | `openai`                   | `chat()` only (`0.6.0`) |
-| `@verevoir/llm/samba`      | `openai`                   | shipped                 |
-| `@verevoir/llm/mistral`    | `openai`                   | shipped                 |
-| `@verevoir/llm/claude-cli` | none (spawns `claude -p`)  | shipped (`chat()` only) |
-| `@verevoir/llm/catalog`    | none                       | shipped                 |
+| Subpath                       | SDK dep                         | Status                  |
+| ----------------------------- | ------------------------------- | ----------------------- |
+| `@verevoir/llm`               | none                            | shipped                 |
+| `@verevoir/llm/anthropic`     | `@anthropic-ai/sdk`             | shipped                 |
+| `@verevoir/llm/vertex`        | `@anthropic-ai/vertex-sdk`      | shipped                 |
+| `@verevoir/llm/vertex-openai` | `openai`, `google-auth-library` | shipped                 |
+| `@verevoir/llm/google`        | `@google/genai`                 | `chat()` only (`0.4.0`) |
+| `@verevoir/llm/openai`        | `openai`                        | `chat()` only (`0.5.0`) |
+| `@verevoir/llm/deepseek`      | `openai`                        | `chat()` only (`0.6.0`) |
+| `@verevoir/llm/samba`         | `openai`                        | shipped                 |
+| `@verevoir/llm/mistral`       | `openai`                        | shipped                 |
+| `@verevoir/llm/claude-cli`    | none (spawns `claude -p`)       | shipped (`chat()` only) |
+| `@verevoir/llm/catalog`       | none                            | shipped                 |
 
 Multi-provider deployments depend on the same `chat()` contract; consumers
 switch backends by importing a different subpath, not by changing call sites.
@@ -91,10 +92,11 @@ const reply = await samba.chat({
 // reply.usage.model → 'DeepSeek-V3.2'
 ```
 
-- **Which adapters act on it.** `@verevoir/llm/anthropic`, `/vertex`, `/samba`
-  and `/mistral` send `model` when it is set, on `chat`, `chatWithTools` and
-  every call `chatWithToolLoop` makes, including the loop's final call after
-  the iteration cap. `/deepseek` does so on `chat`, the one call it exports.
+- **Which adapters act on it.** `@verevoir/llm/anthropic`, `/vertex`,
+  `/vertex-openai`, `/samba` and `/mistral` send `model` when it is set, on
+  `chat`, `chatWithTools` and every call `chatWithToolLoop` makes, including
+  the loop's final call after the iteration cap. `/deepseek` does so on `chat`,
+  the one call it exports.
   `/claude-cli` hands it to the CLI as `--model`, on `chat` and
   `chatWithToolLoop`. `/openai` and `/google` accept `model` and ignore it:
   they send their own id for the `modelClass`.
@@ -104,7 +106,8 @@ const reply = await samba.chat({
   does not know fails as that provider's own error.
 - **Without `model`**, the adapter sends its id for the `modelClass`
   (`models[modelClass]`); `/claude-cli`, which has no catalogue, leaves the
-  choice to the CLI.
+  choice to the CLI; `/vertex-openai`, which has no catalogue either, refuses
+  the call.
 - **Usage and spans report the id that was sent.** `TokenUsage.model`, the
   `ModelSpan` and the OpenTelemetry span's request model all carry it.
   `TokenUsage.direction` is the `modelClass` the call asked for (`'reasoning'`
@@ -309,6 +312,95 @@ retries, `image` / `document` content blocks included. What differs:
   and `vertex.chatWithToolLoop`.
 - **Catalogue and routing.** The subpath registers nothing: `isProviderConfigured`,
   `resolveModel` and the other routing helpers do not know a `vertex` provider.
+
+## Vertex AI's OpenAI-compatible endpoint
+
+`@verevoir/llm/vertex-openai` calls the Chat Completions endpoint Google Cloud
+Vertex AI offers for models of several publishers:
+`POST https://aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/endpoints/openapi/chat/completions`.
+It exports `chat`, `chatWithTools`, `chatWithToolLoop` and `PROVIDER`
+(`'vertex-openai'`), the namespaced `vertexOpenAI`, and two error classes,
+`VertexOpenAIConfigError` and `VertexOpenAITokenError`.
+
+```bash
+npm install @verevoir/llm openai google-auth-library
+```
+
+`openai` and `google-auth-library` are optional peers; this is the only subpath
+that imports `google-auth-library`. `@verevoir/llm/vertex` does not need it
+named: `@anthropic-ai/vertex-sdk` brings its own.
+
+```ts
+import { vertexOpenAI } from '@verevoir/llm/vertex-openai';
+
+// GOOGLE_CLOUD_PROJECT is set in the environment.
+const reply = await vertexOpenAI.chat({
+  systemPrompt: 'You are a helpful assistant.',
+  turns: [{ role: 'user', content: 'Hello' }],
+  model: 'google/gemini-3.5-flash',
+});
+```
+
+The three calls are the ones `@verevoir/llm/samba` and `/mistral` have, built by
+the same code: the same messages, tool calls, tool loop and retries. What
+differs:
+
+- **The model is required.** There is no catalogue and no default: pass `model`
+  in the endpoint's `<publisher>/<model>` form. It is sent exactly as given. A
+  call with no `model` (or a blank one) is refused with a
+  `VertexOpenAIConfigError` whose `setting` is `'model'`, before any token is
+  asked for or any request sent. `modelClass` chooses nothing here; it is still
+  reported as `TokenUsage.direction`.
+- **Credentials.** Authentication is Google Cloud's standard credentials flow,
+  through `google-auth-library`, for the scope
+  `https://www.googleapis.com/auth/cloud-platform`. The access token is asked
+  for before every request, a tool loop's included, so a token the library has
+  replaced is the one sent; the library keeps the token it holds and fetches
+  another only when that one is about to expire. No credential is looked up
+  when the subpath is imported. There is no API key: a per-call `apiKey` is
+  refused (`setting: 'apiKey'`), and `OPENAI_API_KEY`, `OPENAI_BASE_URL`,
+  `OPENAI_ORG_ID` and `OPENAI_PROJECT_ID` are not used.
+- **Project and location.** `ChatOptions` has no field for them. The project
+  comes from `GOOGLE_CLOUD_PROJECT` and the location from
+  `GOOGLE_CLOUD_LOCATION`, read on each call. These are not the variables
+  `@verevoir/llm/vertex` reads, and neither subpath reads the other's. With no
+  project the call is refused with a `VertexOpenAIConfigError`
+  (`setting: 'GOOGLE_CLOUD_PROJECT'`, message
+  `No Vertex AI project: set GOOGLE_CLOUD_PROJECT.`). The location defaults to
+  `global`, which is served by `aiplatform.googleapis.com`; any other location
+  is served by `{location}-aiplatform.googleapis.com`. Some models answer only
+  at `global`. A project or location that is not a plain identifier is refused
+  without being repeated, since both become part of the URL the token is sent
+  to. There is no base-URL override.
+- **Usage.** `provider` is `'vertex-openai'` and `route` is `'google-cloud'`.
+  `inputTokens` is `prompt_tokens` less any cached tokens, and
+  `cacheReadInputTokens` is `prompt_tokens_details.cached_tokens` when the
+  endpoint reports it. When it reports none (the member is absent or `null`)
+  the count is `0`, as on the other OpenAI-compatible adapters: `TokenUsage`
+  cannot say "not reported". `cacheCreationInputTokens` is always `0`.
+  Reasoning tokens are counted within `outputTokens`: where the response's
+  `total_tokens` equals prompt + completion + reasoning, the endpoint reported
+  them apart from `completion_tokens` and they are added; otherwise
+  `completion_tokens` is taken as the whole output. `TokenUsage` has no
+  separate reasoning count.
+- **Cost.** The subpath adds no price. The price book looks a usage up by the
+  exact model name sent, then by `vertex-openai/<that name>`; a name with no
+  entry is `unpriced`.
+- **Failures.** The `openai` SDK's errors are thrown as they are, so
+  `classifyLlmError` reads the endpoint's status as on any other adapter. The
+  SDK's own retries are off on this adapter (`maxRetries: 0` on its client), so
+  the library's retry policy is the only one: a retryable status is sent again
+  only by that policy, three times at most, and an access token is asked for
+  before each of those requests. A failure to obtain an access token is a `VertexOpenAITokenError`: no request
+  was sent, it carries no `status`, and it classifies as `other`, not
+  retryable, so it does not read as the endpoint's refusal of the request or
+  of the credential. Its message is fixed and holds no text from the
+  credentials library; that library's own error is on `cause`.
+  `VertexOpenAIConfigError` classifies as `other` too. The access token is in
+  no error, span or log line this library writes.
+- **Catalogue and routing.** The subpath registers nothing: `isProviderConfigured`,
+  `resolveModel` and the other routing helpers do not know a `vertex-openai`
+  provider.
 
 ## Cost accounting
 
