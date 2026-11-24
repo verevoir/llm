@@ -141,8 +141,7 @@ try {
 - **`retryable`** says whether a later attempt at the same call may succeed. It
   does not say how long to wait, and the adapter has already made its own
   retries (three, with backoff, on the API adapters) before the error reaches
-  you. For the adapters that send through the `openai` SDK, what is retried is
-  set out [below](#retries-on-the-adapters-that-send-through-the-openai-sdk).
+  you. What is retried is set out [below](#retries).
 
 | `kind`            | Recognised by                                                                                                                                             | `retryable` |
 | ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
@@ -197,19 +196,26 @@ What cannot be told apart:
 - **The library's own argument and configuration checks** — no turns, no tools,
   a missing API key, an `UnsupportedContentBlockError` — are `other` too.
 
-### Retries on the adapters that send through the `openai` SDK
+### Retries
 
-`@verevoir/llm/openai`, `/deepseek`, `/samba`, `/mistral` and `/vertex-openai`
-retry by one policy, the library's own. The SDK's own retries are off on their
-clients (`maxRetries: 0`), and the policy retries everything the SDK's did.
+Every adapter that sends through a provider SDK with retries of its own retries
+by one policy, the library's own: `@verevoir/llm/anthropic` and `/vertex`
+(the Anthropic SDK), and `/openai`, `/deepseek`, `/samba`, `/mistral` and
+`/vertex-openai` (the `openai` SDK). The SDK's own retries are off on their
+clients (`maxRetries: 0`), so a failed request is retried in one place only, and
+the policy retries everything either SDK's own rule retries. The two that remain
+stand apart: `/google` has retries of its own (three, on the same waits, for a
+429, 500, 503 or a transient gRPC error, with no abort during a wait), and
+`/claude-cli` makes none.
 
 | A request that fails with                                                  | Is sent       |
 | -------------------------------------------------------------------------- | ------------- |
 | HTTP 408, 409 or 429                                                       | up to 4 times |
-| Any HTTP status of 500 or above (500, 502, 503, 504, 529, …)               | up to 4 times |
+| Any HTTP status of 500 or above (500, 502, 503, 504, Anthropic's 529, …)   | up to 4 times |
 | A connection failure (the SDK's `APIConnectionError`)                      | up to 4 times |
 | A request timeout (the SDK's `APIConnectionTimeoutError`), see below       | up to 3 times |
 | Any status, with the response header `x-should-retry: true`                | up to 4 times |
+| An error event part-way through a streamed answer, by its type, see below  | up to 4 times |
 | A message naming a 429, 500, 502 or 503 (`rate limit`, …), see below       | up to 4 times |
 | Any status, with the response header `x-should-retry: false`               | once          |
 | Any other 4xx (400, 401, 403, 404, 422, …), without `x-should-retry: true` | once          |
@@ -250,20 +256,35 @@ each request of the loop separately):
   the SDK's request timeout after the abort. In each case the call rejects with
   the signal's own `reason` (or an `AbortError` when it has none), which
   `classifyLlmError` calls `other`.
-- **`x-should-retry`** is read as the SDK reads it: `true` and `false` decide,
+- **`x-should-retry`** is read as both SDKs read it: `true` and `false` decide,
   whatever the status; any other value is ignored.
+- **Anthropic and Vertex AI: a streamed answer that fails part-way.** Every
+  request `/anthropic` and `/vertex` make is streamed. A stream can open with a
+  200 and then report an error event, which has no status: it is retried when
+  its type is `overloaded_error`, `rate_limit_error`, `api_error` or
+  `timeout_error`, the types `classifyLlmError` calls `retryable`, and sent once
+  for any other type. The answer is read only from a stream that completed, so a
+  retry never repeats or adds to text the failed stream had delivered. One thing
+  can arrive twice: a progress report (`onProgress`) the failed stream had
+  completed is reported when it completes, and the retry may report it again. A
+  stream that is cut off with no error event is not retried: the SDK reports it
+  with no status, type or connection class, and `classifyLlmError` calls it
+  `other`.
+- **Anthropic's 529** (overloaded) is retried as a status of 500 or above; the
+  `reason` given to `onRetry` reads `Anthropic server error (529)`.
 - **Agreement with `classifyLlmError`.** A connection failure and a timeout are
-  recognised by the same SDK class names. Every SDK error it calls `retryable`
-  is retried here; a 409 is retried too, as the SDK did, though it is
-  `invalid-request` there.
+  recognised by the same SDK class names, and a stream's error event by the
+  same types. Every SDK error it calls `retryable` is retried here; a 409 is
+  retried too, as each SDK's own rule retries it, though it is `invalid-request`
+  there.
 
-**Known difference from the SDK's own retries: `Retry-After` is not honoured.**
-The SDK waited as a `Retry-After` or `retry-after-ms` header asked, when it
-asked for under a minute; this policy waits its fixed 5, 30 and 120 seconds
-whatever the response says. The SDK's own waits are also shorter (from half a
-second, to eight at most): the 5, 30 and 120 seconds are the library's waits for
-a provider outage, applied as they stand to connection failures and to every
-retried status, and not tuned for those.
+**Known difference from the SDKs' own retries: `Retry-After` is not honoured.**
+An SDK's own retries wait as a `Retry-After` or `retry-after-ms` header asks;
+this policy waits its fixed 5, 30 and 120 seconds whatever the response says.
+The SDKs' own waits are also shorter (from half a second, to eight at
+most): the 5, 30 and 120 seconds are the library's waits for a provider outage,
+applied as they stand to connection failures and to every retried status, and
+not tuned for those.
 
 **A message can still cause a retry.** An error whose message names a 429, 500,
 502 or 503 is retried even when its status is one the policy does not retry: a
@@ -274,6 +295,11 @@ Before 0.43.0 only `/vertex-openai` had the SDK's retries off, and the policy
 retried 429, 500, 502 and 503 only. On the other four the SDK retried too, twice
 per attempt, so a status both layers retried reached the provider up to twelve
 times, with `onRetry` told of three.
+
+Before 0.44.0 `/anthropic` and `/vertex` were in the same position: the library
+retried 429, 500, 503 and 529 only, the SDK retried too, twice per attempt, and
+a status both layers retried reached the provider up to twelve times, with
+`onRetry` told of three. An abort did not end a wait on these two.
 
 ## Provider endpoints & routing
 

@@ -184,10 +184,9 @@ async function callGenerateContent(
   });
 }
 
-// Google outages and rate limits are handled with the same exponential-
-// backoff shape as the Anthropic adapter. The reason strings are
-// google-specific so customers reading retry-narration messages can
-// tell which provider is unavailable. Capped at 3 retries (~2 min total).
+// Retried here, by this adapter's own loop, on the same waits as the library's
+// retry policy: 3 retries (~2 min total). The reason strings name Google, so a
+// caller narrating a retry can tell which provider is unavailable.
 const RETRY_BACKOFFS_MS = [
   5_000, //   5 sec
   30_000, //  30 sec

@@ -1,9 +1,10 @@
 /**
  * The retry policy on its own: what it reads off an error, held against the
- * real SDK's error classes and against `classifyLlmError`; what a caller's
+ * real error classes of both SDKs and against `classifyLlmError`; what a caller's
  * abort does to it; and the figures the README states, computed from its
  * constants. What it does to the number of requests an adapter sends is
- * counted in `openai-sdk-single-retry.test.ts`.
+ * counted in `openai-sdk-single-retry.test.ts` and
+ * `anthropic-sdk-single-retry.test.ts`.
  */
 
 import { readFileSync } from 'node:fs';
@@ -14,6 +15,7 @@ import OpenAI, {
   APIError,
   APIUserAbortError,
 } from 'openai';
+import * as AnthropicSdk from '@anthropic-ai/sdk';
 import { classifyLlmError, type ChatRetryInfo } from './index.js';
 import {
   RETRY_BACKOFFS_MS,
@@ -26,7 +28,7 @@ import {
 const sdkError = (status: number, headers: Record<string, string> = {}) =>
   APIError.generate(status, { error: { message: 'refused' } }, undefined, new Headers(headers));
 
-describe('the retry policy of the adapters that send through the openai SDK', () => {
+describe('the retry policy of the adapters that send through the openai or the Anthropic SDK', () => {
   it('waits 5, 30 and 120 seconds: three retries', () => {
     expect(RETRY_BACKOFFS_MS).toEqual([5_000, 30_000, 120_000]);
   });
@@ -129,6 +131,129 @@ describe('the retry policy of the adapters that send through the openai SDK', ()
       .filter((e) => classifyLlmError(e).retryable !== (retriableReason(e, 'P') !== null))
       .map((e) => (e as APIError).status);
     expect(disagreements).toEqual([409]);
+  });
+});
+
+/** The error the Anthropic SDK builds for a response of this status. */
+const anthropicError = (status: number, headers: Record<string, string> = {}) =>
+  AnthropicSdk.APIError.generate(
+    status,
+    { type: 'error', error: { type: 'refused_error', message: 'refused' } },
+    undefined,
+    new Headers(headers)
+  );
+
+/** The error the Anthropic SDK builds for an error event inside a streamed
+ * response: no status, the event as its body, and the event's `type`. That
+ * this is what a real stream throws is held in
+ * `anthropic-sdk-single-retry.test.ts`. */
+const streamError = (type: string) =>
+  new AnthropicSdk.APIError(
+    undefined,
+    { type: 'error', error: { type, message: 'the stream failed' } },
+    undefined,
+    new Headers()
+  );
+
+/** The error types `classifyLlmError` calls retryable when there is no status. */
+const RETRIED_TYPES = ['overloaded_error', 'rate_limit_error', 'api_error', 'timeout_error'];
+
+const UNRETRIED_TYPES = [
+  'invalid_request_error',
+  'authentication_error',
+  'permission_error',
+  'not_found_error',
+  'request_too_large',
+  'billing_error',
+];
+
+describe("the same policy, held against the Anthropic SDK's errors", () => {
+  it('builds the errors under test as the SDK does: a status-less APIError that carries its type', () => {
+    const err = streamError('overloaded_error');
+    expect(err.constructor.name).toBe('APIError');
+    expect(err.status).toBeUndefined();
+    expect((err as { type?: unknown }).type).toBe('overloaded_error');
+  });
+
+  it.each([408, 409, 429, 500, 501, 502, 503, 504, 529, 599])('retries a %i', (status) => {
+    expect(retriableReason(anthropicError(status), 'P')).toMatch(
+      new RegExp(`^P .*\\(${status}\\)$`)
+    );
+  });
+
+  it.each([400, 401, 403, 404, 413, 422, 499])('does not retry a %i', (status) => {
+    expect(retriableReason(anthropicError(status), 'P')).toBeNull();
+  });
+
+  it('reads x-should-retry off its errors: true retries a 400, false stops a 529', () => {
+    expect(retriableReason(anthropicError(400, { 'x-should-retry': 'true' }), 'P')).toBe(
+      'P asked for a retry (x-should-retry, 400)'
+    );
+    expect(retriableReason(anthropicError(529, { 'x-should-retry': 'false' }), 'P')).toBeNull();
+  });
+
+  it('retries its connection failure and its request timeout by the class names it shares with the openai SDK, and not a caller abort', () => {
+    expect(AnthropicSdk.APIConnectionError.name).toBe(APIConnectionError.name);
+    expect(AnthropicSdk.APIConnectionTimeoutError.name).toBe(APIConnectionTimeoutError.name);
+    expect(retriableReason(new AnthropicSdk.APIConnectionError({ message: 'x' }), 'P')).toBe(
+      'P connection failed'
+    );
+    expect(retriableReason(new AnthropicSdk.APIConnectionTimeoutError(), 'P')).toBe(
+      'P request timed out'
+    );
+    expect(retriableReason(new AnthropicSdk.APIUserAbortError(), 'P')).toBeNull();
+  });
+
+  it('retries an error event of a stream by its type, named in the reason with the kind classifyLlmError gives it', () => {
+    expect(RETRIED_TYPES.map((type) => retriableReason(streamError(type), 'P'))).toEqual([
+      'P overloaded (overloaded_error)',
+      'P rate-limited (rate_limit_error)',
+      'P unavailable (api_error)',
+      'P timeout (timeout_error)',
+    ]);
+  });
+
+  it.each(UNRETRIED_TYPES)('does not retry an error event of a stream of type %s', (type) => {
+    expect(retriableReason(streamError(type), 'P')).toBeNull();
+  });
+
+  it('reads the type only when there is no status: a 400 of a retried type is not retried', () => {
+    for (const type of RETRIED_TYPES) {
+      expect(retriableReason({ status: 400, type, message: 'refused' }, 'P')).toBeNull();
+    }
+  });
+
+  it('x-should-retry: false stops the type rule too', () => {
+    const headers = new Headers({ 'x-should-retry': 'false' });
+    expect(retriableReason({ type: 'overloaded_error', headers }, 'P')).toBeNull();
+  });
+
+  it.each([[null], [undefined], [529], [{}], [['overloaded_error']]])(
+    'ignores a type that is not a string: %j',
+    (type) => {
+      expect(retriableReason({ type, message: 'refused' }, 'P')).toBeNull();
+    }
+  );
+
+  // Every error this SDK throws for a response, for an error event of a stream
+  // or for a request with no response: the two agree on all but a 409.
+  it('retries every SDK error classifyLlmError calls retryable, and 409 besides', () => {
+    const statusOf = (e: unknown) => (e as { status?: number }).status;
+    const errors: unknown[] = [
+      ...Array.from({ length: 200 }, (_, i) => anthropicError(400 + i)),
+      ...[...RETRIED_TYPES, ...UNRETRIED_TYPES].map(streamError),
+      new AnthropicSdk.APIConnectionError({ message: 'x' }),
+      new AnthropicSdk.APIConnectionTimeoutError(),
+      new AnthropicSdk.APIUserAbortError(),
+      new AnthropicSdk.AnthropicError('terminated'),
+    ];
+    const retried = errors.filter((e) => retriableReason(e, 'P') !== null);
+    const disagreements = errors
+      .filter((e) => classifyLlmError(e).retryable !== (retriableReason(e, 'P') !== null))
+      .map(statusOf);
+    expect(disagreements).toEqual([409]);
+    // The retried types, the connection failure and the timeout: none is lost.
+    expect(retried.filter((e) => statusOf(e) === undefined)).toHaveLength(RETRIED_TYPES.length + 2);
   });
 });
 
@@ -593,10 +718,11 @@ describe('the figures the README states are those of the constants', () => {
     expectReadmeToState(
       `up to ${RETRY_BACKOFFS_MS.length} times more: ${requests} requests at most`
     );
-    expect(README.match(new RegExp(`\\| up to ${requests} times \\|`, 'g'))).toHaveLength(5);
+    expect(README.match(new RegExp(`\\| up to ${requests} times \\|`, 'g'))).toHaveLength(6);
   });
 
   it('the requests and the total time before a request never answered is given up', () => {
+    expect(AnthropicSdk.default.DEFAULT_TIMEOUT).toBe(OpenAI.DEFAULT_TIMEOUT);
     expectReadmeToState(`request timeout, ${sdkTimeoutMinutes} minutes by default`);
     expectReadmeToState(`at most ${TIMEOUT_RETRIES} of a call's retries follow a timeout`);
     expectReadmeToState(
