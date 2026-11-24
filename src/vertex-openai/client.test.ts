@@ -1,0 +1,85 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+// The credentials library is mocked at the constructor, so this file holds
+// what the route asks of it when no test token source is in place: when the
+// object is built, with which scope, and how often a token is asked for. The
+// real `openai` SDK sends through a fake `fetch`. No network, no credential.
+const authCtor = vi.fn();
+const getAccessToken = vi.fn();
+
+vi.mock('google-auth-library', () => ({
+  GoogleAuth: class GoogleAuth {
+    getAccessToken = getAccessToken;
+    constructor(opts: unknown) {
+      authCtor(opts);
+    }
+  },
+}));
+
+import { chat } from './index.js';
+import { setTransportForTests } from './client.js';
+import type { ChatOptions } from '../index.js';
+
+const BASE: ChatOptions = {
+  systemPrompt: 'sys',
+  turns: [{ role: 'user', content: 'hello' }],
+  model: 'google/gemini-3.5-flash',
+};
+
+const fetchMock = vi.fn<(url: string | URL | Request, init?: RequestInit) => Promise<Response>>();
+
+const sentTokens = () =>
+  fetchMock.mock.calls.map(([, init]) => new Headers(init?.headers).get('authorization'));
+
+let savedProject: string | undefined;
+
+beforeEach(() => {
+  authCtor.mockReset();
+  getAccessToken.mockReset();
+  fetchMock.mockReset();
+  fetchMock.mockImplementation(
+    async () =>
+      new Response(
+        JSON.stringify({
+          id: 'chatcmpl-1',
+          choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      )
+  );
+  savedProject = process.env.GOOGLE_CLOUD_PROJECT;
+  process.env.GOOGLE_CLOUD_PROJECT = 'proj-a';
+  // Only `fetch` is replaced: the token source is the route's own.
+  setTransportForTests({ fetch: fetchMock });
+});
+
+afterEach(() => {
+  if (savedProject === undefined) delete process.env.GOOGLE_CLOUD_PROJECT;
+  else process.env.GOOGLE_CLOUD_PROJECT = savedProject;
+  setTransportForTests();
+});
+
+describe('@verevoir/llm/vertex-openai — the Google Cloud token source', () => {
+  it('builds no credentials object on import, nor for a call refused before any request', async () => {
+    expect(authCtor).not.toHaveBeenCalled();
+
+    await expect(chat({ ...BASE, model: undefined })).rejects.toThrow('No model');
+
+    expect(authCtor).not.toHaveBeenCalled();
+    expect(getAccessToken).not.toHaveBeenCalled();
+  });
+
+  it('builds one credentials object, for the cloud-platform scope, and asks it before every call', async () => {
+    getAccessToken.mockResolvedValueOnce('tok-1').mockResolvedValueOnce('tok-2');
+
+    await chat(BASE);
+    await chat(BASE);
+
+    expect(authCtor.mock.calls).toEqual([
+      [{ scopes: 'https://www.googleapis.com/auth/cloud-platform' }],
+    ]);
+    expect(getAccessToken).toHaveBeenCalledTimes(2);
+    expect(sentTokens()).toEqual(['Bearer tok-1', 'Bearer tok-2']);
+  });
+});
