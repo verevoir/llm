@@ -1228,7 +1228,7 @@ async function chatOnSession(
     content: result.text,
     usage: usageRecord,
     stopReason: result.stopReason,
-    stopKind: anthropicStopKind(result.stopReason),
+    stopKind: result.stopKind ?? anthropicStopKind(result.stopReason),
   };
 }
 
@@ -1379,12 +1379,12 @@ async function chatImpl(options: ClaudeCliChatOptions): Promise<ChatReply> {
   );
   await fireUsageHook(options.onUsage, usageRecord, 'claudeCli.chat');
 
-  const stopReason = parsed?.stop_reason ?? 'end_turn';
   return {
     content: text,
     usage: usageRecord,
-    stopReason,
-    stopKind: anthropicStopKind(stopReason),
+    stopReason: parsed?.stop_reason ?? 'end_turn',
+    // A result that names no stop reason is not known to have finished.
+    stopKind: anthropicStopKind(parsed?.stop_reason ?? ''),
   };
 }
 

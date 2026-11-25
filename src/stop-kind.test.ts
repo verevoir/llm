@@ -46,7 +46,7 @@ import { EmptyResponseError, type ChatOptions, type StopKind, type ToolDef } fro
 /** What one fake reply carries: the provider's word, `incomplete_details.reason`
  * on `/openai`, whether it has text, and whether it calls a tool. */
 interface Reply {
-  word: string;
+  word?: string;
   reason?: string;
   text?: boolean;
   calls?: boolean;
@@ -182,7 +182,7 @@ const ADAPTERS = {
 } satisfies Record<string, Adapter>;
 const ALL: Adapter[] = Object.values(ADAPTERS);
 
-/** The map, as the rows of the card that specified it: [word, kind], or
+/** The map, a row for each provider word: [word, kind], or
  * [status, incomplete reason, kind] on `/openai`. */
 const ANTHROPIC_ROWS: [string, StopKind][] = [
   ['end_turn', 'finished'],
@@ -285,6 +285,14 @@ describe('stopKind', () => {
       expect(result).toMatchObject({ stopReason: CUT_OFF[a.name].word, stopKind: 'max_tokens' });
     }
   );
+
+  it("/claude-cli chat: a result that names no stop reason keeps stopReason 'end_turn' and is other", async () => {
+    ADAPTERS.claudeCli.reply({});
+    expect(await ADAPTERS.claudeCli.chat(ADAPTERS.claudeCli.options)).toMatchObject({
+      stopReason: 'end_turn',
+      stopKind: 'other',
+    });
+  });
 
   it.each(ALL.flatMap((a) => ['invented_word', ''].map((word) => ({ a, name: a.name, word }))))(
     "$name chat: the unknown word '$word' is other, and nothing throws",

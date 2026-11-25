@@ -832,6 +832,30 @@ describe('claude-cli session lifecycle (wave 2a)', () => {
 
       expect(r.text).toBe('ok');
       expect(r.stopReason).toBe('stop_sequence');
+      expect(r.stopKind).toBe('stop_sequence');
+    });
+
+    it("a result that names no stop reason: stopReason stays 'end_turn' and stopKind is 'other'", async () => {
+      const { child, emitLine } = fakeChild();
+      mockSpawn.mockImplementationOnce(() => {
+        setImmediate(() => {
+          const { stop_reason: _unnamed, ...envelope } = REAL_AUTH_FAILURE_ENVELOPE;
+          emitLine({ ...envelope, is_error: false, result: 'ok' });
+        });
+        return child;
+      });
+      const session = createSession();
+
+      const r = await runSessionTurn({
+        session,
+        systemPrompt: 'sys',
+        message: 'a',
+        tools: [],
+        maxToolCalls: 0,
+      });
+
+      expect(r.stopReason).toBe('end_turn');
+      expect(r.stopKind).toBe('other');
     });
   });
 

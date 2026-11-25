@@ -18,6 +18,7 @@ A caller that set an output limit had to know each provider's vocabulary to tell
 - **Each adapter maps its provider's words in one place.** The README's "Why a reply stopped" has the table, adapter by adapter.
 - **A word the adapter does not know is `other`**, the empty string included. It is never an error, and `stopReason` still carries the word.
 - **`/openai` keeps the reason behind `incomplete`**: `stopReason` is still the response's `status`, and `stopKind` is read from `incomplete_details.reason`.
+- **On `/claude-cli`, a result that names no stop reason is `other`.** Its `stopReason` is `'end_turn'`, which that adapter gives when none is named, so the kind is what tells a missing reason from a real finish.
 - **`EmptyResponseError` carries `stopReason` and `stopKind` as fields**, those of the reply that had no text. Built with a message alone, they are `''` and `'other'`.
 
 **What a caller may need to change.** `stopKind` is a required field of `ChatReply` and `ChatWithToolsResult`. Code that only reads results is unaffected. Code that builds one by hand, as a test double does, must add the field for TypeScript to accept it.

@@ -59,7 +59,7 @@ maps that word to a `StopKind` you can branch on whatever the provider:
 Any other word is `'other'`, the empty string and a word the adapter does not
 know included: Anthropic's `pause_turn`, for instance, and every other
 `status` on `/openai`. A refusal the OpenAI Responses API returns as an output
-item on a `completed` response is `'finished'`. An `EmptyResponseError` carries
+item on a `completed` response is `'finished'`. On `/claude-cli` a result that names no stop reason has `stopReason` `'end_turn'`, which that adapter gives when none is named, and `stopKind` `'other'`. An `EmptyResponseError` carries
 the same `stopReason` and `stopKind` as the reply that had no text.
 
 ## Why subpaths
