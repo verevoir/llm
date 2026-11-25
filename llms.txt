@@ -164,7 +164,25 @@ const reply = await anthropic.chat({
 
 // reply.content: string
 // reply.usage:   { provider, model, direction, inputTokens, outputTokens, ... }
+// reply.stopReason: string    — the provider's own word, e.g. 'end_turn'
+// reply.stopKind:   StopKind  — the same, across providers, e.g. 'finished'
 ```
+
+`chat()` and `chatWithTools()` results carry `stopKind: StopKind` —
+`'finished'` | `'max_tokens'` | `'tool_use'` | `'stop_sequence'` | `'refused'`
+(a content or safety policy) | `'other'` — beside `stopReason`, the provider's
+own word, unchanged. The map: `/anthropic`, `/vertex`, `/claude-cli`:
+`end_turn` finished, `max_tokens`, `tool_use`, `stop_sequence`, `refusal`
+refused. `/samba`, `/mistral`, `/vertex-openai`, `/deepseek`: `stop` finished,
+`length` max_tokens, `tool_calls` / `function_call` tool_use, `content_filter`
+refused. `/google`: `STOP` finished (tool_use when the reply has function
+calls), `MAX_TOKENS` max_tokens, `SAFETY` / `RECITATION` / `BLOCKLIST` /
+`PROHIBITED_CONTENT` / `SPII` / `IMAGE_SAFETY` refused. `/openai` (its
+`stopReason` is the response `status`): `completed` finished; `incomplete`
+with reason `max_output_tokens` max_tokens, with `content_filter` refused. Any
+other word, the empty string included, is `other`; the map never throws. A
+hand-built `ChatReply` or `ChatWithToolsResult` (a test double) must set
+`stopKind`.
 
 `ChatOptions.model` is an optional exact model id. When set it is the id sent,
 exactly as given (no catalogue lookup, so a family name or alias is not
@@ -230,7 +248,9 @@ Thrown errors are unchanged apart from two additions. `EmptyResponseError`
 (core export, `extends Error`) is what every adapter's `chat()` throws when
 the reply has no text, where it threw a plain `Error`: its `message` is
 unchanged (`<provider>.chat: response had no text content (…)`) and its `name`
-is still `Error`. The `claude-cli` held-session turn timeout now carries
+is still `Error`. It carries the reply's `stopReason` and `stopKind`; built
+with only a message (`new EmptyResponseError(message)`), they are `''` and
+`'other'`. The `claude-cli` held-session turn timeout now carries
 `.code === 'CLAUDE_CLI_SESSION_TURN_TIMEOUT'`
 (`CLAUDE_CLI_SESSION_TURN_TIMEOUT_CODE` on `@verevoir/llm/claude-cli`).
 

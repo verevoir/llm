@@ -311,6 +311,7 @@ import type {
 } from '../index.js';
 import { ALLOWED_ENV_VARS, allowedEnv, CLAUDE_CLI_CREDENTIAL_ENV_VAR, PROVIDER } from './env.js';
 import { readReportedCost } from './cost.js';
+import { anthropicStopKind } from '../anthropic/stop-kind.js';
 import {
   CLAUDE_CLI_SESSION_TURN_TIMEOUT_CODE,
   closeSession,
@@ -1227,6 +1228,7 @@ async function chatOnSession(
     content: result.text,
     usage: usageRecord,
     stopReason: result.stopReason,
+    stopKind: anthropicStopKind(result.stopReason),
   };
 }
 
@@ -1377,10 +1379,12 @@ async function chatImpl(options: ClaudeCliChatOptions): Promise<ChatReply> {
   );
   await fireUsageHook(options.onUsage, usageRecord, 'claudeCli.chat');
 
+  const stopReason = parsed?.stop_reason ?? 'end_turn';
   return {
     content: text,
     usage: usageRecord,
-    stopReason: parsed?.stop_reason ?? 'end_turn',
+    stopReason,
+    stopKind: anthropicStopKind(stopReason),
   };
 }
 

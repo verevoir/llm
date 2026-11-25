@@ -228,8 +228,21 @@ const RETRYABLE_KINDS: ReadonlySet<LlmErrorKind> = new Set<LlmErrorKind>([
  * could already read on this error reads the same. The class exists so
  * {@link classifyLlmError} — or a caller's own `instanceof` — can
  * recognise the failure without reading that message.
+ *
+ * `stopReason` and `stopKind` say why the reply stopped, as on
+ * {@link ChatReply}. Every adapter that throws this passes both; built
+ * without the second argument, they are `''` and `'other'`.
  */
-export class EmptyResponseError extends Error {}
+export class EmptyResponseError extends Error {
+  readonly stopKind: StopKind;
+  readonly stopReason: string;
+
+  constructor(message: string, stop?: { stopKind: StopKind; stopReason: string }) {
+    super(message);
+    this.stopKind = stop?.stopKind ?? 'other';
+    this.stopReason = stop?.stopReason ?? '';
+  }
+}
 
 /** The `code` the claude-cli adapter puts on its two timeout errors: the
  * one-shot idle timeout and the held-session turn timeout. Spelled out
@@ -626,14 +639,36 @@ export interface ChatOptions {
   abortSignal?: AbortSignal;
 }
 
+/**
+ * Why a reply stopped, in terms that hold across every provider. A closed
+ * union: a caller can switch on it exhaustively. Each adapter maps its
+ * provider's own word (kept as `stopReason`) to one of these.
+ *
+ * - `finished`: the model ended its reply of its own accord.
+ * - `max_tokens`: the reply was cut off at the output-token limit.
+ * - `tool_use`: the model stopped to call a tool.
+ * - `stop_sequence`: the reply reached a stop sequence.
+ * - `refused`: the provider stopped for a content or safety policy.
+ * - `other`: any other word, an unknown one, or none.
+ */
+export type StopKind =
+  'finished' | 'max_tokens' | 'tool_use' | 'stop_sequence' | 'refused' | 'other';
+
 /** Result of a single LLM call via {@link chat}. */
 export interface ChatReply {
   /** The assembled text content of the reply. */
   content: string;
   /** Token usage for the call. */
   usage: TokenUsage;
-  /** The provider's stop reason — `'end_turn'` for normal completion. */
+  /**
+   * The provider's own word for why the reply stopped, as its adapter
+   * reports it: `end_turn` on the Anthropic adapters, `stop` on the
+   * Chat Completions ones, `STOP` on Google, the response `status` on
+   * OpenAI. To branch on it across providers, read {@link stopKind}.
+   */
   stopReason: string;
+  /** Why the reply stopped, across providers — see {@link StopKind}. */
+  stopKind: StopKind;
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -667,7 +702,10 @@ export interface ChatWithToolsOptions extends ChatOptions {
 export interface ChatWithToolsResult {
   toolUses: ToolUse[];
   text: string;
+  /** The provider's own word, as on {@link ChatReply.stopReason}. */
   stopReason: string;
+  /** Why the reply stopped, across providers — see {@link StopKind}. */
+  stopKind: StopKind;
   usage: TokenUsage;
 }
 

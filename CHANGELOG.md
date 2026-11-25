@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.45.0] — 2026-11-25
+
+**A reply now says why the model stopped in one small set of words, `stopKind`, whichever provider answered.** `stopReason` is unchanged: it is still the provider's own word.
+
+A caller that set an output limit had to know each provider's vocabulary to tell a reply cut off at it from one that finished: `max_tokens` from one, `length` from another, `MAX_TOKENS` from a third, and on `/openai` only the status `incomplete`. `chat` and `chatWithTools` now return `stopKind` beside `stopReason`, one of:
+
+| `stopKind`      | The model                                    |
+| --------------- | -------------------------------------------- |
+| `finished`      | finished its reply                           |
+| `max_tokens`    | stopped at the output limit                  |
+| `tool_use`      | stopped to call a tool                       |
+| `stop_sequence` | stopped at a stop sequence                   |
+| `refused`       | refused, or the reply was filtered           |
+| `other`         | stopped for a reason the adapter cannot name |
+
+- **Each adapter maps its provider's words in one place.** The README's "Why a reply stopped" has the table, adapter by adapter.
+- **A word the adapter does not know is `other`**, the empty string included. It is never an error, and `stopReason` still carries the word.
+- **`/openai` keeps the reason behind `incomplete`**: `stopReason` is still the response's `status`, and `stopKind` is read from `incomplete_details.reason`.
+- **`EmptyResponseError` carries `stopReason` and `stopKind` as fields**, those of the reply that had no text. Built with a message alone, they are `''` and `'other'`.
+
+**What a caller may need to change.** `stopKind` is a required field of `ChatReply` and `ChatWithToolsResult`. Code that only reads results is unaffected. Code that builds one by hand, as a test double does, must add the field for TypeScript to accept it.
+
+**Not verified against live calls.** The words for `/deepseek`, `/samba`, `/mistral` and `/vertex-openai` are taken from the OpenAI SDK's types, and `/openai`'s `incomplete_details.reason` from its Responses types. The maps say so where they live.
+
 ## [0.44.0] — 2026-11-24
 
 **`@verevoir/llm/anthropic` and `@verevoir/llm/vertex` now retry a failed request at one layer, by the same policy as the adapters that send through the `openai` SDK.** Each built its client with the Anthropic SDK's default of two retries, and also wrapped every request in a retry of its own, so each attempt of that retry was itself up to three requests. The SDK's retries are now off on both clients (`maxRetries: 0`), the adapters' own copy of the retry is gone, and the library's one policy (0.43.0) makes every retry. This is a behaviour change for a call that meets a failure: the number of requests and the waits between them change (below). A call that succeeds first time is unchanged, as are the thrown errors and every export.

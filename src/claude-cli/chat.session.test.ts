@@ -177,7 +177,7 @@ describe('chat() — session branch', () => {
     expect(mockRunSessionTurn).not.toHaveBeenCalled();
   });
 
-  it('reports usage/stopReason from the session turn result, same shape as the single-shot path', async () => {
+  it('reports usage/stopReason/stopKind from the session turn result, same shape as the single-shot path', async () => {
     queueVersionSpawn('9.9.9 (Claude Code)');
     mockRunSessionTurn.mockResolvedValueOnce(
       baseSessionTurnResult({
@@ -194,6 +194,7 @@ describe('chat() — session branch', () => {
     });
 
     expect(result.stopReason).toBe('max_tokens');
+    expect(result.stopKind).toBe('max_tokens');
     expect(result.usage.inputTokens).toBe(42);
     expect(result.usage.outputTokens).toBe(8);
     expect(result.usage.route).toBe('subscription-oauth');

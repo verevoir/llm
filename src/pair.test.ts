@@ -45,7 +45,7 @@ const usageStub: TokenUsage = {
 function mockAdvisorChat(content = 'advisor says') {
   return vi.fn(async (opts: ChatOptions): Promise<ChatReply> => {
     await opts.onUsage?.(usageStub);
-    return { content, usage: usageStub, stopReason: 'end_turn' };
+    return { content, usage: usageStub, stopReason: 'end_turn', stopKind: 'finished' };
   });
 }
 
