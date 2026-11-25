@@ -1228,7 +1228,7 @@ async function chatOnSession(
     content: result.text,
     usage: usageRecord,
     stopReason: result.stopReason,
-    stopKind: result.stopKind ?? anthropicStopKind(result.stopReason),
+    stopKind: result.stopKind,
   };
 }
 

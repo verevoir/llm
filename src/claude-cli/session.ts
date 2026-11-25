@@ -765,7 +765,7 @@ export interface SessionTurnResult {
   text: string;
   stopReason: string;
   /** Why the turn stopped; `'other'` when the result named no stop reason. */
-  stopKind?: StopKind;
+  stopKind: StopKind;
   usage: ClaudeCliStreamResultEnvelope['usage'];
   modelUsage: ClaudeCliStreamResultEnvelope['modelUsage'];
   /** See {@link ClaudeCliStreamResultEnvelope.total_cost_usd}. */
