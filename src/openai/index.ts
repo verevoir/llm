@@ -20,6 +20,7 @@ import {
   type ChatReply,
   type ModelClass,
   type RatesTable,
+  type StopKind,
   type TokenUsage,
   EmptyResponseError,
   registerModelLabels,
@@ -129,6 +130,8 @@ interface RawResult {
     cachedInputTokens: number;
   };
   status: string;
+  /** `incomplete_details.reason`, or `''` when the response has none. */
+  incompleteReason: string;
   /** The response's own id (`resp_...`) — the SDK object's id field, not an
    * HTTP header. See {@link TokenUsage.providerRequestId}. */
   responseId?: string;
@@ -166,6 +169,7 @@ async function callResponsesCreate(
         cachedInputTokens,
       },
       status: response.status ?? '',
+      incompleteReason: response.incomplete_details?.reason ?? '',
       responseId: response.id,
     };
 
@@ -180,6 +184,19 @@ async function callResponsesCreate(
       },
     };
   });
+}
+
+/**
+ * The {@link StopKind} for a Responses API `status` and, when it is
+ * `incomplete`, `incomplete_details.reason`, as `openai` 6.49.0 declares
+ * both. Any status or reason not listed is `other`. Never throws.
+ */
+function responseStopKind(status: string, incompleteReason: string): StopKind {
+  if (status === 'completed') return 'finished';
+  if (status !== 'incomplete') return 'other';
+  if (incompleteReason === 'max_output_tokens') return 'max_tokens';
+  if (incompleteReason === 'content_filter') return 'refused';
+  return 'other';
 }
 
 function shapeUsage(
@@ -247,9 +264,11 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
   const usage = shapeUsage(raw.rawUsage, modelClass, raw.responseId);
   await fireUsageHook(options.onUsage, usage, 'openai.chat');
 
+  const stopKind = responseStopKind(raw.status, raw.incompleteReason);
   if (!raw.text) {
     throw new EmptyResponseError(
-      `openai.chat: response had no text content (status=${raw.status})`
+      `openai.chat: response had no text content (status=${raw.status})`,
+      { stopReason: raw.status, stopKind }
     );
   }
 
@@ -257,5 +276,6 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
     content: raw.text,
     usage,
     stopReason: raw.status,
+    stopKind,
   };
 }

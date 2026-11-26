@@ -37,7 +37,30 @@ const reply = await anthropic.chat({
 
 console.log(reply.content);
 // reply.usage → { provider, model, direction, inputTokens, outputTokens, ... }
+// reply.stopReason → 'end_turn' (the provider's own word)
+// reply.stopKind → 'finished' (the same, across providers)
 ```
+
+### Why a reply stopped
+
+`chat()` and `chatWithTools()` report why the reply stopped twice. `stopReason`
+is the provider's own word, as each adapter has always reported it. `stopKind`
+maps that word to a `StopKind` you can branch on whatever the provider:
+`'finished'` | `'max_tokens'` | `'tool_use'` | `'stop_sequence'` | `'refused'`
+(the provider stopped for a content or safety policy) | `'other'`.
+
+| Adapter                                             | `finished`  | `max_tokens`                             | `tool_use`                    | `stop_sequence` | `refused`                                                                         |
+| --------------------------------------------------- | ----------- | ---------------------------------------- | ----------------------------- | --------------- | --------------------------------------------------------------------------------- |
+| `/anthropic`, `/vertex`, `/claude-cli`              | `end_turn`  | `max_tokens`                             | `tool_use`                    | `stop_sequence` | `refusal`                                                                         |
+| `/samba`, `/mistral`, `/vertex-openai`, `/deepseek` | `stop`      | `length`                                 | `tool_calls`, `function_call` |                 | `content_filter`                                                                  |
+| `/google`                                           | `STOP`      | `MAX_TOKENS`                             | `STOP` with function calls    |                 | `SAFETY`, `RECITATION`, `BLOCKLIST`, `PROHIBITED_CONTENT`, `SPII`, `IMAGE_SAFETY` |
+| `/openai` (`stopReason` is the response `status`)   | `completed` | `incomplete`, reason `max_output_tokens` |                               |                 | `incomplete`, reason `content_filter`                                             |
+
+Any other word is `'other'`, the empty string and a word the adapter does not
+know included: Anthropic's `pause_turn`, for instance, and every other
+`status` on `/openai`. A refusal the OpenAI Responses API returns as an output
+item on a `completed` response is `'finished'`. On `/claude-cli` a result that names no stop reason has `stopReason` `'end_turn'`, which that adapter gives when none is named, and `stopKind` `'other'`. An `EmptyResponseError` carries
+the same `stopReason` and `stopKind` as the reply that had no text.
 
 ## Why subpaths
 
@@ -172,7 +195,9 @@ are two additions:
   `Error`. Its `message` is exactly what it was
   (`<provider>.chat: response had no text content (…)`, with the finish reason)
   and its `name` is still `Error`, so `instanceof Error`, a message match and a
-  logged error all read as before.
+  logged error all read as before. It also carries the reply's `stopReason` and
+  `stopKind` (see [Why a reply stopped](#why-a-reply-stopped)); one built with
+  only a message holds `''` and `'other'`.
 - **A `code` on the `claude-cli` held-session turn timeout.** That error now
   carries `.code === 'CLAUDE_CLI_SESSION_TURN_TIMEOUT'` (exported from
   `@verevoir/llm/claude-cli` as `CLAUDE_CLI_SESSION_TURN_TIMEOUT_CODE`),

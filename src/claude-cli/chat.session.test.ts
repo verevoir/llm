@@ -107,6 +107,7 @@ function baseSessionTurnResult(overrides: Record<string, unknown> = {}) {
   return {
     text: 'ok',
     stopReason: 'end_turn',
+    stopKind: 'finished',
     usage: { input_tokens: 1, output_tokens: 1 },
     modelUsage: undefined,
     toolUses: [] as ToolUse[],
@@ -177,12 +178,28 @@ describe('chat() — session branch', () => {
     expect(mockRunSessionTurn).not.toHaveBeenCalled();
   });
 
-  it('reports usage/stopReason from the session turn result, same shape as the single-shot path', async () => {
+  it("a session turn that named no stop reason: chat gives the turn's own stopKind, not one read from stopReason", async () => {
+    queueVersionSpawn('9.9.9 (Claude Code)');
+    mockRunSessionTurn.mockResolvedValueOnce(
+      baseSessionTurnResult({ stopReason: 'end_turn', stopKind: 'other' })
+    );
+
+    const result = await chat({
+      systemPrompt: 'sys',
+      turns: [{ role: 'user', content: 'q' }],
+      session: SESSION_HANDLE,
+    });
+
+    expect(result).toMatchObject({ stopReason: 'end_turn', stopKind: 'other' });
+  });
+
+  it('reports usage/stopReason/stopKind from the session turn result, same shape as the single-shot path', async () => {
     queueVersionSpawn('9.9.9 (Claude Code)');
     mockRunSessionTurn.mockResolvedValueOnce(
       baseSessionTurnResult({
         text: 'done',
         stopReason: 'max_tokens',
+        stopKind: 'max_tokens',
         usage: { input_tokens: 42, output_tokens: 8 },
       })
     );
@@ -194,6 +211,7 @@ describe('chat() — session branch', () => {
     });
 
     expect(result.stopReason).toBe('max_tokens');
+    expect(result.stopKind).toBe('max_tokens');
     expect(result.usage.inputTokens).toBe(42);
     expect(result.usage.outputTokens).toBe(8);
     expect(result.usage.route).toBe('subscription-oauth');

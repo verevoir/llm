@@ -58,13 +58,13 @@ describe('classifyLlmError — what it returns', () => {
 });
 
 describe('EmptyResponseError', () => {
-  it('is an Error that reads exactly as the plain Error it replaces', () => {
+  it('is an Error that reads as the plain Error it replaces, and built with one argument holds other and the empty string', () => {
     const err = new EmptyResponseError('p.chat: response had no text content (finishReason=x)');
     expect(err).toBeInstanceOf(Error);
     expect(err.message).toBe('p.chat: response had no text content (finishReason=x)');
     expect(err.name).toBe('Error');
     expect(String(err)).toBe('Error: p.chat: response had no text content (finishReason=x)');
-    expect(Object.keys(err)).toEqual([]);
+    expect({ ...err }).toEqual({ stopKind: 'other', stopReason: '' });
   });
 
   it('is classified by its class, not its message: any message, even an empty one', () => {

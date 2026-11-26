@@ -17,6 +17,7 @@ import OpenAI from 'openai';
 import { fireUsageHook } from '../audit-hook.js';
 import { withGenAISpan } from '../otel.js';
 import { callWithRetries, throwIfAborted } from '../retry-policy.js';
+import { finishReasonStopKind } from '../openai-compat.js';
 import {
   type ChatOptions,
   type ChatReply,
@@ -272,7 +273,8 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
 
   if (!raw.text) {
     throw new EmptyResponseError(
-      `deepseek.chat: response had no text content (finishReason=${raw.finishReason})`
+      `deepseek.chat: response had no text content (finishReason=${raw.finishReason})`,
+      { stopReason: raw.finishReason, stopKind: finishReasonStopKind(raw.finishReason) }
     );
   }
 
@@ -280,5 +282,6 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
     content: raw.text,
     usage,
     stopReason: raw.finishReason,
+    stopKind: finishReasonStopKind(raw.finishReason),
   };
 }

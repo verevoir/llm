@@ -25,6 +25,7 @@ import {
   type ChatWithToolsResult,
   type ModelClass,
   type RatesTable,
+  type StopKind,
   type ToolDef,
   type ToolUse,
   type TokenUsage,
@@ -127,6 +128,36 @@ interface RawResult {
     cachedInputTokens: number;
   };
   finishReason: string;
+  hasFunctionCalls: boolean;
+}
+
+/** Gemini `FinishReason` words, as `@google/genai` 2.21.0 declares them. A
+ * word not listed falls to `other`. */
+const FINISH_REASON_KINDS: Readonly<Record<string, StopKind>> = {
+  STOP: 'finished',
+  MAX_TOKENS: 'max_tokens',
+  SAFETY: 'refused',
+  RECITATION: 'refused',
+  BLOCKLIST: 'refused',
+  PROHIBITED_CONTENT: 'refused',
+  SPII: 'refused',
+  IMAGE_SAFETY: 'refused',
+  LANGUAGE: 'other',
+  OTHER: 'other',
+  MALFORMED_FUNCTION_CALL: 'other',
+  UNEXPECTED_TOOL_CALL: 'other',
+  TOO_MANY_TOOL_CALLS: 'other',
+  FINISH_REASON_UNSPECIFIED: 'other',
+};
+
+/** The {@link StopKind} for a Gemini `finishReason`. Gemini ends a turn that
+ * calls a function with `STOP`, so `STOP` with function calls is `tool_use`.
+ * Never throws. */
+function googleStopKind(finishReason: string, hasFunctionCalls: boolean): StopKind {
+  if (finishReason === 'STOP' && hasFunctionCalls) return 'tool_use';
+  return Object.hasOwn(FINISH_REASON_KINDS, finishReason)
+    ? FINISH_REASON_KINDS[finishReason]
+    : 'other';
 }
 
 async function callGenerateContent(
@@ -165,6 +196,7 @@ async function callGenerateContent(
         cachedInputTokens: u.cachedContentTokenCount ?? 0,
       },
       finishReason: String(finishReason),
+      hasFunctionCalls: (response.functionCalls ?? []).length > 0,
     };
 
     return {
@@ -313,9 +345,11 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
   const usage = shapeUsage(raw.rawUsage, modelClass);
   await fireUsageHook(options.onUsage, usage, 'google.chat');
 
+  const stopKind = googleStopKind(raw.finishReason, raw.hasFunctionCalls);
   if (!raw.text) {
     throw new EmptyResponseError(
-      `google.chat: response had no text content (finish_reason=${raw.finishReason})`
+      `google.chat: response had no text content (finish_reason=${raw.finishReason})`,
+      { stopReason: raw.finishReason, stopKind }
     );
   }
 
@@ -323,6 +357,7 @@ export async function chat(options: ChatOptions): Promise<ChatReply> {
     content: raw.text,
     usage,
     stopReason: raw.finishReason,
+    stopKind,
   };
 }
 
@@ -490,6 +525,7 @@ export async function chatWithTools(options: ChatWithToolsOptions): Promise<Chat
     })),
     text: r.text,
     stopReason: r.finishReason,
+    stopKind: googleStopKind(r.finishReason, r.functionCalls.length > 0),
     usage,
   };
 }

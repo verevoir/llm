@@ -128,7 +128,8 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
-import type { ToolDef } from '../index.js';
+import type { StopKind, ToolDef } from '../index.js';
+import { anthropicStopKind } from '../anthropic/stop-kind.js';
 import { allowedEnv } from './env.js';
 import { createToolBridge, type ArmedTurnState, type ToolBridge } from './mcp-bridge.js';
 import type { BridgeToolResult } from './mcp-bridge.js';
@@ -763,6 +764,8 @@ export interface SessionTurnOptions {
 export interface SessionTurnResult {
   text: string;
   stopReason: string;
+  /** Why the turn stopped; `'other'` when the result named no stop reason. */
+  stopKind: StopKind;
   usage: ClaudeCliStreamResultEnvelope['usage'];
   modelUsage: ClaudeCliStreamResultEnvelope['modelUsage'];
   /** See {@link ClaudeCliStreamResultEnvelope.total_cost_usd}. */
@@ -934,6 +937,7 @@ export async function runSessionTurn(options: SessionTurnOptions): Promise<Sessi
   return {
     text: typeof parsed.result === 'string' ? parsed.result : '',
     stopReason: parsed.stop_reason ?? 'end_turn',
+    stopKind: anthropicStopKind(parsed.stop_reason ?? ''),
     usage: parsed.usage,
     modelUsage: parsed.modelUsage,
     totalCostUsd: parsed.total_cost_usd,

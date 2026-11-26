@@ -36,6 +36,7 @@ import {
   EmptyResponseError,
 } from '../index.js';
 import { callWithRetries, throwIfAborted } from '../retry-policy.js';
+import { anthropicStopKind } from './stop-kind.js';
 
 /**
  * Concrete model id per {@link ModelClass}, derived from {@link CATALOG} — the
@@ -593,6 +594,7 @@ export async function chat(
           streamed.responseId
         ),
         stopReason: streamed.stopReason,
+        stopKind: anthropicStopKind(streamed.stopReason),
       };
     }
 
@@ -624,7 +626,8 @@ export async function chat(
 
     // No text and nothing to continue on — a genuinely empty response.
     throw new EmptyResponseError(
-      `${scope}: response had no text content (stop_reason=${streamed.stopReason})`
+      `${scope}: response had no text content (stop_reason=${streamed.stopReason})`,
+      { stopReason: streamed.stopReason, stopKind: anthropicStopKind(streamed.stopReason) }
     );
   }
 
@@ -699,6 +702,7 @@ export async function chatWithTools(
     toolUses: streamed.toolUses,
     text: streamed.text,
     stopReason: streamed.stopReason,
+    stopKind: anthropicStopKind(streamed.stopReason),
     usage,
   };
 }

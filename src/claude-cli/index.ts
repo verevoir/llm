@@ -311,6 +311,7 @@ import type {
 } from '../index.js';
 import { ALLOWED_ENV_VARS, allowedEnv, CLAUDE_CLI_CREDENTIAL_ENV_VAR, PROVIDER } from './env.js';
 import { readReportedCost } from './cost.js';
+import { anthropicStopKind } from '../anthropic/stop-kind.js';
 import {
   CLAUDE_CLI_SESSION_TURN_TIMEOUT_CODE,
   closeSession,
@@ -1227,6 +1228,7 @@ async function chatOnSession(
     content: result.text,
     usage: usageRecord,
     stopReason: result.stopReason,
+    stopKind: result.stopKind,
   };
 }
 
@@ -1381,6 +1383,8 @@ async function chatImpl(options: ClaudeCliChatOptions): Promise<ChatReply> {
     content: text,
     usage: usageRecord,
     stopReason: parsed?.stop_reason ?? 'end_turn',
+    // A result that names no stop reason is not known to have finished.
+    stopKind: anthropicStopKind(parsed?.stop_reason ?? ''),
   };
 }
 

@@ -34,6 +34,7 @@ import {
   type ModelCatalogEntry,
   type ModelClass,
   type RatesTable,
+  type StopKind,
   type ToolDef,
   type ToolUse,
   type TokenUsage,
@@ -43,6 +44,25 @@ import {
   resolveBaseUrl,
   localEndpointKey,
 } from './index.js';
+
+/** Chat Completions `finish_reason` words, as `openai` 6.49.0 declares them.
+ * A word a compatible provider sends beyond OpenAI's set is unverified, and
+ * falls to `other`. */
+const FINISH_REASON_KINDS: Readonly<Record<string, StopKind>> = {
+  stop: 'finished',
+  length: 'max_tokens',
+  tool_calls: 'tool_use',
+  function_call: 'tool_use',
+  content_filter: 'refused',
+};
+
+/** The {@link StopKind} for a Chat Completions `finish_reason`, for every
+ * adapter that reads one (`/deepseek` included). Never throws. */
+export function finishReasonStopKind(finishReason: string): StopKind {
+  return Object.hasOwn(FINISH_REASON_KINDS, finishReason)
+    ? FINISH_REASON_KINDS[finishReason]
+    : 'other';
+}
 
 /** Config for one OpenAI-compatible provider. */
 export interface OpenAICompatConfig {
@@ -316,11 +336,17 @@ export function createOpenAICompatCalls(config: OpenAICompatCallsConfig): OpenAI
 
     if (!raw.text) {
       throw new EmptyResponseError(
-        `${provider}.chat: response had no text content (finishReason=${raw.finishReason})`
+        `${provider}.chat: response had no text content (finishReason=${raw.finishReason})`,
+        { stopReason: raw.finishReason, stopKind: finishReasonStopKind(raw.finishReason) }
       );
     }
 
-    return { content: raw.text, usage, stopReason: raw.finishReason };
+    return {
+      content: raw.text,
+      usage,
+      stopReason: raw.finishReason,
+      stopKind: finishReasonStopKind(raw.finishReason),
+    };
   }
 
   // ── Tool calling (STDIO-342) ───────────────────────────────────────────────
@@ -429,6 +455,7 @@ export function createOpenAICompatCalls(config: OpenAICompatCallsConfig): OpenAI
       toolUses: r.rawCalls.map(parseToolUse),
       text: r.text,
       stopReason: r.finishReason,
+      stopKind: finishReasonStopKind(r.finishReason),
       usage,
     };
   }
