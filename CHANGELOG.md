@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.46.0] — 2026-11-27
 
 **The OpenTelemetry span now follows the GenAI semantic conventions at `open-telemetry/semantic-conventions-genai` v0.1.0 (status Development), which name the cache counts and count cached tokens as input.** Both changes below change what the span carries: a dashboard, query or alert that reads it must change with them. What `chat()`, `chatWithTools` and `chatWithToolLoop` return (token counts and cost) is unchanged on every adapter, as is the `ModelSpan` given to `setModelSpanSink`.
 
