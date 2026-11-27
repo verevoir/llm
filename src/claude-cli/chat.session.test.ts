@@ -670,10 +670,8 @@ describe('claudeCli.chatWithToolLoop — GenAI spans', () => {
     ).toBe('non-finite');
   });
 
-  // The CLI's `input_tokens` leaves cached tokens out, as Anthropic's does:
-  // here it is 2 of a prompt of 27,491 tokens, the rest read from or
-  // written to the cache. The span's input is every input token of the call
-  // (src/otel.ts's header); what the call returns is the CLI's own counts.
+  // A prompt of 27,491 tokens, all but 2 read from or written to the cache;
+  // the CLI's `input_tokens` leaves those out (src/otel.ts's header).
   const CACHED_USAGE = {
     input_tokens: 2,
     cache_creation_input_tokens: 15647,

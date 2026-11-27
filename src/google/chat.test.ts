@@ -244,11 +244,8 @@ describe('google.chat', () => {
   });
 });
 
-// Gemini's `promptTokenCount` includes the cached content's tokens, so it
-// already counts every input token of the call: the span's input is
-// `promptTokenCount` as given, neither less `cachedContentTokenCount` nor
-// plus it (src/otel.ts's header). Both of this adapter's spans: chat()'s,
-// and the tool-calling one chatWithTools and chatWithToolLoop share.
+// `promptTokenCount` includes the cached content (src/otel.ts's header). Both of
+// this adapter's spans: chat()'s, and the one chatWithTools and chatWithToolLoop share.
 describe('google — the span input with cached content', () => {
   let exporter: InMemorySpanExporter;
   let provider: BasicTracerProvider;

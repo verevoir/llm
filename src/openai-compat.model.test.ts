@@ -193,10 +193,8 @@ describe('OpenAI-compatible adapters — the model a caller names', () => {
     }
   );
 
-  // `prompt_tokens` includes the cached tokens on every provider here
-  // (DeepSeek's included; the factory's returned count subtracts them —
-  // openai-compat.test.ts), so the span's input, every input token of the
-  // call, is `prompt_tokens` as given.
+  // `prompt_tokens` includes the cached tokens (src/otel.ts's header); the
+  // returned count subtracts them (openai-compat.test.ts).
   const CACHED_REPLY = {
     choices: [{ message: { content: 'ok', tool_calls: [] }, finish_reason: 'stop' }],
     usage: {
@@ -224,7 +222,7 @@ describe('OpenAI-compatible adapters — the model a caller names', () => {
   );
 
   it.each(FACTORY_BUILT.map((a) => ({ name: `${a.PROVIDER}.chat`, a })))(
-    "$name: chat()'s returned counts and cost are unchanged by the span's input",
+    "$name: chat()'s returned counts and cost are the factory's own, whatever the span's input",
     async ({ a }) => {
       mockCreate.mockResolvedValue(CACHED_REPLY);
       const book = createPriceBook({

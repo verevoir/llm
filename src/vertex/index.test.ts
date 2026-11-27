@@ -434,7 +434,7 @@ describe('@verevoir/llm/vertex — OpenTelemetry span', () => {
   );
 
   it.each(ROUTES)(
-    "$route: chat()'s returned counts and cost are unchanged by the span's input",
+    "$route: chat()'s returned counts and cost are the provider's own, whatever the span's input",
     async ({ stream, call }) => {
       stream.mockReturnValue(fakeStream([{ type: 'text', text: 'ok' }], 'end_turn', SPAN_USAGE));
       const book = createPriceBook({

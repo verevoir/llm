@@ -169,7 +169,7 @@ describe('withGenAISpan — recorded via an in-memory span exporter', () => {
     for (const name of NON_CONVENTION_CACHE_ATTRIBUTES) expect(keys).not.toContain(name);
   });
 
-  it('keeps under verevoir.llm.* every attribute the conventions still lack', async () => {
+  it('keeps under verevoir.llm.* every attribute the conventions lack', async () => {
     await withGenAISpan({ provider: 'anthropic', requestModel: 'claude-x' }, async () => ({
       result: 'ok',
       outcome: {

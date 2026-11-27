@@ -194,9 +194,7 @@ async function callChatCompletionsCreate(
       outcome: {
         responseModel: response.model ?? modelId,
         responseId: response.id,
-        // The provider's own values, not `rawUsage`'s zero-filled ones: a
-        // count the reply didn't carry leaves its attribute unset; a 0 it
-        // did carry is a 0.
+        // The provider's own values, not `rawUsage`'s zero-filled ones (src/otel.ts's header).
         inputTokens: u.prompt_tokens ?? undefined,
         outputTokens: u.completion_tokens ?? undefined,
         cacheReadInputTokens:

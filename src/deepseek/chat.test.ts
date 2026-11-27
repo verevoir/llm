@@ -315,10 +315,7 @@ describe('deepseek.chat', () => {
   });
 });
 
-// DeepSeek's `prompt_tokens` is `prompt_cache_hit_tokens` +
-// `prompt_cache_miss_tokens`, so it already counts every input token of the
-// call: the span's input is `prompt_tokens` as given,
-// neither less the cache hits nor plus them (src/otel.ts's header).
+// `prompt_tokens` is hits + misses, every input token (src/otel.ts's header).
 describe('deepseek.chat — the span input with a cache hit', () => {
   let exporter: InMemorySpanExporter;
   let provider: BasicTracerProvider;
@@ -331,6 +328,11 @@ describe('deepseek.chat — the span input with a cache hit', () => {
 
   afterAll(async () => {
     await provider.shutdown();
+  });
+
+  beforeEach(() => {
+    mockCreate.mockReset();
+    exporter.reset();
   });
 
   it('is prompt_tokens as given, the cache hits under the cache-read attribute', async () => {

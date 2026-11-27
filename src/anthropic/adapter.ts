@@ -427,19 +427,13 @@ async function callStreamed(
         responseModel: final.model,
         responseId: final.id,
         providerRequestId: final.id,
-        // Anthropic's `input_tokens` leaves cached tokens out; the span's
-        // input is every input token (semantic-conventions-genai v0.1.0), so
-        // the cache counts are added — from the provider's own values, so a
-        // missing `input_tokens` leaves the attribute unset. The returned
-        // `rawUsage.inputTokens` is untouched. See src/otel.ts's header.
+        // Every input token, cached ones included: see spanInputTokensWithCache.
         inputTokens: spanInputTokensWithCache(
           u.input_tokens,
           u.cache_read_input_tokens,
           u.cache_creation_input_tokens
         ),
-        // The provider's own values, not `rawUsage`'s zero-filled ones: a
-        // count the reply didn't carry (absent or `null`) leaves its
-        // attribute unset; a 0 it did carry is a 0.
+        // The provider's own values, not `rawUsage`'s zero-filled ones (src/otel.ts's header).
         outputTokens: u.output_tokens ?? undefined,
         cacheReadInputTokens: u.cache_read_input_tokens ?? undefined,
         cacheCreationInputTokens: u.cache_creation_input_tokens ?? undefined,

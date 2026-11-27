@@ -96,7 +96,7 @@ function defined(entries: Record<string, unknown>): Record<string, unknown> {
 }
 
 /** How one provider's reply carries the counts, what the span should say of
- * them, and what the call returns today. */
+ * them, and what the call returns. */
 interface Shape {
   /** The provider's usage object for these counts; a count left out is a
    * field left out. */
@@ -105,7 +105,8 @@ interface Shape {
   fields: readonly Count[];
   /** The span's four attributes: `undefined` is unset. */
   span: (c: Counts) => Record<Count, number | undefined>;
-  /** The four counts the call returns, as it returns them today. */
+  /** The four counts the call returns: a count the provider did not give is
+   * returned as 0. */
   returned: (
     c: Counts
   ) => Pick<
@@ -286,6 +287,10 @@ interface Site {
   toleratesNoUsage: boolean;
   /** Answer with `usage` (or none), make one call, return what it returns. */
   run: (usage: Record<string, unknown> | undefined) => Promise<{ usage: TokenUsage }>;
+  /** The OpenAI-compatible factory's sites: the span's output count for
+   * {@link REASONING_ONLY}, a reply whose only output count is a reasoning
+   * one; `null` where the adapter counts no reasoning, so the span has none. */
+  reasoningOnlyOutput?: number | null;
 }
 
 const SITES: Site[] = [
@@ -387,15 +392,18 @@ const SITES: Site[] = [
   },
   ...(
     [
-      ['samba', samba, KEYED],
-      ['mistral', mistral, KEYED],
-      ['vertex-openai', vertexOpenAI, { ...BASE, model: 'google/gemini-3.5-flash' }],
+      // `/vertex-openai` adds reasoning tokens that `total_tokens` shows
+      // outside `completion_tokens`; the others count `completion_tokens` alone.
+      ['samba', samba, KEYED, null],
+      ['mistral', mistral, KEYED, null],
+      ['vertex-openai', vertexOpenAI, { ...BASE, model: 'google/gemini-3.5-flash' }, 9],
     ] as const
-  ).flatMap(([name, a, base]): Site[] => [
+  ).flatMap(([name, a, base, reasoningOnlyOutput]): Site[] => [
     {
       site: `${name}.chat`,
       shape: COMPAT_SHAPE,
       toleratesNoUsage: true,
+      reasoningOnlyOutput,
       run: (u) => {
         chatCompletionsCreate.mockResolvedValueOnce(completionReply(u));
         return a.chat(base);
@@ -405,6 +413,7 @@ const SITES: Site[] = [
       site: `${name}.chatWithTools`,
       shape: COMPAT_SHAPE,
       toleratesNoUsage: true,
+      reasoningOnlyOutput,
       run: (u) => {
         chatCompletionsCreate.mockResolvedValueOnce(completionReply(u));
         return a.chatWithTools({ ...base, tools: [TOOL] });
@@ -431,8 +440,12 @@ function without(c: Count): Counts {
 }
 
 const CASES: Case[] = SITES.flatMap((site) => [
-  ...COUNTS.map((c) => ({ name: `${site.site}: no ${c} count`, site, counts: without(c) })),
-  ...COUNTS.filter((c) => site.shape.fields.includes(c)).map((c) => ({
+  ...site.shape.fields.map((c) => ({
+    name: `${site.site}: no ${c} count`,
+    site,
+    counts: without(c),
+  })),
+  ...site.shape.fields.map((c) => ({
     name: `${site.site}: a ${c} count of 0`,
     site,
     counts: { ...FULL, [c]: 0 },
@@ -444,7 +457,42 @@ const CASES: Case[] = SITES.flatMap((site) => [
   },
 ]);
 
-// ── The test ─────────────────────────────────────────────────────────────
+/** The span's four usage attributes, and no others. */
+function usageAttributesOf(attributes: Record<string, unknown>): Record<string, unknown> {
+  const names = COUNTS.map((c) => ATTRIBUTE[c]);
+  return Object.fromEntries(Object.entries(attributes).filter(([k]) => names.includes(k)));
+}
+
+/** A compatible reply whose only output count is a reasoning one, and whose
+ * `total_tokens` shows it outside `completion_tokens`. */
+const REASONING_ONLY = {
+  prompt_tokens: 100,
+  completion_tokens_details: { reasoning_tokens: 9 },
+  total_tokens: 109,
+};
+
+const SPLIT_5M = 'verevoir.llm.cache_creation.ephemeral_5m_input_tokens';
+const SPLIT_1H = 'verevoir.llm.cache_creation.ephemeral_1h_input_tokens';
+
+/** The Anthropic-shaped sites' cache-write split: the reply's
+ * `cache_creation` breakdown, and the two split attributes it gives. */
+const SPLIT_CASES = SITES.filter((s) => s.shape === ANTHROPIC_SHAPE).flatMap((site) => [
+  { name: `${site.site}: no cache_creation breakdown`, site, breakdown: undefined, span: {} },
+  {
+    name: `${site.site}: both splits`,
+    site,
+    breakdown: { ephemeral_5m_input_tokens: 10, ephemeral_1h_input_tokens: 20 },
+    span: { [SPLIT_5M]: 10, [SPLIT_1H]: 20 },
+  },
+  {
+    name: `${site.site}: a 5-minute split of 0 and no 1-hour split`,
+    site,
+    breakdown: { ephemeral_5m_input_tokens: 0 },
+    span: { [SPLIT_5M]: 0 },
+  },
+]);
+
+// ── The tests ────────────────────────────────────────────────────────────
 
 describe('every adapter — a usage count the provider gave no value for is unset on the span', () => {
   let exporter: InMemorySpanExporter;
@@ -489,25 +537,54 @@ describe('every adapter — a usage count the provider gave no value for is unse
     }
   });
 
+  const wireOf = ({ site, counts }: Case) =>
+    counts === undefined ? undefined : site.shape.wire(counts);
+
   it.each(CASES)(
-    '$name: each attribute is the provider’s value or unset; the returned counts are as before',
-    async ({ site, counts }) => {
-      const reply = await site.run(counts === undefined ? undefined : site.shape.wire(counts));
+    '$name: each usage attribute is the provider’s value, or unset where it gave none',
+    async (c) => {
+      await c.site.run(wireOf(c));
 
       const spans = exporter.getFinishedSpans();
       expect(spans).toHaveLength(1);
-      const attributes = spans[0].attributes;
-      const expected = site.shape.span(counts ?? {});
-      for (const c of COUNTS) {
-        if (expected[c] === undefined) {
-          expect(Object.keys(attributes), ATTRIBUTE[c]).not.toContain(ATTRIBUTE[c]);
-        } else {
-          expect(attributes[ATTRIBUTE[c]], ATTRIBUTE[c]).toBe(expected[c]);
-        }
-      }
-      // The span leaving a count unset changes nothing the call returns: a
-      // count the provider didn't give is returned as 0, as it was.
-      expect(reply.usage).toMatchObject(site.shape.returned(counts ?? {}));
+      const expected = c.site.shape.span(c.counts ?? {});
+      expect(usageAttributesOf(spans[0].attributes)).toEqual(
+        defined(Object.fromEntries(COUNTS.map((k) => [ATTRIBUTE[k], expected[k]])))
+      );
+    }
+  );
+
+  it.each(CASES)(
+    '$name: the returned counts are the provider’s, 0 where it gave none',
+    async (c) => {
+      const reply = await c.site.run(wireOf(c));
+
+      expect(reply.usage).toMatchObject(c.site.shape.returned(c.counts ?? {}));
+    }
+  );
+
+  it.each(SITES.filter((s) => s.reasoningOnlyOutput !== undefined))(
+    '$site: a reply with only a reasoning output count gives the span the adapter’s count of it, or none',
+    async (site) => {
+      await site.run(REASONING_ONLY);
+
+      expect(exporter.getFinishedSpans()[0].attributes[ATTRIBUTE.output]).toBe(
+        site.reasoningOnlyOutput ?? undefined
+      );
+    }
+  );
+
+  it.each(SPLIT_CASES)(
+    '$name: each split attribute is the provider’s value, or unset where it gave none',
+    async ({ site, breakdown, span }) => {
+      await site.run({ ...ANTHROPIC_SHAPE.wire(FULL), ...defined({ cache_creation: breakdown }) });
+
+      const attributes = exporter.getFinishedSpans()[0].attributes;
+      expect(
+        Object.fromEntries(
+          Object.entries(attributes).filter(([k]) => k === SPLIT_5M || k === SPLIT_1H)
+        )
+      ).toEqual(span);
     }
   );
 });

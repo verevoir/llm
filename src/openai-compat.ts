@@ -243,11 +243,14 @@ export function createOpenAICompatCalls(config: OpenAICompatCallsConfig): OpenAI
    * 0. The input is `prompt_tokens` as it is: it already includes the cached
    * tokens, which is what the span's input is (semantic-conventions-genai
    * v0.1.0), not the returned count, which subtracts them. The output is
-   * {@link outputTokensOf} when the reply carried an output count at all
-   * (`completion_tokens` or a reasoning count), and unset otherwise. */
+   * {@link outputTokensOf} when the reply carried a count this adapter
+   * counts as output: `completion_tokens`, or a reasoning count where the
+   * adapter has its own `outputTokensOf`. Otherwise it is unset. */
   function spanUsageOf(u: CompatUsage): GenAISpanOutcome {
+    const countsReasoning = config.outputTokensOf !== undefined;
     const hasOutput =
-      u.completion_tokens != null || u.completion_tokens_details?.reasoning_tokens != null;
+      u.completion_tokens != null ||
+      (countsReasoning && u.completion_tokens_details?.reasoning_tokens != null);
     return {
       inputTokens: u.prompt_tokens ?? undefined,
       outputTokens: hasOutput ? outputTokensOf(u) : undefined,

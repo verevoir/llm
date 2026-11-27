@@ -302,10 +302,7 @@ describe('openai.chat', () => {
   });
 });
 
-// OpenAI's `input_tokens_details.cached_tokens` is a breakdown of
-// `input_tokens`, which already counts every input token of the call: the
-// span's input is `input_tokens` as given, neither less the cached tokens
-// nor plus them (src/otel.ts's header).
+// `cached_tokens` is a breakdown of `input_tokens` (src/otel.ts's header).
 describe('openai.chat — the span input with cached tokens', () => {
   let exporter: InMemorySpanExporter;
   let provider: BasicTracerProvider;
@@ -318,6 +315,11 @@ describe('openai.chat — the span input with cached tokens', () => {
 
   afterAll(async () => {
     await provider.shutdown();
+  });
+
+  beforeEach(() => {
+    mockCreate.mockReset();
+    exporter.reset();
   });
 
   it('is input_tokens as given, the cached tokens under the cache-read attribute', async () => {

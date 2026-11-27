@@ -178,9 +178,7 @@ async function callResponsesCreate(
       outcome: {
         responseModel: response.model ?? modelId,
         responseId: response.id,
-        // The provider's own values, not `rawUsage`'s zero-filled ones: a
-        // count the reply didn't carry leaves its attribute unset; a 0 it
-        // did carry is a 0.
+        // The provider's own values, not `rawUsage`'s zero-filled ones (src/otel.ts's header).
         inputTokens: u?.input_tokens ?? undefined,
         outputTokens: u?.output_tokens ?? undefined,
         cacheReadInputTokens: u?.input_tokens_details?.cached_tokens ?? undefined,
