@@ -15,7 +15,7 @@
 
 import type Anthropic from '@anthropic-ai/sdk';
 import { fireUsageHook } from '../audit-hook.js';
-import { withGenAISpan } from '../otel.js';
+import { spanInputTokensWithCache, withGenAISpan } from '../otel.js';
 import { CATALOG } from './catalog.js';
 import {
   type ChatOptions,
@@ -427,10 +427,16 @@ async function callStreamed(
         responseModel: final.model,
         responseId: final.id,
         providerRequestId: final.id,
-        inputTokens: result.rawUsage.inputTokens,
-        outputTokens: result.rawUsage.outputTokens,
-        cacheReadInputTokens: result.rawUsage.cacheReadInputTokens,
-        cacheCreationInputTokens: result.rawUsage.cacheCreationInputTokens,
+        // Every input token, cached ones included: see spanInputTokensWithCache.
+        inputTokens: spanInputTokensWithCache(
+          u.input_tokens,
+          u.cache_read_input_tokens,
+          u.cache_creation_input_tokens
+        ),
+        // The provider's own values, not `rawUsage`'s zero-filled ones (src/otel.ts's header).
+        outputTokens: u.output_tokens ?? undefined,
+        cacheReadInputTokens: u.cache_read_input_tokens ?? undefined,
+        cacheCreationInputTokens: u.cache_creation_input_tokens ?? undefined,
         cacheCreationEphemeral5mInputTokens: result.rawUsage.cacheCreationEphemeral5mInputTokens,
         cacheCreationEphemeral1hInputTokens: result.rawUsage.cacheCreationEphemeral1hInputTokens,
       },

@@ -704,24 +704,41 @@ export function resetClaudeCliVersionCacheForTests(): void {
   cachedCliVersionPromise = null;
 }
 
-import { withGenAISpan, type GenAISpanOutcome } from '../otel.js';
+import { spanInputTokensWithCache, withGenAISpan, type GenAISpanOutcome } from '../otel.js';
+
+/** The span's four usage counts for one `claude` turn, which `shapeUsage()`
+ * makes from the CLI's own `usage` fields beside the {@link TokenUsage} it
+ * returns: each is `undefined` (its attribute left unset) when the CLI's
+ * `usage` didn't carry it, where the `TokenUsage` fills it with 0. The CLI's
+ * `input_tokens` leaves cached tokens out, as Anthropic's does, so the span's
+ * input is {@link spanInputTokensWithCache} of it. One `claude` turn is one
+ * span, with the CLI's own totals for the turn — this adapter adds nothing
+ * up. A value beside the record, not a field on it, because the `TokenUsage`
+ * a caller gets carries the CLI's own counts. See src/otel.ts's header. */
+type SpanUsage = Pick<
+  GenAISpanOutcome,
+  'inputTokens' | 'outputTokens' | 'cacheReadInputTokens' | 'cacheCreationInputTokens'
+>;
+
+/** A turn's {@link TokenUsage} record and its {@link SpanUsage}, made together. */
+interface ShapedUsage {
+  record: TokenUsage;
+  spanUsage: SpanUsage;
+}
 
 /** Builds the span outcome for {@link chat} / {@link chatWithToolLoop}'s
  * wrappers from an already-computed {@link TokenUsage} — every field this
- * adapter's `shapeUsage()` populates maps straight across, including the
- * now-distinct `sessionId` (correlation only — a held session reuses one
- * across every turn) and `providerRequestId` (the real per-turn-unique
- * id: held-session `uuid`, or one-shot `session_id`, which genuinely IS
- * unique per call there — see `shapeUsage()`'s own doc comment for why
- * these stopped being the same field, a #73 review fix). `responseId`
- * has no claude-cli equivalent and is left unset. */
-function genAIOutcomeFromUsage(usage: TokenUsage): GenAISpanOutcome {
+ * adapter's `shapeUsage()` populates maps straight across, except the four
+ * usage counts, which are `spanUsage`. `sessionId` is
+ * correlation only (a held session reuses one across every turn) and
+ * `providerRequestId` is the real per-turn-unique id: held-session `uuid`,
+ * or one-shot `session_id`, which genuinely IS unique per call there —
+ * see `shapeUsage()`'s own doc comment for why these are separate fields.
+ * `responseId` has no claude-cli equivalent and is left unset. */
+function genAIOutcomeFromUsage(usage: TokenUsage, spanUsage: SpanUsage): GenAISpanOutcome {
   return {
     responseModel: usage.model,
-    inputTokens: usage.inputTokens,
-    outputTokens: usage.outputTokens,
-    cacheReadInputTokens: usage.cacheReadInputTokens,
-    cacheCreationInputTokens: usage.cacheCreationInputTokens,
+    ...spanUsage,
     cacheCreationEphemeral5mInputTokens: usage.cacheCreationEphemeral5mInputTokens,
     cacheCreationEphemeral1hInputTokens: usage.cacheCreationEphemeral1hInputTokens,
     sessionId: usage.sessionId,
@@ -751,7 +768,7 @@ function shapeUsage(
   // `TokenUsage.sessionId`'s own doc comment) — never used as
   // `providerRequestId` above.
   sessionId: string | undefined
-): TokenUsage {
+): ShapedUsage {
   const reportedCost = readReportedCost(totalCostUsd);
   // The route NAME is a fixed label for this adapter's one mechanism (the
   // CLI authenticating itself), never computed — see the file header's
@@ -760,7 +777,7 @@ function shapeUsage(
   // metered Console login; see env.ts), which is why costUsdReported
   // cannot be read as "not billed".
   const route: CredentialRoute = 'subscription-oauth';
-  return {
+  const record: TokenUsage = {
     provider: PROVIDER,
     model,
     direction: 'reasoning',
@@ -793,6 +810,17 @@ function shapeUsage(
     sessionId,
     providerRequestId,
   };
+  const spanUsage: SpanUsage = {
+    inputTokens: spanInputTokensWithCache(
+      usage?.input_tokens,
+      usage?.cache_read_input_tokens,
+      usage?.cache_creation_input_tokens
+    ),
+    outputTokens: usage?.output_tokens ?? undefined,
+    cacheReadInputTokens: usage?.cache_read_input_tokens ?? undefined,
+    cacheCreationInputTokens: usage?.cache_creation_input_tokens ?? undefined,
+  };
+  return { record, spanUsage };
 }
 
 interface SpawnResult {
@@ -1175,7 +1203,7 @@ function warnIfMultipleModels(sawMultipleModels: boolean, breakdown: string, sco
 async function chatOnSession(
   session: ClaudeCliSessionHandle,
   options: ClaudeCliChatOptions
-): Promise<ChatReply> {
+): Promise<{ reply: ChatReply; spanUsage: SpanUsage }> {
   if (options.turns.length === 0) {
     throw new Error('claudeCli.chat() requires at least one turn');
   }
@@ -1211,7 +1239,7 @@ async function chatOnSession(
   warnIfMultipleModels(sawMultipleModels, breakdown, 'claudeCli.chat');
 
   const substrateVersion = await resolveCliVersion();
-  const usageRecord = shapeUsage(
+  const { record: usageRecord, spanUsage } = shapeUsage(
     result.usage,
     model,
     substrateVersion,
@@ -1225,10 +1253,13 @@ async function chatOnSession(
   await fireUsageHook(options.onUsage, usageRecord, 'claudeCli.chat');
 
   return {
-    content: result.text,
-    usage: usageRecord,
-    stopReason: result.stopReason,
-    stopKind: result.stopKind,
+    reply: {
+      content: result.text,
+      usage: usageRecord,
+      stopReason: result.stopReason,
+      stopKind: result.stopKind,
+    },
+    spanUsage,
   };
 }
 
@@ -1241,8 +1272,8 @@ async function chatOnSession(
 export async function chat(options: ClaudeCliChatOptions): Promise<ChatReply> {
   const requestModel = options.model ?? 'default';
   return withGenAISpan({ provider: 'anthropic', requestModel }, async () => {
-    const reply = await chatImpl(options);
-    return { result: reply, outcome: genAIOutcomeFromUsage(reply.usage) };
+    const { reply, spanUsage } = await chatImpl(options);
+    return { result: reply, outcome: genAIOutcomeFromUsage(reply.usage, spanUsage) };
   });
 }
 
@@ -1250,7 +1281,9 @@ export async function chat(options: ClaudeCliChatOptions): Promise<ChatReply> {
  * CLIENT span (#70's `withGenAISpan`) — covering BOTH the fresh-spawn path
  * below and the held-session turn via `chatOnSession`, since from a
  * caller's perspective both are the same `chat()` call. */
-async function chatImpl(options: ClaudeCliChatOptions): Promise<ChatReply> {
+async function chatImpl(
+  options: ClaudeCliChatOptions
+): Promise<{ reply: ChatReply; spanUsage: SpanUsage }> {
   if (options.session) {
     return chatOnSession(options.session, options);
   }
@@ -1363,7 +1396,7 @@ async function chatImpl(options: ClaudeCliChatOptions): Promise<ChatReply> {
   }
 
   const substrateVersion = await resolveCliVersion();
-  const usageRecord = shapeUsage(
+  const { record: usageRecord, spanUsage } = shapeUsage(
     parsed?.usage,
     model,
     substrateVersion,
@@ -1380,11 +1413,14 @@ async function chatImpl(options: ClaudeCliChatOptions): Promise<ChatReply> {
   await fireUsageHook(options.onUsage, usageRecord, 'claudeCli.chat');
 
   return {
-    content: text,
-    usage: usageRecord,
-    stopReason: parsed?.stop_reason ?? 'end_turn',
-    // A result that names no stop reason is not known to have finished.
-    stopKind: anthropicStopKind(parsed?.stop_reason ?? ''),
+    reply: {
+      content: text,
+      usage: usageRecord,
+      stopReason: parsed?.stop_reason ?? 'end_turn',
+      // A result that names no stop reason is not known to have finished.
+      stopKind: anthropicStopKind(parsed?.stop_reason ?? ''),
+    },
+    spanUsage,
   };
 }
 
@@ -1418,8 +1454,8 @@ export async function chatWithToolLoop(
 ): Promise<ClaudeCliChatWithToolLoopResult> {
   const requestModel = options.model ?? 'default';
   return withGenAISpan({ provider: 'anthropic', requestModel }, async () => {
-    const result = await chatWithToolLoopImpl(options);
-    return { result, outcome: genAIOutcomeFromUsage(result.usage) };
+    const { result, spanUsage } = await chatWithToolLoopImpl(options);
+    return { result, outcome: genAIOutcomeFromUsage(result.usage, spanUsage) };
   });
 }
 
@@ -1427,7 +1463,7 @@ export async function chatWithToolLoop(
  * in a GenAI CLIENT span (#70's `withGenAISpan`). */
 async function chatWithToolLoopImpl(
   options: ClaudeCliChatWithToolLoopOptions
-): Promise<ClaudeCliChatWithToolLoopResult> {
+): Promise<{ result: ClaudeCliChatWithToolLoopResult; spanUsage: SpanUsage }> {
   if (options.turns.length === 0) {
     throw new Error('claudeCli.chatWithToolLoop() requires at least one turn');
   }
@@ -1472,7 +1508,7 @@ async function chatWithToolLoopImpl(
     warnIfMultipleModels(sawMultipleModels, breakdown, 'claudeCli.chatWithToolLoop');
 
     const substrateVersion = await resolveCliVersion();
-    const usageRecord = shapeUsage(
+    const { record: usageRecord, spanUsage } = shapeUsage(
       result.usage,
       model,
       substrateVersion,
@@ -1498,12 +1534,15 @@ async function chatWithToolLoopImpl(
     }
 
     return {
-      text: result.text,
-      toolUses: result.toolUses,
-      toolResults: result.toolResults,
-      iterations: result.assistantEventCount,
-      usage: usageRecord,
-      permissionDenials: result.permissionDenials,
+      result: {
+        text: result.text,
+        toolUses: result.toolUses,
+        toolResults: result.toolResults,
+        iterations: result.assistantEventCount,
+        usage: usageRecord,
+        permissionDenials: result.permissionDenials,
+      },
+      spanUsage,
     };
   } finally {
     if (ownsSession) {

@@ -1,4 +1,10 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
+import { trace } from '@opentelemetry/api';
+import {
+  BasicTracerProvider,
+  InMemorySpanExporter,
+  SimpleSpanProcessor,
+} from '@opentelemetry/sdk-trace-base';
 
 // Mock the Google GenAI SDK before importing the adapter. Each test
 // sets up the fake `models.generateContent` to return a controlled
@@ -16,7 +22,7 @@ vi.mock('@google/genai', () => ({
 }));
 
 // Import AFTER vi.mock so the mocked constructor is the one captured.
-import { chat } from './index.js';
+import { chat, chatWithTools } from './index.js';
 import {
   classifyLlmError,
   EmptyResponseError,
@@ -236,4 +242,56 @@ describe('google.chat', () => {
     expect(result.content).toBe('finally');
     expect(mockGenerateContent).toHaveBeenCalledTimes(2);
   });
+});
+
+// `promptTokenCount` includes the cached content (src/otel.ts's header). Both of
+// this adapter's spans: chat()'s, and the one chatWithTools and chatWithToolLoop share.
+describe('google — the span input with cached content', () => {
+  let exporter: InMemorySpanExporter;
+  let provider: BasicTracerProvider;
+
+  beforeAll(() => {
+    exporter = new InMemorySpanExporter();
+    provider = new BasicTracerProvider({ spanProcessors: [new SimpleSpanProcessor(exporter)] });
+    trace.setGlobalTracerProvider(provider);
+  });
+
+  afterAll(async () => {
+    await provider.shutdown();
+  });
+
+  beforeEach(() => {
+    mockGenerateContent.mockReset();
+    exporter.reset();
+  });
+
+  const BASE = { systemPrompt: 's', turns: [{ role: 'user' as const, content: 'q' }], apiKey: 'k' };
+  const TOOL = {
+    name: 'record',
+    description: 'record a thing',
+    input_schema: { type: 'object' as const, properties: {} },
+  };
+
+  it.each([
+    { site: 'chat', run: () => chat(BASE) },
+    { site: 'chatWithTools', run: () => chatWithTools({ ...BASE, tools: [TOOL] }) },
+  ])(
+    '$site: is promptTokenCount as given, the cached content under the cache-read attribute',
+    async ({ run }) => {
+      mockGenerateContent.mockResolvedValueOnce(
+        fakeResponse('ok', 'STOP', {
+          promptTokenCount: 1000,
+          candidatesTokenCount: 50,
+          cachedContentTokenCount: 800,
+        })
+      );
+
+      await run();
+
+      const spans = exporter.getFinishedSpans();
+      expect(spans).toHaveLength(1);
+      expect(spans[0].attributes['gen_ai.usage.input_tokens']).toBe(1000);
+      expect(spans[0].attributes['gen_ai.usage.cache_read.input_tokens']).toBe(800);
+    }
+  );
 });

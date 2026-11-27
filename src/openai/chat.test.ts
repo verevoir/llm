@@ -1,4 +1,10 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
+import { trace } from '@opentelemetry/api';
+import {
+  BasicTracerProvider,
+  InMemorySpanExporter,
+  SimpleSpanProcessor,
+} from '@opentelemetry/sdk-trace-base';
 
 // Mock the OpenAI SDK before importing the adapter. Each test sets
 // up the fake `responses.create` to return a controlled Response
@@ -293,5 +299,43 @@ describe('openai.chat', () => {
     }
     // Thrown before the SDK is ever called — not a provider-side rejection.
     expect(mockCreate).not.toHaveBeenCalled();
+  });
+});
+
+// `cached_tokens` is a breakdown of `input_tokens` (src/otel.ts's header).
+describe('openai.chat — the span input with cached tokens', () => {
+  let exporter: InMemorySpanExporter;
+  let provider: BasicTracerProvider;
+
+  beforeAll(() => {
+    exporter = new InMemorySpanExporter();
+    provider = new BasicTracerProvider({ spanProcessors: [new SimpleSpanProcessor(exporter)] });
+    trace.setGlobalTracerProvider(provider);
+  });
+
+  afterAll(async () => {
+    await provider.shutdown();
+  });
+
+  beforeEach(() => {
+    mockCreate.mockReset();
+    exporter.reset();
+  });
+
+  it('is input_tokens as given, the cached tokens under the cache-read attribute', async () => {
+    mockCreate.mockResolvedValueOnce(
+      fakeResponse('ok', 'completed', {
+        input_tokens: 1000,
+        output_tokens: 50,
+        input_tokens_details: { cached_tokens: 800 },
+      })
+    );
+
+    await chat({ systemPrompt: 's', turns: [{ role: 'user', content: 'q' }], apiKey: 'sk-test' });
+
+    const spans = exporter.getFinishedSpans();
+    expect(spans).toHaveLength(1);
+    expect(spans[0].attributes['gen_ai.usage.input_tokens']).toBe(1000);
+    expect(spans[0].attributes['gen_ai.usage.cache_read.input_tokens']).toBe(800);
   });
 });

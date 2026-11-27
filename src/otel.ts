@@ -10,20 +10,53 @@
  * dependency on an incubating entry point whose shape is still moving
  * (https://opentelemetry.io/docs/specs/semconv/general/attribute-naming/).
  *
- * Followed: OpenTelemetry Semantic Conventions for Generative AI, v1.37.0
- * (`gen_ai.*`, status: Development) —
- * https://github.com/open-telemetry/semantic-conventions/blob/v1.37.0/docs/gen-ai/gen-ai-spans.md
- * In that version `gen_ai.provider.name` is the current provider attribute;
- * the earlier `gen_ai.system` is deprecated in favour of it.
+ * Followed: OpenTelemetry Semantic Conventions for Generative AI, in their
+ * own repository `open-telemetry/semantic-conventions-genai`, tag `v0.1.0`
+ * (status: Development; it lists its changes since
+ * `open-telemetry/semantic-conventions` v1.41.0) —
+ * https://github.com/open-telemetry/semantic-conventions-genai/tree/v0.1.0
+ * `gen_ai.provider.name` is the provider attribute; `gen_ai.system` is
+ * deprecated in favour of it. The cache-write attribute is named
+ * `gen_ai.usage.cache_creation.input_tokens` in semantic-conventions
+ * v1.41.0 and `gen_ai.usage.cache_write.input_tokens` in
+ * semantic-conventions-genai v0.1.0, which is why these names are held
+ * here, where one edit moves them.
  *
- * Cache tokens and the provider's own request id are NOT part of that spec
- * as of v1.37.0 — there is no `gen_ai.usage.cache_*` attribute and no
- * `gen_ai.*request_id` attribute defined. The four fields below are this
- * project's own, deliberately namespaced OUTSIDE `gen_ai.*` (under
+ * `gen_ai.usage.input_tokens` on the span is every input token of the call,
+ * those read from and written to a provider cache included, as v0.1.0 says
+ * it SHOULD be. Providers differ in what their own input count holds, so
+ * each adapter passes the span the count that means that. `chat()`'s
+ * returned `TokenUsage` (its counts and its cost) is NOT changed by it:
+ *
+ *   Adapter                 | Provider's input count has cached tokens?   | Span input
+ *   ------------------------|---------------------------------------------|----------------------------------
+ *   /anthropic, /vertex     | No                                          | `input_tokens` + cache read
+ *                           |                                             |   + cache write
+ *   /claude-cli             | No: its `input_tokens` is as Anthropic's    | `input_tokens` + cache read
+ *                           |                                             |   + cache write
+ *   /deepseek               | Yes: `prompt_tokens` is                     | `prompt_tokens` as given
+ *                           |   `prompt_cache_hit_tokens` +               |
+ *                           |   `prompt_cache_miss_tokens`                |
+ *   /openai                 | Yes: `input_tokens_details.cached_tokens`   | `input_tokens` as given
+ *                           |   is a breakdown of `input_tokens`          |
+ *   /google                 | Yes: `promptTokenCount` includes the        | `promptTokenCount` as given
+ *                           |   cached content's tokens                   |
+ *   /samba, /mistral,       | Yes: `prompt_tokens` (the returned count is | `prompt_tokens` as given
+ *   /vertex-openai          |   `prompt_tokens` less cached tokens)       |
+ *
+ * With no input count from the provider the attribute is unset, as every
+ * usage attribute is when the provider gave no value for it (see
+ * {@link GenAISpanOutcome}): the input is never made from the cache counts
+ * alone, and an unset cache count adds nothing (see
+ * {@link spanInputTokensWithCache}).
+ *
+ * What the conventions have no attribute for at v0.1.0 — how long a cache
+ * write is kept, the provider's own request id, a cost in money — keeps this
+ * project's own names, deliberately namespaced OUTSIDE `gen_ai.*` (under
  * `verevoir.llm.*`) so a reader never mistakes them for a standard
- * attribute: `cache_read_input_tokens`, `cache_creation_input_tokens`,
- * `cache_creation.ephemeral_5m_input_tokens`,
- * `cache_creation.ephemeral_1h_input_tokens`, and `provider_request_id`.
+ * attribute: `cache_creation.ephemeral_5m_input_tokens`,
+ * `cache_creation.ephemeral_1h_input_tokens`, `provider_request_id`,
+ * `session_id`, `cost_usd_reported` and `cost_usd_reported_invalid_type`.
  *
  * This module depends only on `@opentelemetry/api` — never an SDK. With no
  * SDK/exporter installed by the consuming application, `trace.getTracer()`
@@ -38,7 +71,8 @@
 import { SpanKind, SpanStatusCode, trace, type Span } from '@opentelemetry/api';
 import type { CostInvalidKind } from './index.js';
 
-// ── GenAI semantic-convention attributes (v1.37.0) — defined locally ───────
+// ── GenAI semantic-convention attributes (semantic-conventions-genai v0.1.0)
+// — defined locally ───────────────────────────────────────────────────────
 
 /** The kind of GenAI operation this span represents. Every call this
  * package instruments is a `"chat"` operation. */
@@ -53,24 +87,28 @@ export const ATTR_GEN_AI_REQUEST_MODEL = 'gen_ai.request.model';
 export const ATTR_GEN_AI_RESPONSE_MODEL = 'gen_ai.response.model';
 /** The provider's own id for this response. */
 export const ATTR_GEN_AI_RESPONSE_ID = 'gen_ai.response.id';
-/** Tokens in the request (prompt). */
+/** Every input token of the call, those read from and written to a
+ * provider cache included — see this file's header table for what each
+ * adapter passes. */
 export const ATTR_GEN_AI_USAGE_INPUT_TOKENS = 'gen_ai.usage.input_tokens';
 /** Tokens in the response (completion). */
 export const ATTR_GEN_AI_USAGE_OUTPUT_TOKENS = 'gen_ai.usage.output_tokens';
+/** "The number of input tokens served from a provider-managed cache." */
+export const ATTR_GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS = 'gen_ai.usage.cache_read.input_tokens';
+/** "The number of input tokens written to a provider-managed cache." Named
+ * `gen_ai.usage.cache_creation.input_tokens` in semantic-conventions
+ * v1.41.0; this is its name in semantic-conventions-genai v0.1.0. */
+export const ATTR_GEN_AI_USAGE_CACHE_WRITE_INPUT_TOKENS = 'gen_ai.usage.cache_write.input_tokens';
 /** General (non-GenAI-specific) semconv attribute for the type of error
  * that failed the span — the thrown error's `name`. */
 export const ATTR_ERROR_TYPE = 'error.type';
 
-// ── Custom attributes — NOT in GenAI semconv v1.37.0; namespaced outside
-// `gen_ai.*` so they read unambiguously as this project's own. ─────────────
+// ── Custom attributes — NOT in semantic-conventions-genai v0.1.0; namespaced
+// outside `gen_ai.*` so they read unambiguously as this project's own. ─────
 
-/** Tokens read from provider cache on this call. Custom: no `gen_ai.*`
- * attribute for this exists in v1.37.0. */
-export const ATTR_VEREVOIR_CACHE_READ_INPUT_TOKENS = 'verevoir.llm.cache_read_input_tokens';
-/** Tokens written to provider cache on this call. Custom — see above. */
-export const ATTR_VEREVOIR_CACHE_CREATION_INPUT_TOKENS = 'verevoir.llm.cache_creation_input_tokens';
-/** Anthropic's 5-minute-TTL slice of the cache-write tokens. Custom — see
- * above; this mirrors Anthropic's own wire field name
+/** Anthropic's 5-minute-TTL slice of the cache-write tokens. Custom: no
+ * `gen_ai.*` attribute for how long a cache write is kept exists in v0.1.0;
+ * this mirrors Anthropic's own wire field name
  * (`usage.cache_creation.ephemeral_5m_input_tokens`). */
 export const ATTR_VEREVOIR_CACHE_CREATION_EPHEMERAL_5M_INPUT_TOKENS =
   'verevoir.llm.cache_creation.ephemeral_5m_input_tokens';
@@ -80,7 +118,7 @@ export const ATTR_VEREVOIR_CACHE_CREATION_EPHEMERAL_1H_INPUT_TOKENS =
 /** The provider's own id for this call — an HTTP `request-id` header where
  * reachable, or the SDK response object's own id field otherwise (see
  * `TokenUsage.providerRequestId` in src/index.ts for which adapters set
- * which). Custom: no `gen_ai.*` attribute for this exists in v1.37.0. */
+ * which). Custom: no `gen_ai.*` attribute for this exists in v0.1.0. */
 export const ATTR_VEREVOIR_PROVIDER_REQUEST_ID = 'verevoir.llm.provider_request_id';
 /** claude-cli only: the CLI's own session id, kept for correlation — NOT
  * a per-call request id. A held session reuses this across every turn;
@@ -88,7 +126,7 @@ export const ATTR_VEREVOIR_PROVIDER_REQUEST_ID = 'verevoir.llm.provider_request_
  * field from {@link ATTR_VEREVOIR_PROVIDER_REQUEST_ID}. */
 export const ATTR_VEREVOIR_SESSION_ID = 'verevoir.llm.session_id';
 /** The provider's own reported cost for this call, in USD. Custom: no
- * `gen_ai.*` cost attribute exists in v1.37.0, and this is deliberately
+ * `gen_ai.*` cost attribute exists in v0.1.0, and this is deliberately
  * the provider's own relayed figure, never a value this library computed
  * from a price table. */
 export const ATTR_VEREVOIR_COST_USD_REPORTED = 'verevoir.llm.cost_usd_reported';
@@ -104,6 +142,22 @@ export const ATTR_VEREVOIR_COST_USD_REPORTED_INVALID_TYPE =
 
 const tracer = trace.getTracer('@verevoir/llm');
 
+/**
+ * The span's input count for a provider whose own input count leaves cached
+ * tokens out (the Anthropic shape): that count plus the cache-read count
+ * plus the cache-write count. With no input count the result is
+ * `undefined` — never a sum of the cache counts alone — and an absent
+ * (`undefined` or `null`) cache count adds nothing.
+ */
+export function spanInputTokensWithCache(
+  inputTokens: number | null | undefined,
+  cacheReadInputTokens: number | null | undefined,
+  cacheWriteInputTokens: number | null | undefined
+): number | undefined {
+  if (inputTokens === undefined || inputTokens === null) return undefined;
+  return inputTokens + (cacheReadInputTokens ?? 0) + (cacheWriteInputTokens ?? 0);
+}
+
 /** What identifies the call before it's made. */
 export interface GenAISpanRequest {
   provider: string;
@@ -118,6 +172,8 @@ export interface GenAISpanRequest {
 export interface GenAISpanOutcome {
   responseModel?: string;
   responseId?: string;
+  /** Every input token of the call, cached ones included: not necessarily
+   * the adapter's returned `TokenUsage.inputTokens` — see the header table. */
   inputTokens?: number;
   outputTokens?: number;
   cacheReadInputTokens?: number;
@@ -241,8 +297,8 @@ function applyOutcome(span: Span, outcome: GenAISpanOutcome): void {
   set(ATTR_GEN_AI_RESPONSE_ID, outcome.responseId);
   set(ATTR_GEN_AI_USAGE_INPUT_TOKENS, outcome.inputTokens);
   set(ATTR_GEN_AI_USAGE_OUTPUT_TOKENS, outcome.outputTokens);
-  set(ATTR_VEREVOIR_CACHE_READ_INPUT_TOKENS, outcome.cacheReadInputTokens);
-  set(ATTR_VEREVOIR_CACHE_CREATION_INPUT_TOKENS, outcome.cacheCreationInputTokens);
+  set(ATTR_GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS, outcome.cacheReadInputTokens);
+  set(ATTR_GEN_AI_USAGE_CACHE_WRITE_INPUT_TOKENS, outcome.cacheCreationInputTokens);
   set(
     ATTR_VEREVOIR_CACHE_CREATION_EPHEMERAL_5M_INPUT_TOKENS,
     outcome.cacheCreationEphemeral5mInputTokens

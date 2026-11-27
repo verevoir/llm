@@ -670,6 +670,93 @@ describe('claudeCli.chatWithToolLoop — GenAI spans', () => {
     ).toBe('non-finite');
   });
 
+  // A prompt of 27,491 tokens, all but 2 read from or written to the cache;
+  // the CLI's `input_tokens` leaves those out (src/otel.ts's header).
+  const CACHED_USAGE = {
+    input_tokens: 2,
+    cache_creation_input_tokens: 15647,
+    cache_read_input_tokens: 11842,
+    output_tokens: 4,
+  };
+  // Every span this adapter reports: chat()'s one-shot spawn and its held-
+  // session turn, and chatWithToolLoop with and without a held session.
+  const SPAN_SITES = [
+    {
+      site: 'chat() one-shot',
+      run: (usage: Record<string, unknown>) => {
+        // The one-shot `claude -p` spawn, then the `claude --version` one.
+        queueVersionSpawn(
+          JSON.stringify({ type: 'system', subtype: 'init', tools: [], mcp_servers: [] }) +
+            '\n' +
+            JSON.stringify({ type: 'result', result: 'ok', usage })
+        );
+        queueVersionSpawn();
+        return chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] });
+      },
+    },
+    {
+      site: 'chat() on a held session',
+      run: (usage: Record<string, unknown>) => {
+        queueVersionSpawn();
+        mockRunSessionTurn.mockResolvedValueOnce(baseSessionTurnResult({ usage }));
+        return chat({
+          systemPrompt: 'sys',
+          turns: [{ role: 'user', content: 'q' }],
+          session: SESSION_HANDLE,
+        });
+      },
+    },
+    ...[undefined, SESSION_HANDLE].map((session) => ({
+      site: `chatWithToolLoop ${session ? 'on a held session' : 'without a session'}`,
+      run: (usage: Record<string, unknown>) => {
+        queueVersionSpawn();
+        mockRunSessionTurn.mockResolvedValueOnce(baseSessionTurnResult({ usage }));
+        return chatWithToolLoop({
+          systemPrompt: 'sys',
+          turns: [{ role: 'user', content: 'q' }],
+          tools: [ECHO_TOOL],
+          executor: async () => 'x',
+          session,
+        });
+      },
+    })),
+  ];
+
+  it.each(SPAN_SITES)(
+    '$site: the span input is input + cache read + cache write; the returned counts are the CLI’s own',
+    async ({ run }) => {
+      const reply = await run(CACHED_USAGE);
+
+      const spans = exporter.getFinishedSpans();
+      expect(spans).toHaveLength(1);
+      expect(spans[0].attributes).toMatchObject({
+        'gen_ai.usage.input_tokens': 27491,
+        'gen_ai.usage.output_tokens': 4,
+        'gen_ai.usage.cache_read.input_tokens': 11842,
+        'gen_ai.usage.cache_write.input_tokens': 15647,
+      });
+      expect(reply.usage).toMatchObject({
+        inputTokens: 2,
+        outputTokens: 4,
+        cacheReadInputTokens: 11842,
+        cacheCreationInputTokens: 15647,
+      });
+    }
+  );
+
+  it.each(SPAN_SITES)(
+    '$site: with no input_tokens the span input is left unset, not made from the cache counts',
+    async ({ run }) => {
+      const { input_tokens: _omitted, ...noInput } = CACHED_USAGE;
+
+      await run(noInput);
+
+      expect(Object.keys(exporter.getFinishedSpans()[0].attributes)).not.toContain(
+        'gen_ai.usage.input_tokens'
+      );
+    }
+  );
+
   it("puts the kind of a malformed held-session cost on the span's invalid-type attribute", async () => {
     queueVersionSpawn();
     mockRunSessionTurn.mockResolvedValueOnce(baseSessionTurnResult({ totalCostUsd: 'oops' }));

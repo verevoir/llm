@@ -194,9 +194,11 @@ async function callChatCompletionsCreate(
       outcome: {
         responseModel: response.model ?? modelId,
         responseId: response.id,
-        inputTokens: result.rawUsage.inputTokens,
-        outputTokens: result.rawUsage.outputTokens,
-        cacheReadInputTokens: cachedInputTokens || undefined,
+        // The provider's own values, not `rawUsage`'s zero-filled ones (src/otel.ts's header).
+        inputTokens: u.prompt_tokens ?? undefined,
+        outputTokens: u.completion_tokens ?? undefined,
+        cacheReadInputTokens:
+          u.prompt_cache_hit_tokens ?? u.prompt_tokens_details?.cached_tokens ?? undefined,
       },
     };
   });
