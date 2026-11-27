@@ -29,6 +29,7 @@ import {
   type ModelSpan,
   type TokenUsage,
 } from './index.js';
+import { createPriceBook } from './pricing.js';
 
 /** A model id that is in no adapter's catalogue and no class. */
 const NAMED = 'named-model-in-no-class';
@@ -189,6 +190,76 @@ describe('OpenAI-compatible adapters — the model a caller names', () => {
 
       expect(withClass.direction).toBe('extraction');
       expect(withoutClass.direction).toBe('reasoning');
+    }
+  );
+
+  // `prompt_tokens` includes the cached tokens on every provider here
+  // (DeepSeek's included; the factory's returned count subtracts them —
+  // openai-compat.test.ts), so the span's input, every input token of the
+  // call, is `prompt_tokens` as given.
+  const CACHED_REPLY = {
+    choices: [{ message: { content: 'ok', tool_calls: [] }, finish_reason: 'stop' }],
+    usage: {
+      prompt_tokens: 1000,
+      completion_tokens: 50,
+      prompt_tokens_details: { cached_tokens: 800 },
+    },
+  };
+
+  it.each(CASES)(
+    '$name: the span input is prompt_tokens as the provider gave it, the cache read under the conventions’ name',
+    async ({ run }) => {
+      mockCreate.mockResolvedValue(CACHED_REPLY);
+
+      await run({});
+
+      const spans = exporter.getFinishedSpans();
+      expect(spans.length).toBeGreaterThan(0);
+      for (const span of spans) {
+        expect(span.attributes['gen_ai.usage.input_tokens']).toBe(1000);
+        expect(span.attributes['gen_ai.usage.cache_read.input_tokens']).toBe(800);
+        expect(Object.keys(span.attributes)).not.toContain('verevoir.llm.cache_read_input_tokens');
+      }
+    }
+  );
+
+  it.each(FACTORY_BUILT.map((a) => ({ name: `${a.PROVIDER}.chat`, a })))(
+    "$name: chat()'s returned counts and cost are unchanged by the span's input",
+    async ({ a }) => {
+      mockCreate.mockResolvedValue(CACHED_REPLY);
+      const book = createPriceBook({
+        snapshot: {
+          [NAMED]: {
+            inputCostPerToken: 1e-6,
+            outputCostPerToken: 2e-6,
+            cacheReadInputTokenCost: 1e-7,
+          },
+        },
+        fetch: () => {
+          throw new Error('must not fetch — this book is never start()-ed');
+        },
+      });
+
+      const reply = await a.chat({ ...BASE, model: NAMED });
+
+      expect(reply.usage).toMatchObject({
+        inputTokens: 200,
+        outputTokens: 50,
+        cacheReadInputTokens: 800,
+        cacheCreationInputTokens: 0,
+      });
+      expect(exporter.getFinishedSpans()[0].attributes['gen_ai.usage.input_tokens']).toBe(1000);
+      expect(book.costOf(reply.usage)).toHaveProperty('usdMicros');
+      expect(book.costOf(reply.usage)).toEqual(
+        book.costOf({
+          provider: a.PROVIDER,
+          model: NAMED,
+          inputTokens: 200,
+          outputTokens: 50,
+          cacheReadInputTokens: 800,
+          cacheCreationInputTokens: 0,
+        })
+      );
     }
   );
 

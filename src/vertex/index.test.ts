@@ -380,6 +380,103 @@ describe('@verevoir/llm/vertex — OpenTelemetry span', () => {
       ['vertex', 'anthropic']
     );
   });
+
+  // Both routes share src/anthropic/adapter.ts. Anthropic's `input_tokens`
+  // leaves cached tokens out; the span's input is every input token.
+  const ROUTES = [
+    { route: 'vertex', stream: vertexStream, call: (o: ChatOptions) => chat(o) },
+    {
+      route: 'anthropic',
+      stream: directStream,
+      call: (o: ChatOptions) => direct.chat({ ...o, apiKey: 'sk-test' }),
+    },
+  ];
+  const SPAN_USAGE = {
+    input_tokens: 11,
+    output_tokens: 7,
+    cache_creation_input_tokens: 30,
+    cache_read_input_tokens: 40,
+    cache_creation: { ephemeral_5m_input_tokens: 10, ephemeral_1h_input_tokens: 20 },
+  };
+  const lastSpan = () => exporter.getFinishedSpans().at(-1)!;
+
+  it.each(ROUTES)(
+    '$route: the span input is input + cache read + cache write, the cache counts under the conventions’ names, the verevoir.llm.* attributes kept and no verevoir.llm.* name for the cache counts',
+    async ({ stream, call }) => {
+      stream.mockReturnValue(fakeStream([{ type: 'text', text: 'ok' }], 'end_turn', SPAN_USAGE));
+
+      await call(BASE);
+
+      const attributes = lastSpan().attributes;
+      expect(attributes).toMatchObject({
+        'gen_ai.usage.input_tokens': 81,
+        'gen_ai.usage.cache_read.input_tokens': 40,
+        'gen_ai.usage.cache_write.input_tokens': 30,
+        'verevoir.llm.cache_creation.ephemeral_5m_input_tokens': 10,
+        'verevoir.llm.cache_creation.ephemeral_1h_input_tokens': 20,
+        'verevoir.llm.provider_request_id': 'msg_1',
+      });
+      expect(Object.keys(attributes)).not.toContain('verevoir.llm.cache_read_input_tokens');
+      expect(Object.keys(attributes)).not.toContain('verevoir.llm.cache_creation_input_tokens');
+    }
+  );
+
+  it.each(ROUTES)(
+    '$route: with no input_tokens the span input is left unset, not made from the cache counts',
+    async ({ stream, call }) => {
+      const { input_tokens: _omitted, ...noInput } = SPAN_USAGE;
+      stream.mockReturnValue(fakeStream([{ type: 'text', text: 'ok' }], 'end_turn', noInput));
+
+      await call(BASE);
+
+      expect(Object.keys(lastSpan().attributes)).not.toContain('gen_ai.usage.input_tokens');
+    }
+  );
+
+  it.each(ROUTES)(
+    "$route: chat()'s returned counts and cost are unchanged by the span's input",
+    async ({ stream, call }) => {
+      stream.mockReturnValue(fakeStream([{ type: 'text', text: 'ok' }], 'end_turn', SPAN_USAGE));
+      const book = createPriceBook({
+        snapshot: {
+          [models.reasoning]: {
+            inputCostPerToken: 1e-6,
+            outputCostPerToken: 2e-6,
+            cacheReadInputTokenCost: 1e-7,
+            cacheCreationInputTokenCost: 1.25e-6,
+          },
+        },
+        fetch: () => {
+          throw new Error('must not fetch — this book is never start()-ed');
+        },
+      });
+
+      const reply = await call(BASE);
+
+      expect(reply.usage).toMatchObject({
+        inputTokens: 11,
+        outputTokens: 7,
+        cacheReadInputTokens: 40,
+        cacheCreationInputTokens: 30,
+        cacheCreationEphemeral5mInputTokens: 10,
+        cacheCreationEphemeral1hInputTokens: 20,
+      });
+      expect(lastSpan().attributes['gen_ai.usage.input_tokens']).toBe(81);
+      expect(book.costOf(reply.usage)).toHaveProperty('usdMicros');
+      expect(book.costOf(reply.usage)).toEqual(
+        book.costOf({
+          provider: reply.usage.provider,
+          model: reply.usage.model,
+          inputTokens: 11,
+          outputTokens: 7,
+          cacheReadInputTokens: 40,
+          cacheCreationInputTokens: 30,
+          cacheCreationEphemeral5mInputTokens: 10,
+          cacheCreationEphemeral1hInputTokens: 20,
+        })
+      );
+    }
+  );
 });
 
 describe('@verevoir/llm/vertex — usage', () => {

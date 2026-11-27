@@ -613,6 +613,80 @@ expect multiple spans from one loop, each carrying that iteration's own usage
 (not the aggregate). Off by default (no sink, no behaviour change); a throwing
 sink is caught and warned, never breaking the call. Pass `null` to detach.
 
+## Telemetry
+
+Every provider call is one OpenTelemetry CLIENT span named `chat {model}`,
+`{model}` being the model id the call requested (`/claude-cli` names
+`default` when the caller names none). On `/claude-cli` the call is one
+`claude` turn, so a `chatWithToolLoop` there is one span; on every other
+adapter a tool loop is one span per model call. The span follows the
+OpenTelemetry Semantic Conventions for Generative AI in
+[`open-telemetry/semantic-conventions-genai`](https://github.com/open-telemetry/semantic-conventions-genai/tree/v0.1.0),
+tag `v0.1.0` (status: Development). Its attribute names are held in
+`src/otel.ts`, not imported from `@opentelemetry/semantic-conventions`.
+
+The standard attributes:
+
+- `gen_ai.operation.name` — always `chat`.
+- `gen_ai.provider.name` — the adapter's provider: `anthropic`, `vertex`,
+  `openai`, `google`, `deepseek`, `samba`, `mistral`, `vertex-openai`;
+  `/claude-cli` reports `anthropic`.
+- `gen_ai.request.model` — the model id requested.
+- `gen_ai.response.model` — the model id the provider answered with (not
+  set by `/google`).
+- `gen_ai.response.id` — the provider's id for the reply (not set by
+  `/google` or `/claude-cli`).
+- `gen_ai.usage.input_tokens` — every input token of the call, those read
+  from and written to a cache included (see the table below).
+- `gen_ai.usage.output_tokens` — the reply's tokens.
+- `gen_ai.usage.cache_read.input_tokens` — input tokens read from the
+  provider's cache.
+- `gen_ai.usage.cache_write.input_tokens` — input tokens written to the
+  provider's cache.
+- `error.type` — on a failed call, the thrown error's `name`.
+
+The library's own, under `verevoir.llm.*` because v0.1.0 has no attribute
+for them:
+
+- `verevoir.llm.cache_creation.ephemeral_5m_input_tokens` — the part of a
+  cache write kept for 5 minutes.
+- `verevoir.llm.cache_creation.ephemeral_1h_input_tokens` — the part kept
+  for 1 hour.
+- `verevoir.llm.provider_request_id` — the provider's own id for the call
+  (`/anthropic`, `/vertex`, `/claude-cli`).
+- `verevoir.llm.session_id` — `/claude-cli` on a held session: the CLI's
+  session id, shared by every turn on it.
+- `verevoir.llm.cost_usd_reported` — the cost in USD the provider itself
+  reported (`/claude-cli`), never one this library computed.
+- `verevoir.llm.cost_usd_reported_invalid_type` — the kind of a malformed
+  reported cost (`negative`, `non-finite` or a type name).
+
+An attribute the provider gave no value for is left unset. What
+`gen_ai.usage.input_tokens` holds, adapter by adapter — `chat()`'s returned
+`TokenUsage` and its cost are the provider's own counts on every adapter:
+
+| Adapter                                | Provider's input count includes cached tokens? | `gen_ai.usage.input_tokens`               |
+| -------------------------------------- | ---------------------------------------------- | ----------------------------------------- |
+| `/anthropic`, `/vertex`, `/claude-cli` | No                                             | `input_tokens` + cache read + cache write |
+| `/deepseek`                            | Yes                                            | `prompt_tokens` as given                  |
+| `/openai`                              | Yes                                            | `input_tokens` as given                   |
+| `/google`                              | Yes                                            | `promptTokenCount` as given               |
+| `/samba`, `/mistral`, `/vertex-openai` | Yes                                            | `prompt_tokens` as given                  |
+
+With no input count from the provider, `/anthropic`, `/vertex`,
+`/claude-cli`, `/samba`, `/mistral` and `/vertex-openai` leave the attribute
+unset, never making it from the cache counts alone; `/deepseek`, `/openai`
+and `/google` report `0`.
+
+The library depends on `@opentelemetry/api` alone. With no OpenTelemetry SDK
+installed by the application, the API's own no-op tracer answers, so the
+spans cost nothing and change no behaviour.
+
+A span never carries a prompt, a reply or an error's message. On a failed
+call it records the error's `name` (and an HTTP status, where the error has
+one) — never the message or the stack — and the caller gets the original
+error unchanged.
+
 ## Advisor pair
 
 `withAdvisor(tools, executor, advisor)` (core export, SDK-free) turns any tool

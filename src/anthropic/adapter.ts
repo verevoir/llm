@@ -15,7 +15,7 @@
 
 import type Anthropic from '@anthropic-ai/sdk';
 import { fireUsageHook } from '../audit-hook.js';
-import { withGenAISpan } from '../otel.js';
+import { spanInputTokensWithCache, withGenAISpan } from '../otel.js';
 import { CATALOG } from './catalog.js';
 import {
   type ChatOptions,
@@ -427,7 +427,16 @@ async function callStreamed(
         responseModel: final.model,
         responseId: final.id,
         providerRequestId: final.id,
-        inputTokens: result.rawUsage.inputTokens,
+        // Anthropic's `input_tokens` leaves cached tokens out; the span's
+        // input is every input token (semantic-conventions-genai v0.1.0), so
+        // the cache counts are added — from the provider's own values, so a
+        // missing `input_tokens` leaves the attribute unset. The returned
+        // `rawUsage.inputTokens` is untouched. See src/otel.ts's header.
+        inputTokens: spanInputTokensWithCache(
+          u.input_tokens,
+          u.cache_read_input_tokens,
+          u.cache_creation_input_tokens
+        ),
         outputTokens: result.rawUsage.outputTokens,
         cacheReadInputTokens: result.rawUsage.cacheReadInputTokens,
         cacheCreationInputTokens: result.rawUsage.cacheCreationInputTokens,

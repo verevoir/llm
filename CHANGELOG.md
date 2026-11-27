@@ -1,5 +1,27 @@
 # Changelog
 
+## [Unreleased]
+
+**The OpenTelemetry span now follows the GenAI semantic conventions at `open-telemetry/semantic-conventions-genai` v0.1.0 (status Development), which name the cache counts and count cached tokens as input.** Both changes below change what the span carries: a dashboard, query or alert that reads it must change with them. What `chat()`, `chatWithTools` and `chatWithToolLoop` return (token counts and cost) is unchanged on every adapter, as is the `ModelSpan` given to `setModelSpanSink`.
+
+- **Action needed: the two cache counts are renamed to the conventions' names.** `verevoir.llm.cache_read_input_tokens` is now `gen_ai.usage.cache_read.input_tokens`, and `verevoir.llm.cache_creation_input_tokens` is now `gen_ai.usage.cache_write.input_tokens`. The old names are no longer emitted, and their constants (`ATTR_VEREVOIR_CACHE_READ_INPUT_TOKENS`, `ATTR_VEREVOIR_CACHE_CREATION_INPUT_TOKENS`) are gone from `src/otel.ts`. Read the new names, on every adapter.
+- **Action needed: the span's `gen_ai.usage.input_tokens` now includes cached tokens on every adapter.** The conventions count every input token of the call there, those read from and written to a cache included. On five adapters the number changes; on four it was already that count and stays as it was:
+
+  | Adapter                                | Provider's input count includes cached tokens? | Span's `gen_ai.usage.input_tokens`                             |
+  | -------------------------------------- | ---------------------------------------------- | -------------------------------------------------------------- |
+  | `/anthropic`, `/vertex`, `/claude-cli` | No                                             | Now input + cache read + cache write (was input alone)         |
+  | `/samba`, `/mistral`, `/vertex-openai` | Yes                                            | Now `prompt_tokens` as given (was `prompt_tokens` less cached) |
+  | `/deepseek`                            | Yes                                            | `prompt_tokens` as given, as before                            |
+  | `/openai`                              | Yes                                            | `input_tokens` as given, as before                             |
+  | `/google`                              | Yes                                            | `promptTokenCount` as given, as before                         |
+
+  A query that adds the cache counts to `gen_ai.usage.input_tokens` to get the whole input must stop adding them on every adapter; one that subtracts them from `/samba`, `/mistral` or `/vertex-openai` spans to get the uncached input must now subtract them on `/anthropic`, `/vertex` and `/claude-cli` spans too. On `/claude-cli` a call whose prompt is mostly cached changes most: a reply with `input_tokens: 2`, `cache_read_input_tokens: 11842` and `cache_creation_input_tokens: 15647` was a span input of 2 and is now 27,491.
+
+  With no input count from the provider, the attribute is left unset on `/anthropic`, `/vertex`, `/claude-cli`, `/samba`, `/mistral` and `/vertex-openai`, which reported `0` before. It is never made from the cache counts alone. `/deepseek`, `/openai` and `/google` still report `0`.
+
+- **Unchanged.** What the conventions still have no attribute for keeps its `verevoir.llm.*` name: the 5-minute and 1-hour split of a cache write, the provider's request id, the session id, the reported cost and its invalid kind. The span's name (`chat {model}`) and kind (CLIENT) are as before.
+- **The README has a "Telemetry" section**: the span, the attributes and the adapter table above.
+
 ## [0.45.0] — 2026-11-25
 
 **A reply now says why the model stopped in one small set of words, `stopKind`, whichever provider answered.** `stopReason` is unchanged: it is still the provider's own word.

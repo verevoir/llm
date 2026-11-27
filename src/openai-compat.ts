@@ -271,7 +271,10 @@ export function createOpenAICompatCalls(config: OpenAICompatCallsConfig): OpenAI
         outcome: {
           responseModel: response.model ?? modelId,
           responseId: response.id,
-          inputTokens: result.rawUsage.inputTokens,
+          // The span's input is every input token (semantic-conventions-genai
+          // v0.1.0): `prompt_tokens` already includes the cached ones, so it
+          // goes as it is — not the returned count, which subtracts them.
+          inputTokens: u.prompt_tokens ?? undefined,
           outputTokens: result.rawUsage.outputTokens,
           cacheReadInputTokens: cachedInputTokens || undefined,
         },
@@ -422,7 +425,8 @@ export function createOpenAICompatCalls(config: OpenAICompatCallsConfig): OpenAI
         outcome: {
           responseModel: response.model ?? modelId,
           responseId: response.id,
-          inputTokens: result.raw.inputTokens,
+          // As in chat's span above: `prompt_tokens` as it is.
+          inputTokens: u.prompt_tokens ?? undefined,
           outputTokens: result.raw.outputTokens,
           cacheReadInputTokens: cachedInputTokens || undefined,
         },

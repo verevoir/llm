@@ -704,21 +704,31 @@ export function resetClaudeCliVersionCacheForTests(): void {
   cachedCliVersionPromise = null;
 }
 
-import { withGenAISpan, type GenAISpanOutcome } from '../otel.js';
+import { spanInputTokensWithCache, withGenAISpan, type GenAISpanOutcome } from '../otel.js';
+
+/** The span's input count for each {@link TokenUsage} `shapeUsage()`
+ * builds, made from the CLI's own `usage` fields. The CLI's `input_tokens`
+ * leaves cached tokens out, as Anthropic's does, so the span's input
+ * (every input token of the call, semantic-conventions-genai v0.1.0) is
+ * that plus the cache-read and cache-write counts; with no `input_tokens`
+ * it is `undefined`, so the attribute is left unset. Held beside the
+ * record, not on it, because the returned `TokenUsage.inputTokens` is the
+ * CLI's `input_tokens` alone. See src/otel.ts's header. */
+const spanInputTokensByUsage = new WeakMap<TokenUsage, number | undefined>();
 
 /** Builds the span outcome for {@link chat} / {@link chatWithToolLoop}'s
  * wrappers from an already-computed {@link TokenUsage} — every field this
- * adapter's `shapeUsage()` populates maps straight across, including the
- * now-distinct `sessionId` (correlation only — a held session reuses one
- * across every turn) and `providerRequestId` (the real per-turn-unique
- * id: held-session `uuid`, or one-shot `session_id`, which genuinely IS
- * unique per call there — see `shapeUsage()`'s own doc comment for why
- * these stopped being the same field, a #73 review fix). `responseId`
- * has no claude-cli equivalent and is left unset. */
+ * adapter's `shapeUsage()` populates maps straight across, except the
+ * input count (see {@link spanInputTokensByUsage}). `sessionId` is
+ * correlation only (a held session reuses one across every turn) and
+ * `providerRequestId` is the real per-turn-unique id: held-session `uuid`,
+ * or one-shot `session_id`, which genuinely IS unique per call there —
+ * see `shapeUsage()`'s own doc comment for why these are separate fields.
+ * `responseId` has no claude-cli equivalent and is left unset. */
 function genAIOutcomeFromUsage(usage: TokenUsage): GenAISpanOutcome {
   return {
     responseModel: usage.model,
-    inputTokens: usage.inputTokens,
+    inputTokens: spanInputTokensByUsage.get(usage),
     outputTokens: usage.outputTokens,
     cacheReadInputTokens: usage.cacheReadInputTokens,
     cacheCreationInputTokens: usage.cacheCreationInputTokens,
@@ -760,7 +770,7 @@ function shapeUsage(
   // metered Console login; see env.ts), which is why costUsdReported
   // cannot be read as "not billed".
   const route: CredentialRoute = 'subscription-oauth';
-  return {
+  const record: TokenUsage = {
     provider: PROVIDER,
     model,
     direction: 'reasoning',
@@ -793,6 +803,15 @@ function shapeUsage(
     sessionId,
     providerRequestId,
   };
+  spanInputTokensByUsage.set(
+    record,
+    spanInputTokensWithCache(
+      usage?.input_tokens,
+      usage?.cache_read_input_tokens,
+      usage?.cache_creation_input_tokens
+    )
+  );
+  return record;
 }
 
 interface SpawnResult {

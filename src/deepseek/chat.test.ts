@@ -1,4 +1,10 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
+import { trace } from '@opentelemetry/api';
+import {
+  BasicTracerProvider,
+  InMemorySpanExporter,
+  SimpleSpanProcessor,
+} from '@opentelemetry/sdk-trace-base';
 
 // Mock the OpenAI SDK before importing the adapter. DeepSeek speaks the
 // Chat Completions API, so the fake exposes `chat.completions.create`.
@@ -306,5 +312,43 @@ describe('deepseek.chat', () => {
     }
     // Thrown before the SDK is ever called — not a provider-side rejection.
     expect(mockCreate).not.toHaveBeenCalled();
+  });
+});
+
+// DeepSeek's `prompt_tokens` is `prompt_cache_hit_tokens` +
+// `prompt_cache_miss_tokens`, so it already counts every input token of the
+// call: the span's input is `prompt_tokens` as given,
+// neither less the cache hits nor plus them (src/otel.ts's header).
+describe('deepseek.chat — the span input with a cache hit', () => {
+  let exporter: InMemorySpanExporter;
+  let provider: BasicTracerProvider;
+
+  beforeAll(() => {
+    exporter = new InMemorySpanExporter();
+    provider = new BasicTracerProvider({ spanProcessors: [new SimpleSpanProcessor(exporter)] });
+    trace.setGlobalTracerProvider(provider);
+  });
+
+  afterAll(async () => {
+    await provider.shutdown();
+  });
+
+  it('is prompt_tokens as given, the cache hits under the cache-read attribute', async () => {
+    mockCreate.mockResolvedValueOnce({
+      choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      usage: {
+        prompt_tokens: 1000,
+        prompt_cache_hit_tokens: 800,
+        prompt_cache_miss_tokens: 200,
+        completion_tokens: 50,
+      },
+    });
+
+    await chat({ systemPrompt: 's', turns: [{ role: 'user', content: 'q' }], apiKey: 'sk-test' });
+
+    const spans = exporter.getFinishedSpans();
+    expect(spans).toHaveLength(1);
+    expect(spans[0].attributes['gen_ai.usage.input_tokens']).toBe(1000);
+    expect(spans[0].attributes['gen_ai.usage.cache_read.input_tokens']).toBe(800);
   });
 });

@@ -254,7 +254,8 @@ describe('claudeCli.chat — GenAI spans', () => {
     const span = spans[0];
     expect(span.name).toMatch(/^chat /);
     expect(span.attributes[ATTR_GEN_AI_PROVIDER_NAME]).toBe('anthropic');
-    expect(span.attributes[ATTR_GEN_AI_USAGE_INPUT_TOKENS]).toBe(10);
+    // Input + cache read + cache write: 10 + 0 + 30 (see src/otel.ts's header).
+    expect(span.attributes[ATTR_GEN_AI_USAGE_INPUT_TOKENS]).toBe(40);
     expect(span.attributes[ATTR_GEN_AI_USAGE_OUTPUT_TOKENS]).toBe(5);
     expect(span.attributes[ATTR_VEREVOIR_CACHE_CREATION_EPHEMERAL_5M_INPUT_TOKENS]).toBe(10);
     expect(span.attributes[ATTR_VEREVOIR_CACHE_CREATION_EPHEMERAL_1H_INPUT_TOKENS]).toBe(20);
