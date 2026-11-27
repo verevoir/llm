@@ -8,9 +8,8 @@ import {
 } from '@opentelemetry/sdk-trace-base';
 
 // Every provider SDK is mocked at its constructor, before any adapter is
-// imported, so one file reaches every span every adapter reports. The
-// claude-cli transport is mocked where its own tests mock it: the held
-// session module and `node:child_process`.
+// imported, so one file reaches every span. The claude-cli transport is mocked
+// where its own tests mock it: the session module and `node:child_process`.
 const anthropicStream = vi.fn();
 const vertexStream = vi.fn();
 const chatCompletionsCreate = vi.fn();
