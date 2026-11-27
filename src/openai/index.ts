@@ -178,9 +178,12 @@ async function callResponsesCreate(
       outcome: {
         responseModel: response.model ?? modelId,
         responseId: response.id,
-        inputTokens: result.rawUsage.inputTokens,
-        outputTokens: result.rawUsage.outputTokens,
-        cacheReadInputTokens: cachedInputTokens || undefined,
+        // The provider's own values, not `rawUsage`'s zero-filled ones: a
+        // count the reply didn't carry leaves its attribute unset; a 0 it
+        // did carry is a 0.
+        inputTokens: u?.input_tokens ?? undefined,
+        outputTokens: u?.output_tokens ?? undefined,
+        cacheReadInputTokens: u?.input_tokens_details?.cached_tokens ?? undefined,
       },
     };
   });

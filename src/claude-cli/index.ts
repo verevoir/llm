@@ -706,20 +706,27 @@ export function resetClaudeCliVersionCacheForTests(): void {
 
 import { spanInputTokensWithCache, withGenAISpan, type GenAISpanOutcome } from '../otel.js';
 
-/** The span's input count for each {@link TokenUsage} `shapeUsage()`
- * builds, made from the CLI's own `usage` fields. The CLI's `input_tokens`
- * leaves cached tokens out, as Anthropic's does, so the span's input
- * (every input token of the call, semantic-conventions-genai v0.1.0) is
- * that plus the cache-read and cache-write counts; with no `input_tokens`
- * it is `undefined`, so the attribute is left unset. Held beside the
- * record, not on it, because the returned `TokenUsage.inputTokens` is the
- * CLI's `input_tokens` alone. See src/otel.ts's header. */
-const spanInputTokensByUsage = new WeakMap<TokenUsage, number | undefined>();
+/** The span's four usage counts for each {@link TokenUsage} `shapeUsage()`
+ * builds, made from the CLI's own `usage` fields, each `undefined` (its
+ * attribute left unset) when the CLI's `usage` didn't carry it — where the
+ * returned `TokenUsage` fills it with 0. The CLI's `input_tokens` leaves
+ * cached tokens out, as Anthropic's does, so the span's input (every input
+ * token of the call, semantic-conventions-genai v0.1.0) is that plus the
+ * cache-read and cache-write counts, and with no `input_tokens` it is
+ * unset. One `claude` turn is one span, with the CLI's own totals for the
+ * turn — this adapter adds nothing up. Held beside the record, not on it,
+ * because the returned counts are not changed by it. See src/otel.ts's
+ * header. */
+type SpanUsage = Pick<
+  GenAISpanOutcome,
+  'inputTokens' | 'outputTokens' | 'cacheReadInputTokens' | 'cacheCreationInputTokens'
+>;
+const spanUsageByUsage = new WeakMap<TokenUsage, SpanUsage>();
 
 /** Builds the span outcome for {@link chat} / {@link chatWithToolLoop}'s
  * wrappers from an already-computed {@link TokenUsage} — every field this
- * adapter's `shapeUsage()` populates maps straight across, except the
- * input count (see {@link spanInputTokensByUsage}). `sessionId` is
+ * adapter's `shapeUsage()` populates maps straight across, except the four
+ * usage counts (see {@link spanUsageByUsage}). `sessionId` is
  * correlation only (a held session reuses one across every turn) and
  * `providerRequestId` is the real per-turn-unique id: held-session `uuid`,
  * or one-shot `session_id`, which genuinely IS unique per call there —
@@ -728,10 +735,7 @@ const spanInputTokensByUsage = new WeakMap<TokenUsage, number | undefined>();
 function genAIOutcomeFromUsage(usage: TokenUsage): GenAISpanOutcome {
   return {
     responseModel: usage.model,
-    inputTokens: spanInputTokensByUsage.get(usage),
-    outputTokens: usage.outputTokens,
-    cacheReadInputTokens: usage.cacheReadInputTokens,
-    cacheCreationInputTokens: usage.cacheCreationInputTokens,
+    ...spanUsageByUsage.get(usage),
     cacheCreationEphemeral5mInputTokens: usage.cacheCreationEphemeral5mInputTokens,
     cacheCreationEphemeral1hInputTokens: usage.cacheCreationEphemeral1hInputTokens,
     sessionId: usage.sessionId,
@@ -803,14 +807,16 @@ function shapeUsage(
     sessionId,
     providerRequestId,
   };
-  spanInputTokensByUsage.set(
-    record,
-    spanInputTokensWithCache(
+  spanUsageByUsage.set(record, {
+    inputTokens: spanInputTokensWithCache(
       usage?.input_tokens,
       usage?.cache_read_input_tokens,
       usage?.cache_creation_input_tokens
-    )
-  );
+    ),
+    outputTokens: usage?.output_tokens ?? undefined,
+    cacheReadInputTokens: usage?.cache_read_input_tokens ?? undefined,
+    cacheCreationInputTokens: usage?.cache_creation_input_tokens ?? undefined,
+  });
   return record;
 }
 

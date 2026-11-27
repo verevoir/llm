@@ -44,11 +44,11 @@
  *   /samba, /mistral,       | Yes: `prompt_tokens` (the returned count is | `prompt_tokens` as given
  *   /vertex-openai          |   `prompt_tokens` less cached tokens)       |
  *
- * With no input count from the provider, /anthropic, /vertex, /claude-cli
- * and /samba, /mistral, /vertex-openai leave the attribute unset — never
- * made from the cache counts alone, and an unset cache count adds nothing
- * (see {@link spanInputTokensWithCache}); /deepseek, /openai and /google
- * report `0`.
+ * With no input count from the provider the attribute is unset, as every
+ * usage attribute is when the provider gave no value for it (see
+ * {@link GenAISpanOutcome}): the input is never made from the cache counts
+ * alone, and an unset cache count adds nothing (see
+ * {@link spanInputTokensWithCache}).
  *
  * What the conventions have no attribute for at v0.1.0 — how long a cache
  * write is kept, the provider's own request id, a cost in money — keeps this

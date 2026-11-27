@@ -661,8 +661,12 @@ for them:
 - `verevoir.llm.cost_usd_reported_invalid_type` — the kind of a malformed
   reported cost (`negative`, `non-finite` or a type name).
 
-An attribute the provider gave no value for is left unset. What
-`gen_ai.usage.input_tokens` holds, adapter by adapter — `chat()`'s returned
+An attribute the provider gave no value for is left unset, on every adapter:
+a usage count the reply didn't carry is not on the span, and
+`gen_ai.usage.input_tokens` is never made from the cache counts alone. A `0`
+the provider sent is a `0`. (`chat()`'s returned `TokenUsage` is not the
+span: it has a number for every count, `0` where the provider gave none.)
+What `gen_ai.usage.input_tokens` holds, adapter by adapter — the returned
 `TokenUsage` and its cost are the provider's own counts on every adapter:
 
 | Adapter                                | Provider's input count includes cached tokens? | `gen_ai.usage.input_tokens`               |
@@ -672,11 +676,6 @@ An attribute the provider gave no value for is left unset. What
 | `/openai`                              | Yes                                            | `input_tokens` as given                   |
 | `/google`                              | Yes                                            | `promptTokenCount` as given               |
 | `/samba`, `/mistral`, `/vertex-openai` | Yes                                            | `prompt_tokens` as given                  |
-
-With no input count from the provider, `/anthropic`, `/vertex`,
-`/claude-cli`, `/samba`, `/mistral` and `/vertex-openai` leave the attribute
-unset, never making it from the cache counts alone; `/deepseek`, `/openai`
-and `/google` report `0`.
 
 The library depends on `@opentelemetry/api` alone. With no OpenTelemetry SDK
 installed by the application, the API's own no-op tracer answers, so the

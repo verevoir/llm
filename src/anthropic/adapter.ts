@@ -437,9 +437,12 @@ async function callStreamed(
           u.cache_read_input_tokens,
           u.cache_creation_input_tokens
         ),
-        outputTokens: result.rawUsage.outputTokens,
-        cacheReadInputTokens: result.rawUsage.cacheReadInputTokens,
-        cacheCreationInputTokens: result.rawUsage.cacheCreationInputTokens,
+        // The provider's own values, not `rawUsage`'s zero-filled ones: a
+        // count the reply didn't carry (absent or `null`) leaves its
+        // attribute unset; a 0 it did carry is a 0.
+        outputTokens: u.output_tokens ?? undefined,
+        cacheReadInputTokens: u.cache_read_input_tokens ?? undefined,
+        cacheCreationInputTokens: u.cache_creation_input_tokens ?? undefined,
         cacheCreationEphemeral5mInputTokens: result.rawUsage.cacheCreationEphemeral5mInputTokens,
         cacheCreationEphemeral1hInputTokens: result.rawUsage.cacheCreationEphemeral1hInputTokens,
       },

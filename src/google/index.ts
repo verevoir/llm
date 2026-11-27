@@ -13,7 +13,7 @@
 
 import { GoogleGenAI } from '@google/genai';
 import { fireUsageHook } from '../audit-hook.js';
-import { withGenAISpan } from '../otel.js';
+import { withGenAISpan, type GenAISpanOutcome } from '../otel.js';
 import { collapseContentToText, EmptyResponseError } from '../index.js';
 import {
   type ChatOptions,
@@ -207,13 +207,24 @@ async function callGenerateContent(
       // guessing a field name here would risk reporting the wrong thing
       // rather than reporting nothing — see this field's own "undefined
       // when absent" contract.
-      outcome: {
-        inputTokens: result.rawUsage.inputTokens,
-        outputTokens: result.rawUsage.outputTokens,
-        cacheReadInputTokens: result.rawUsage.cachedInputTokens || undefined,
-      },
+      outcome: spanUsageOf(u),
     };
   });
+}
+
+/** The span's usage counts: the provider's own values, not `rawUsage`'s
+ * zero-filled ones, so a count `usageMetadata` didn't carry leaves its
+ * attribute unset and a 0 it did carry is a 0. */
+function spanUsageOf(u: {
+  promptTokenCount?: number;
+  candidatesTokenCount?: number;
+  cachedContentTokenCount?: number;
+}): GenAISpanOutcome {
+  return {
+    inputTokens: u.promptTokenCount ?? undefined,
+    outputTokens: u.candidatesTokenCount ?? undefined,
+    cacheReadInputTokens: u.cachedContentTokenCount ?? undefined,
+  };
 }
 
 // Retried here, by this adapter's own loop, on the same waits as the library's
@@ -482,11 +493,7 @@ async function callGenerateWithTools(
     };
     return {
       result,
-      outcome: {
-        inputTokens: result.rawUsage.inputTokens,
-        outputTokens: result.rawUsage.outputTokens,
-        cacheReadInputTokens: result.rawUsage.cachedInputTokens || undefined,
-      },
+      outcome: spanUsageOf(u),
     };
   });
 }

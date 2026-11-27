@@ -19,7 +19,7 @@
 
 import OpenAI from 'openai';
 import { fireUsageHook } from './audit-hook.js';
-import { withGenAISpan } from './otel.js';
+import { withGenAISpan, type GenAISpanOutcome } from './otel.js';
 import { collapseContentToText } from './index.js';
 import { callWithRetries as callWithPolicy, throwIfAborted } from './retry-policy.js';
 import {
@@ -237,6 +237,25 @@ export function createOpenAICompatCalls(config: OpenAICompatCallsConfig): OpenAI
   const { provider, route, getClient, modelFor } = config;
   const outputTokensOf = config.outputTokensOf ?? ((u: CompatUsage) => u.completion_tokens ?? 0);
 
+  /** The span's usage counts, from the provider's own fields — not the
+   * returned counts, which fill a missing field with 0 — so a count the
+   * reply didn't carry leaves its attribute unset and a 0 it did carry is a
+   * 0. The input is `prompt_tokens` as it is: it already includes the cached
+   * tokens, which is what the span's input is (semantic-conventions-genai
+   * v0.1.0), not the returned count, which subtracts them. The output is
+   * {@link outputTokensOf} when the reply carried an output count at all
+   * (`completion_tokens` or a reasoning count), and unset otherwise. */
+  function spanUsageOf(u: CompatUsage): GenAISpanOutcome {
+    const hasOutput =
+      u.completion_tokens != null || u.completion_tokens_details?.reasoning_tokens != null;
+    return {
+      inputTokens: u.prompt_tokens ?? undefined,
+      outputTokens: hasOutput ? outputTokensOf(u) : undefined,
+      cacheReadInputTokens:
+        u.prompt_cache_hit_tokens ?? u.prompt_tokens_details?.cached_tokens ?? undefined,
+    };
+  }
+
   async function callChatCompletionsCreate(
     client: OpenAI,
     modelId: string,
@@ -271,12 +290,7 @@ export function createOpenAICompatCalls(config: OpenAICompatCallsConfig): OpenAI
         outcome: {
           responseModel: response.model ?? modelId,
           responseId: response.id,
-          // The span's input is every input token (semantic-conventions-genai
-          // v0.1.0): `prompt_tokens` already includes the cached ones, so it
-          // goes as it is — not the returned count, which subtracts them.
-          inputTokens: u.prompt_tokens ?? undefined,
-          outputTokens: result.rawUsage.outputTokens,
-          cacheReadInputTokens: cachedInputTokens || undefined,
+          ...spanUsageOf(u),
         },
       };
     });
@@ -425,10 +439,7 @@ export function createOpenAICompatCalls(config: OpenAICompatCallsConfig): OpenAI
         outcome: {
           responseModel: response.model ?? modelId,
           responseId: response.id,
-          // As in chat's span above: `prompt_tokens` as it is.
-          inputTokens: u.prompt_tokens ?? undefined,
-          outputTokens: result.raw.outputTokens,
-          cacheReadInputTokens: cachedInputTokens || undefined,
+          ...spanUsageOf(u),
         },
       };
     });
