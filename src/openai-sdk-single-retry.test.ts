@@ -7,18 +7,20 @@
  * replace the SDK's `create`, and so cannot see what the SDK does beneath it.)
  *
  * Two SDK paths are here: the OpenAI-compatible factory over Chat Completions
- * (`/samba`, `/mistral`), and `/openai` over the Responses API. One site of
- * each runs every row of the driver; every other site and call shape runs
- * the rows a site can break on its own. `/deepseek` builds its own client and
+ * (`/samba`, `/mistral`), and `/openai` over the Responses API. The full-row
+ * site of each, marked by `fullRows` on its adapter, runs every row of the
+ * driver; every other site and call shape runs the rows a site can break on
+ * its own. `/deepseek` builds its own client and
  * call over Chat Completions, so it is sites of the factory's path.
  */
 
-import { beforeEach, describe } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import OpenAI from 'openai';
 import type { ToolDef } from './index.js';
 import * as deepseek from './deepseek/index.js';
 import * as mistral from './mistral/index.js';
 import * as openai from './openai/index.js';
+import { RETRY_BACKOFFS_MS } from './retry-policy.js';
 import * as samba from './samba/index.js';
 import {
   isolateEnv,
@@ -65,58 +67,80 @@ const TOOL: ToolDef = {
   input_schema: { type: 'object', properties: {} },
 };
 
-/** The three call shapes of an adapter built by the OpenAI-compatible factory. */
-const factoryShapes = (a: typeof samba | typeof mistral): [string, Call][] => [
-  ['chat', async (extra) => (await a.chat({ ...BASE, ...extra })).content],
-  [
-    'chatWithTools',
-    async (extra) => (await a.chatWithTools({ ...BASE, ...extra, tools: [TOOL] })).text,
-  ],
-  [
-    'chatWithToolLoop',
-    async (extra) =>
-      (
-        await a.chatWithToolLoop({
-          ...BASE,
-          ...extra,
-          tools: [TOOL],
-          executor: async () => 'looked up',
-        })
-      ).text,
-  ],
-];
+type Shape = 'chat' | 'chatWithTools' | 'chatWithToolLoop';
 
-const ADAPTERS: { name: string; keyEnv: string; ok: unknown; shapes: [string, Call][] }[] = [
-  { name: 'samba', keyEnv: 'SAMBA_NOVA_API_KEY', ok: COMPLETION, shapes: factoryShapes(samba) },
-  { name: 'mistral', keyEnv: 'MISTRAL_API_KEY', ok: COMPLETION, shapes: factoryShapes(mistral) },
-  {
-    name: 'deepseek',
-    keyEnv: 'DEEPSEEK_API_KEY',
-    ok: COMPLETION,
-    shapes: [['chat', async (extra) => (await deepseek.chat({ ...BASE, ...extra })).content]],
-  },
-  {
-    name: 'openai',
-    keyEnv: 'OPENAI_API_KEY',
-    ok: RESPONSE,
-    shapes: [['chat', async (extra) => (await openai.chat({ ...BASE, ...extra })).content]],
-  },
-];
+/** The three call shapes of an adapter built by the OpenAI-compatible factory. */
+const factoryShapes = (a: typeof samba | typeof mistral): Record<Shape, Call> => ({
+  chat: async (extra) => (await a.chat({ ...BASE, ...extra })).content,
+  chatWithTools: async (extra) =>
+    (await a.chatWithTools({ ...BASE, ...extra, tools: [TOOL] })).text,
+  chatWithToolLoop: async (extra) =>
+    (
+      await a.chatWithToolLoop({
+        ...BASE,
+        ...extra,
+        tools: [TOOL],
+        executor: async () => 'looked up',
+      })
+    ).text,
+});
 
 /** Each adapter builds a client in two places: one per call for a per-call
  * key, and one kept for the key in the environment. Both are covered. */
-const KEYS: [string, Extra][] = [
-  ['a per-call key', { apiKey: 'per-call-key' }],
-  ['the environment key', {}],
+const KEYS = {
+  perCall: ['a per-call key', { apiKey: 'per-call-key' }],
+  environment: ['the environment key', {}],
+} as const satisfies Record<string, readonly [string, Extra]>;
+
+/** The SDK paths here: the OpenAI-compatible factory over Chat Completions,
+ * and `/openai` over the Responses API. */
+const SDK_PATHS = ['Chat Completions', 'Responses'] as const;
+
+/** `fullRows` names the call shape and key that are the adapter's SDK path's
+ * full-row site. */
+const ADAPTERS: {
+  name: string;
+  sdkPath: (typeof SDK_PATHS)[number];
+  keyEnv: string;
+  ok: unknown;
+  shapes: Partial<Record<Shape, Call>>;
+  fullRows?: { shape: Shape; key: keyof typeof KEYS };
+}[] = [
+  {
+    name: 'samba',
+    sdkPath: 'Chat Completions',
+    keyEnv: 'SAMBA_NOVA_API_KEY',
+    ok: COMPLETION,
+    shapes: factoryShapes(samba),
+    fullRows: { shape: 'chat', key: 'environment' },
+  },
+  {
+    name: 'mistral',
+    sdkPath: 'Chat Completions',
+    keyEnv: 'MISTRAL_API_KEY',
+    ok: COMPLETION,
+    shapes: factoryShapes(mistral),
+  },
+  {
+    name: 'deepseek',
+    sdkPath: 'Chat Completions',
+    keyEnv: 'DEEPSEEK_API_KEY',
+    ok: COMPLETION,
+    shapes: { chat: async (extra) => (await deepseek.chat({ ...BASE, ...extra })).content },
+  },
+  {
+    name: 'openai',
+    sdkPath: 'Responses',
+    keyEnv: 'OPENAI_API_KEY',
+    ok: RESPONSE,
+    shapes: { chat: async (extra) => (await openai.chat({ ...BASE, ...extra })).content },
+    fullRows: { shape: 'chat', key: 'environment' },
+  },
 ];
 
-/** The site that stands for each SDK path. */
-const PATHS = ['samba.chat with the environment key', 'openai.chat with the environment key'];
-
-const CASES = ADAPTERS.flatMap(({ name, ok, shapes }) =>
-  shapes.flatMap(([shape, call]) =>
-    KEYS.map(([keyName, key]) => {
-      const title = `${name}.${shape} with ${keyName}`;
+const CASES = ADAPTERS.flatMap(({ name, sdkPath, ok, shapes, fullRows }) =>
+  Object.entries(shapes).flatMap(([shape, call]) =>
+    Object.entries(KEYS).map(([keyId, [keyName, key]]) => {
       const site: Site = {
         call,
         key,
@@ -125,7 +149,12 @@ const CASES = ADAPTERS.flatMap(({ name, ok, shapes }) =>
         text: 'ok',
         timeoutMs: OpenAI.DEFAULT_TIMEOUT,
       };
-      return { title, site, path: PATHS.includes(title) };
+      return {
+        title: `${name}.${shape} with ${keyName}`,
+        sdkPath,
+        site,
+        fullRows: shape === fullRows?.shape && keyId === fullRows.key,
+      };
     })
   )
 );
@@ -147,7 +176,15 @@ beforeEach(() => {
   for (const { keyEnv } of ADAPTERS) process.env[keyEnv] = 'environment-key';
 });
 
-describe.each(CASES)('$title: the library retry policy is the only one', ({ site, path }) => {
-  if (path) pathRows(site, { recoversFrom: [504] });
+it('the policy allows at least one retry, so no count the rows make is vacuous', () => {
+  expect(RETRY_BACKOFFS_MS.length).toBeGreaterThan(0);
+});
+
+it.each(SDK_PATHS)('the %s SDK path has exactly one full-row site', (sdkPath) => {
+  expect(CASES.filter((c) => c.sdkPath === sdkPath && c.fullRows)).toHaveLength(1);
+});
+
+describe.each(CASES)('$title: the library retry policy is the only one', ({ site, fullRows }) => {
+  if (fullRows) pathRows(site, { recoversFrom: [504] });
   else siteRows(site);
 });
