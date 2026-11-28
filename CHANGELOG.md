@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.48.0] — 2026-11-28
 
 **`@verevoir/llm/vertex` can be pointed at another address and given a fixed access token, so that no Google Cloud credential is looked for.** For a caller who sets neither variable nothing changes: the client is built with the options it was built with before this version.
 
