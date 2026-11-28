@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.47.1] — 2026-11-28
+
+**The `/claude-cli` idle-timeout tests start one silent child for the four tests of its rejection and its kill, and a test asserts that a prompt completion leaves no idle timer pending.** Only `src/claude-cli/chat.idle-timeout.test.ts` changes; no behaviour of the library changes. The two precedence tests start silent children of their own, as they did.
+
+- **One silent child, started once, for two tests.** The three tests of the rejection's message, code and `timeoutMs`, and the test that the child is killed, each started a child and waited out the idle timeout. A `beforeAll` starts one child, keeps its rejection, polls until its process is gone, and puts back everything it set. One test compares `{ message, code, timeoutMs }` in one `toEqual`, whose diff names the field that broke; the other asserts the process was gone.
+- **A prompt completion leaves no idle timer pending.** In place of a test that waited after a clean close, a test fakes `setTimeout` and `clearTimeout` around a real stub child and asserts `vi.getTimerCount()` is `0` once `chat()` resolves.
+- **The file's clean-up puts back only what was set.** `PATH` is restored where a stub was written and the idle override where one was set; a test that sets neither leaves both as the runner gave them.
+
 ## [0.47.0] — 2026-11-28
 
 **The OpenTelemetry span's `gen_ai.provider.name` is now the conventions' well-known value wherever one applies.** The registry at `semantic-conventions-genai` v0.1.0 says that if one of its values applies, it MUST be used. Only the span changes: the `provider` on what `chat()`, `chatWithTools` and `chatWithToolLoop` return, which pricing and routing key on, is unchanged on every adapter, as is the `ModelSpan` given to `setModelSpanSink`.

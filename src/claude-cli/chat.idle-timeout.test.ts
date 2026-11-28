@@ -10,7 +10,7 @@
 import { mkdtempSync, writeFileSync, chmodSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { chat, CLAUDE_CLI_IDLE_TIMEOUT_CODE } from './index.js';
 
@@ -25,6 +25,7 @@ describe('claudeCli idle timeout (real subprocess, no mocked spawn)', () => {
   let stubDir: string | undefined;
   let originalPath: string | undefined;
   let originalIdleOverride: string | undefined;
+  let idleOverrideSet = false;
   let pidFileToClean: string | undefined;
 
   function writeStubClaude(script: string): void {
@@ -38,24 +39,30 @@ describe('claudeCli idle timeout (real subprocess, no mocked spawn)', () => {
 
   function setIdleOverride(ms: string): void {
     originalIdleOverride = process.env.CLAUDE_CLI_IDLE_TIMEOUT_MS;
+    idleOverrideSet = true;
     process.env.CLAUDE_CLI_IDLE_TIMEOUT_MS = ms;
   }
 
-  afterEach(() => {
-    if (originalPath !== undefined) process.env.PATH = originalPath;
-    else delete process.env.PATH;
-    if (stubDir !== undefined) rmSync(stubDir, { recursive: true, force: true });
-    stubDir = undefined;
-    originalPath = undefined;
-    if (originalIdleOverride === undefined) delete process.env.CLAUDE_CLI_IDLE_TIMEOUT_MS;
-    else process.env.CLAUDE_CLI_IDLE_TIMEOUT_MS = originalIdleOverride;
-    originalIdleOverride = undefined;
+  /** Puts back what a test or a fixture set, and only that: `PATH` where a stub
+   * was written, the idle override where one was set, and a stub child's
+   * process and pid file where one was started. Safe to call twice. */
+  function restore(): void {
+    if (stubDir !== undefined) {
+      if (originalPath !== undefined) process.env.PATH = originalPath;
+      else delete process.env.PATH;
+      rmSync(stubDir, { recursive: true, force: true });
+      stubDir = undefined;
+      originalPath = undefined;
+    }
+    if (idleOverrideSet) {
+      if (originalIdleOverride === undefined) delete process.env.CLAUDE_CLI_IDLE_TIMEOUT_MS;
+      else process.env.CLAUDE_CLI_IDLE_TIMEOUT_MS = originalIdleOverride;
+      originalIdleOverride = undefined;
+      idleOverrideSet = false;
+    }
     if (pidFileToClean !== undefined) {
-      // If a test failed with the stub child still alive, do not leave it
-      // running on the runner. A child that is already gone makes kill()
-      // throw ESRCH, which is the normal case and is ignored. (A pid
-      // recycled to an unrelated process within the test's few seconds is
-      // theoretically possible and not guarded against.)
+      // A stub child left alive must not stay on the runner. One already gone
+      // makes kill() throw ESRCH, the normal case, which is ignored.
       try {
         process.kill(Number(readFileSync(pidFileToClean, 'utf8')), 'SIGKILL');
       } catch {
@@ -64,11 +71,12 @@ describe('claudeCli idle timeout (real subprocess, no mocked spawn)', () => {
       rmSync(pidFileToClean, { force: true });
       pidFileToClean = undefined;
     }
-  });
+  }
+
+  afterEach(restore);
 
   /** Runs chat() against a stub that records its pid and then stays silent
-   * forever, and returns the idle-timeout rejection. Shared by the four
-   * tests below so each asserts one thing. */
+   * forever, and returns the idle-timeout rejection and the pid file. */
   async function rejectionFromSilentChild(): Promise<{
     error: Error & { code?: string; timeoutMs?: number };
     pidFile: string;
@@ -104,53 +112,64 @@ describe('claudeCli idle timeout (real subprocess, no mocked spawn)', () => {
     return { error: error as Error & { code?: string; timeoutMs?: number }, pidFile };
   }
 
-  it('a silent child is rejected with a generic (non-reviewer) message naming the gap', async () => {
-    // Generic, llm-level wording — this is @verevoir/llm, not a reviewer;
-    // a caller (e.g. @verevoir/review) maps this onto its own could-not-run
-    // outcome in its own layer, not this one's.
-    const { error } = await rejectionFromSilentChild();
-    expect(error.message).toBe('claude CLI produced no output for 2000ms');
-  }, 10_000);
+  describe('a silent child', () => {
+    /** How often the fixture looks for the child's process. It only sets how
+     * soon a kill is seen: a longer interval delays the fixture by up to one
+     * interval, a shorter one spends more turns of the loop. */
+    const POLL_MS = 25;
+    /** The longest the fixture waits for the process to be gone. The stub has
+     * no SIGTERM handler, so the idle timeout's SIGTERM ends it at once; this
+     * bounds only a real failure, a child that is never killed. Too short and
+     * a slow exit reads as "still alive"; too long only delays that failure. */
+    const GONE_WITHIN_MS = 5000;
+    /** The stub's 2000ms idle budget, the wait above, and 3000ms for the stub
+     * to start and the rejection to arrive. */
+    const FIXTURE_TIMEOUT_MS = 2000 + GONE_WITHIN_MS + 3000;
 
-  it('a silent child is rejected with the named idle-timeout code', async () => {
-    const { error } = await rejectionFromSilentChild();
-    expect(error.code).toBe(CLAUDE_CLI_IDLE_TIMEOUT_CODE);
-  }, 10_000);
+    let error: Error & { code?: string; timeoutMs?: number };
+    let gone: boolean;
 
-  it('a silent child is rejected with the structural timeoutMs', async () => {
-    const { error } = await rejectionFromSilentChild();
-    expect(error.timeoutMs).toBe(2000);
-  }, 10_000);
-
-  it('a silent child is genuinely killed, not merely abandoned', async () => {
-    const { pidFile } = await rejectionFromSilentChild();
-    // The pid file can only be read, not waited for: the idle timer starts
-    // at spawn, so a readiness wait cannot stop the child being killed
-    // BEFORE it writes the file (the ENOENT this test used to hit). The
-    // 2000ms budget is the margin against that, not a guarantee: if the
-    // stub's startup ever exceeds it, the read below throws ENOENT and the
-    // test fails loudly rather than passing without evidence.
-    const pid = Number(readFileSync(pidFile, 'utf8'));
-    const isAlive = (): boolean => {
+    // Both facts are taken, and everything the fixture set is put back, before
+    // either test runs: `restore` kills a stub left alive, so it runs last.
+    beforeAll(async () => {
       try {
-        process.kill(pid, 0);
-        return true;
-      } catch {
-        return false;
+        const rejected = await rejectionFromSilentChild();
+        error = rejected.error;
+        // The pid file is read, not waited for: the 2000ms budget is the stub's
+        // margin to write it. A slower start throws ENOENT and fails the fixture.
+        const pid = Number(readFileSync(rejected.pidFile, 'utf8'));
+        const isAlive = (): boolean => {
+          try {
+            process.kill(pid, 0);
+            return true;
+          } catch {
+            return false;
+          }
+        };
+        const deadline = Date.now() + GONE_WITHIN_MS;
+        while (isAlive() && Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, POLL_MS));
+        }
+        gone = !isAlive();
+      } finally {
+        restore();
       }
-    };
-    // Confirm the process is genuinely gone, not merely abandoned to finish
-    // in the background. Poll rather than sleep a fixed time: the loop ends
-    // the moment the process is gone, and the 5s cap only bounds a real
-    // failure (a process that is never killed). A fixed wait that is too
-    // short fails this assertion spuriously, so it fails in the direction
-    // of a false "still alive"; polling removes that direction.
-    const deadline = Date.now() + 5000;
-    while (isAlive() && Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
-    expect(isAlive()).toBe(false);
-  }, 10_000);
+    }, FIXTURE_TIMEOUT_MS);
+
+    it('is rejected with the generic message, the named code and the budget', () => {
+      // Generic, llm-level wording: a caller (e.g. @verevoir/review) maps
+      // this onto its own could-not-run outcome in its own layer.
+      expect({ message: error.message, code: error.code, timeoutMs: error.timeoutMs }).toEqual({
+        message: 'claude CLI produced no output for 2000ms',
+        code: CLAUDE_CLI_IDLE_TIMEOUT_CODE,
+        timeoutMs: 2000,
+      });
+    });
+
+    it('is killed, not left to finish in the background', () => {
+      expect(gone).toBe(true);
+    });
+  });
 
   it('a per-call idleTimeoutMs wins over the env override — precedence, not just presence (audit item 2: real threading, not merely a parameter that exists)', async () => {
     // The env var is set to a LONG budget; the per-call option is short.
@@ -244,7 +263,7 @@ describe('claudeCli idle timeout (real subprocess, no mocked spawn)', () => {
     expect(reply.content).toBe('ok');
   }, 10_000);
 
-  it('a normal, prompt completion resolves and leaves nothing pending (the timer is cleared, not merely outrun)', async () => {
+  it('a prompt completion resolves and leaves no idle timer pending', async () => {
     setIdleOverride('2000');
     writeStubClaude(
       `process.stdout.write(${JSON.stringify(INIT_LINE)});\n` +
@@ -252,18 +271,14 @@ describe('claudeCli idle timeout (real subprocess, no mocked spawn)', () => {
         `process.exit(0);\n`
     );
 
-    const reply = await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] });
-    expect(reply.content).toBe('done');
-
-    // If `finish()` ever stopped clearing the idle timer on a clean close,
-    // an unref'd timer wouldn't hang the process — but it WOULD still fire
-    // later and call child.kill() on an already-exited child. Budget
-    // widened from an earlier 500ms (observed too tight for the stubbed
-    // process's own startup latency under load, same root cause as the
-    // periodic-writer test above) to 2000ms; this wait (2500ms) stays
-    // comfortably PAST that widened budget, so a stray fire would still
-    // be caught here — asserting nothing throws / no unhandled rejection
-    // appears is the direct proof that didn't happen.
-    await new Promise((resolve) => setTimeout(resolve, 2500));
-  }, 6_000);
+    // Only the timer functions are faked: the child's I/O runs for real.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const reply = await chat({ systemPrompt: 'sys', turns: [{ role: 'user', content: 'q' }] });
+      expect(reply.content).toBe('done');
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
