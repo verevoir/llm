@@ -11,9 +11,13 @@
  * wait, the SDK's request timeout included, runs on fake timers.
  *
  * Two SDK paths are here: the direct `Anthropic` client and `AnthropicVertex`.
- * One site of each runs every row of the shared driver, the stream failures
- * with them; every other credential route and call shape runs the rows a site
- * can break on its own.
+ * The full-row site of each, marked by `fullRows` on its route, runs every row
+ * of the shared driver, all the stream failures with them: every call shape
+ * consumes its stream through one function (`callStreamed` in
+ * `./anthropic/adapter.ts`), so a stream failure is classified per path. Every
+ * other credential route and call shape runs the rows a site can break on its
+ * own, with a stream that fails part-way with a retried error among them, and
+ * every site answers with the retry alone after a stream that failed part-way.
  *
  * The Vertex client is the real one, built by `./vertex/client.ts` with the
  * options that module gives it. Only its credential is replaced: the module
@@ -158,84 +162,81 @@ const TOOL: ToolDef = {
   input_schema: { type: 'object', properties: {} },
 };
 
+type Shape = 'chat' | 'chatWithTools' | 'chatWithToolLoop';
+
 /** The three call shapes of an adapter built on the shared implementation. */
-const shapes = (a: typeof anthropic | typeof vertex): [string, Call][] => [
-  ['chat', async (extra) => (await a.chat({ ...BASE, ...extra })).content],
-  [
-    'chatWithTools',
-    async (extra) => (await a.chatWithTools({ ...BASE, ...extra, tools: [TOOL] })).text,
-  ],
-  [
-    'chatWithToolLoop',
-    async (extra) =>
-      (
-        await a.chatWithToolLoop({
-          ...BASE,
-          ...extra,
-          tools: [TOOL],
-          executor: async () => 'looked up',
-        })
-      ).text,
-  ],
-];
+const shapes = (a: typeof anthropic | typeof vertex): Record<Shape, Call> => ({
+  chat: async (extra) => (await a.chat({ ...BASE, ...extra })).content,
+  chatWithTools: async (extra) =>
+    (await a.chatWithTools({ ...BASE, ...extra, tools: [TOOL] })).text,
+  chatWithToolLoop: async (extra) =>
+    (
+      await a.chatWithToolLoop({
+        ...BASE,
+        ...extra,
+        tools: [TOOL],
+        executor: async () => 'looked up',
+      })
+    ).text,
+});
+
+/** The SDK paths here: the direct `Anthropic` client, and `AnthropicVertex`. */
+const SDK_PATHS = ['Anthropic', 'AnthropicVertex'] as const;
 
 /** Every way a client is built. The direct route builds one per call for a
  * per-call key and keeps one for the environment's credential, which is an
- * API key or a subscription token; the Vertex route keeps one. */
+ * API key or a subscription token; the Vertex route keeps one. `fullRows`
+ * names the call shape that is its SDK path's full-row site. */
 const ROUTES: {
   name: string;
+  sdkPath: (typeof SDK_PATHS)[number];
   env: Record<string, string>;
   key: Extra;
   adapter: typeof anthropic | typeof vertex;
-  shapes: [string, Call][];
+  fullRows?: Shape;
 }[] = [
   {
     name: 'anthropic',
+    sdkPath: 'Anthropic',
     env: {},
     key: { apiKey: 'per-call-key' },
     adapter: anthropic,
-    shapes: shapes(anthropic),
   },
   {
     name: 'anthropic',
+    sdkPath: 'Anthropic',
     env: { ANTHROPIC_API_KEY: 'environment-key' },
     key: {},
     adapter: anthropic,
-    shapes: shapes(anthropic),
+    fullRows: 'chat',
   },
   {
     name: 'anthropic',
+    sdkPath: 'Anthropic',
     env: { CLAUDE_CODE_OAUTH_TOKEN: 'environment-token' },
     key: {},
     adapter: anthropic,
-    shapes: shapes(anthropic),
   },
   {
     name: 'vertex',
+    sdkPath: 'AnthropicVertex',
     env: { ANTHROPIC_VERTEX_PROJECT_ID: 'proj', CLOUD_ML_REGION: 'region' },
     key: {},
     adapter: vertex,
-    shapes: shapes(vertex),
+    fullRows: 'chat',
   },
 ];
 
 const credentialOf = (env: Record<string, string>, key: Extra): string =>
   key.apiKey ? 'a per-call key' : `${Object.keys(env).join(' and ')} set`;
 
-/** The site that stands for each SDK path: the direct route, and Vertex. */
-const PATHS = [
-  'anthropic.chat with ANTHROPIC_API_KEY set',
-  'vertex.chat with ANTHROPIC_VERTEX_PROJECT_ID and CLOUD_ML_REGION set',
-];
-
 const typeOf = (error: unknown) => (error as { type?: unknown }).type;
 
 const refusal = (status: number, headers?: Record<string, string>): Response =>
   json({ type: 'error', error: { type: 'refused_error', message: 'refused' } }, status, headers);
 
-const CASES = ROUTES.flatMap(({ name, env, key, shapes: routeShapes }) =>
-  routeShapes.map(([shape, call]) => {
-    const title = `${name}.${shape} with ${credentialOf(env, key)}`;
+const CASES = ROUTES.flatMap(({ name, sdkPath, env, key, adapter, fullRows }) =>
+  Object.entries(shapes(adapter)).map(([shape, call]) => {
     const site: Site = {
       call,
       key,
@@ -244,7 +245,13 @@ const CASES = ROUTES.flatMap(({ name, env, key, shapes: routeShapes }) =>
       text: ANSWER,
       timeoutMs: Anthropic.DEFAULT_TIMEOUT,
     };
-    return { title, env, site, path: PATHS.includes(title) };
+    return {
+      title: `${name}.${shape} with ${credentialOf(env, key)}`,
+      sdkPath,
+      env,
+      site,
+      fullRows: shape === fullRows,
+    };
   })
 );
 
@@ -296,35 +303,45 @@ const STREAM_NOT_RETRIED: Row[] = [
   ],
 ];
 
-describe.each(CASES)('$title: the library retry policy is the only one', ({ env, site, path }) => {
-  beforeEach(() => {
-    Object.assign(process.env, env);
-  });
-
-  if (!path) {
-    siteRows(site);
-    return;
-  }
-
-  pathRows(site, {
-    retried: STREAM_RETRIED,
-    notRetried: STREAM_NOT_RETRIED,
-    recoversFrom: [529],
-  });
-
-  it('answers with the retry alone when the first stream delivered part of an answer and then failed', async () => {
-    fetchMock.mockImplementation(async () => answered(ANSWER));
-    fetchMock.mockImplementationOnce(async () => failedPartWay(PARTIAL, 'overloaded_error'));
-
-    const { resolved, text, retries } = await run(site.call, site.key);
-
-    expect(resolved).toBe(true);
-    expect(text).toBe(ANSWER);
-    expect(text).not.toContain(PARTIAL);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(retries.map((r) => [r.attempt, r.delayMs])).toEqual([[1, RETRY_BACKOFFS_MS[0]]]);
-  });
+it('the policy allows at least one retry, so no count the rows make is vacuous', () => {
+  expect(RETRY_BACKOFFS_MS.length).toBeGreaterThan(0);
 });
+
+it.each(SDK_PATHS)('the %s SDK path has exactly one full-row site', (sdkPath) => {
+  expect(CASES.filter((c) => c.sdkPath === sdkPath && c.fullRows)).toHaveLength(1);
+});
+
+describe.each(CASES)(
+  '$title: the library retry policy is the only one',
+  ({ env, site, fullRows }) => {
+    beforeEach(() => {
+      Object.assign(process.env, env);
+    });
+
+    if (fullRows) {
+      pathRows(site, {
+        retried: STREAM_RETRIED,
+        notRetried: STREAM_NOT_RETRIED,
+        recoversFrom: [529],
+      });
+    } else {
+      siteRows(site, { retried: [STREAM_RETRIED[0]] });
+    }
+
+    it('answers with the retry alone when the first stream delivered part of an answer and then failed', async () => {
+      fetchMock.mockImplementation(async () => answered(ANSWER));
+      fetchMock.mockImplementationOnce(async () => failedPartWay(PARTIAL, 'overloaded_error'));
+
+      const { resolved, text, retries } = await run(site.call, site.key);
+
+      expect(resolved).toBe(true);
+      expect(text).toBe(ANSWER);
+      expect(text).not.toContain(PARTIAL);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(retries.map((r) => [r.attempt, r.delayMs])).toEqual([[1, RETRY_BACKOFFS_MS[0]]]);
+    });
+  }
+);
 
 /** The body of the request `fetch` was given on its `n`th call, from 1. */
 const bodyOf = (n: number): Record<string, unknown> =>
@@ -392,7 +409,7 @@ describe('the real clients these counts are taken through', () => {
     Object.assign(process.env, { ANTHROPIC_VERTEX_PROJECT_ID: 'proj', CLOUD_ML_REGION: 'region' });
     fetchMock.mockImplementation(async () => answered(ANSWER));
 
-    await run(shapes(vertex)[0][1], {});
+    await run(shapes(vertex).chat, {});
 
     expect(vertexOptions).toEqual([{ projectId: 'proj', region: 'region', maxRetries: 0 }]);
     const [url, init] = fetchMock.mock.calls[0];
@@ -406,7 +423,7 @@ describe('the real clients these counts are taken through', () => {
     process.env.ANTHROPIC_API_KEY = 'environment-key';
     fetchMock.mockImplementation(async () => answered(ANSWER));
 
-    await run(shapes(anthropic)[0][1], {});
+    await run(shapes(anthropic).chat, {});
 
     expect(String(fetchMock.mock.calls[0][0])).toBe('https://api.anthropic.com/v1/messages');
   });
@@ -480,7 +497,7 @@ describe('the real clients these counts are taken through', () => {
       json({ type: 'error', error: { type: 'authentication_error', message: 'no' } }, 401)
     );
 
-    const { resolved, text, retries } = await run(shapes(anthropic)[0][1], {});
+    const { resolved, text, retries } = await run(shapes(anthropic).chat, {});
     stderr.mockRestore();
 
     expect(resolved).toBe(true);
@@ -489,7 +506,7 @@ describe('the real clients these counts are taken through', () => {
     expect(retries).toEqual([]);
   });
 
-  it.each(shapes(anthropic))(
+  it.each(Object.entries(shapes(anthropic)))(
     "%s: an abort of the caller's signal during a wait of the call made on the metered key, after a subscription token is rejected with a 401, ends the call at once with the signal's reason, and no further request is sent",
     async (_shape, call) => {
       process.env.CLAUDE_CODE_OAUTH_TOKEN = 'environment-token';

@@ -2,18 +2,37 @@
 
 ## [Unreleased]
 
-**The single-retry suites run each retry fact at the layer that can break it, so one mistake fails a few tests rather than dozens.** Only the tests change: no behaviour of the library changed, and nothing it exports or publishes is different.
-
-- **One fetch driver.** `src/test-support/fetch-driver.ts` holds the fake `fetch`, the failures it produces (`refusal`, `failToConnect`, `neverAnswer`), `run`, and the two sets of rows both `anthropic-sdk-single-retry.test.ts` and `openai-sdk-single-retry.test.ts` run. Its directory is left out of the build (`tsconfig.build.json`), so nothing in it is published.
-- **Every status row once per SDK path.** The retried and not-retried statuses, `x-should-retry`, the stream failures, the request timeout and the abort during each wait run on one site of each of four paths: the direct Anthropic client, Vertex, the OpenAI-compatible factory over Chat Completions, and `/openai` over the Responses API. Each SDK builds every error it throws in one place, whichever client or call shape sent the request.
-- **Five rows on every other site.** Each client-building site and call shape runs "a 503 answered every time", "meets a 429 and then succeeds", the request timeout, the abort during wait 1, and the abort before the call: the faults one site can have on its own (its SDK's retries left on, the policy left out, a timeout of its own, the caller's signal left out).
-- **Removed:** "retries on a 429 then succeeds" from `deepseek/chat.test.ts` and `openai/chat.test.ts`. The single-retry suite's rows for those adapters fail on the same fault. Google's keeps its own, as `/google` has a retry loop of its own.
-
 **Each provider SDK has one fake, which every test of it mocks the module with.** Only the tests change: no behaviour of the library changed, nothing it exports or publishes is different, and the suite runs the same 1,759 tests.
 
 - **One module per SDK shape, in `src/test-support/`.** `anthropic-sdk.ts` (the client, `messageStream`, `streamOf`, `failingStream`), `anthropic-vertex-sdk.ts`, `openai-sdk.ts` (one client for both APIs; `completion`, `textCompletion`, `toolCallCompletion` for Chat Completions and `response` for the Responses API), `google-genai.ts` (`geminiReply`) and `claude-child.ts` (`spawn`, `fakeClaudeChild`, `queueClaudeOutput`). A test mocks the SDK with its module, as in `vi.mock('openai', () => import('../test-support/openai-sdk.js'))`, and imports the same module to script it.
 - **What one file needs stays a parameter.** The `id` and `model` a span reads (`vertex/index`, `span-usage`, `stop-kind`), the zero-token defaults of `deepseek/chat`, `openai/chat` and `google/chat`, the output count of the tool loop's last reply (`openai-compat.tools`), and the `vertexai` the Google client reports (`google/chat`).
 - **Left as they are:** the wire bodies `vertex-openai/index` and the single-retry suites send through the real SDKs over `fetch`, which no module mock reaches, and the one `stdin` that emits `EPIPE` in `claude-cli/chat`.
+
+## [0.47.3] — 2026-11-28
+
+**The single-retry suites run each retry fact at the layer that can break it, so one mistake fails a few tests rather than dozens.** Only tests, `src/test-support/` and the build's exclude list change: the package's code is the same as 0.47.2's; its version and changelog are not.
+
+- **One fetch driver.** `src/test-support/fetch-driver.ts` holds the fake `fetch`, the failures it produces, `run`, and the two sets of rows both `anthropic-sdk-single-retry.test.ts` and `openai-sdk-single-retry.test.ts` run; it exports only what those two suites import. `run` gives a call at most `MAX_CLOCK_ROUNDS` rounds of the fake clock, and fails one that neither settles nor starts a timer with a message saying so. Its directory is left out of the build (`tsconfig.build.json`), so nothing in it is published.
+- **Every status row once per SDK path.** The retried and not-retried statuses, `x-should-retry`, the connection failure, the request timeout and the abort during each wait run on the full-row site of each of four paths: the direct Anthropic client, Vertex, the OpenAI-compatible factory over Chat Completions, and `/openai` over the Responses API. A status error is built in one method of each SDK's client, `makeStatusError` in `@anthropic-ai/sdk`'s and in `openai`'s `client.js`, whichever call shape sent the request; `AnthropicVertex` extends the Anthropic client and defines none of its own. The full-row site is marked by a `fullRows` member on its own route or adapter, and each suite has a test that each of its SDK paths has exactly one.
+- **The stream failures on the two Anthropic paths only.** Every row of `STREAM_RETRIED` and `STREAM_NOT_RETRIED` runs on the direct Anthropic and the Vertex full-row sites: every call shape consumes its stream through one function, `callStreamed` in `src/anthropic/adapter.ts`, so a stream failure is classified per path.
+- **What every site keeps.** Each client-building site and call shape runs "a 503 answered every time", "meets a 429 and then succeeds", the request timeout, the abort during wait 1, and the abort before the call: the faults one site can have on its own (its SDK's retries left on, the policy left out, a timeout of its own, the caller's signal left out). Each Anthropic and Vertex site and call shape also runs "a stream that fails part-way with `overloaded_error`" sent once and once per retry, so a shape that stops retrying a stream fails on its own, and "answers with the retry alone when the first stream delivered part of an answer and then failed", as keeping a failed stream's partial text is a fault one call shape can have alone.
+- **Kept:** each suite's test that the policy allows at least one retry, which reads `RETRY_BACKOFFS_MS`. Over a policy that allows none, the driver gives each site one failing test, naming that cause, in place of its rows.
+- **Removed:** "retries on a 429 then succeeds" from `deepseek/chat.test.ts` and `openai/chat.test.ts`. The single-retry suite's rows for those adapters fail on the same fault. Google's keeps its own, as `/google` has a retry loop of its own.
+
+## [0.47.2] — 2026-11-28
+
+**The `/claude-cli` reported-cost tests are one table.** It lives in `src/claude-cli/chat.session.test.ts`, beside the span-usage rows, and runs six kinds of `total_cost_usd` (finite, JSON `-0`, missing, malformed, negative and the `1e999` overflow) on each of the four call paths: one-shot `chat()`, `chat()` on a held session, and `chatWithToolLoop` with and without a held session. Each row compares, in one `toStrictEqual`, the returned `costUsdReported` and `costUsdReportedInvalidType`, the span's two cost attributes and the four returned counts, so a key set to `undefined` fails just as a wrong value does. No behaviour of the library changes.
+
+- **Replaced**: the `costUsdReported` block in `chat.test.ts` (33 tests) and the cost tests in `chat.session.test.ts` (4 span tests and 46 in "costUsdReported on a held session"), 83 tests in all, by the table's 24 rows, each named for what it holds ("a negative cost is not relayed, and is recorded as negative").
+- **Where each fault is caught**: classifying a value (every malformed type, `NaN`, `-Infinity`) stays in `cost.test.ts`. The table catches each call path's wiring, the span's cost attributes, keys left out rather than set to `undefined`, the `-0` normalisation and the overflow. `-0` and the overflow are values only parsing JSON yields: the one-shot path parses the child's own output, and the held-session rows are given the value already parsed.
+
+## [0.47.1] — 2026-11-28
+
+**The `/claude-cli` idle-timeout tests start one silent child for the four tests of its rejection and its kill, and a test asserts that a prompt completion leaves no idle timer pending.** Only `src/claude-cli/chat.idle-timeout.test.ts` changes; no behaviour of the library changes. The two precedence tests start silent children of their own, as they did.
+
+- **One silent child, started once, for two tests.** The three tests of the rejection's message, code and `timeoutMs`, and the test that the child is killed, each started a child and waited out the idle timeout. A `beforeAll` starts one child, keeps its rejection, polls until its process is gone, and puts back everything it set. One test compares `{ message, code, timeoutMs }` in one `toEqual`, whose diff names the field that broke; the other asserts the process was gone.
+- **A prompt completion leaves no idle timer pending.** In place of a test that waited after a clean close, a test fakes `setTimeout` and `clearTimeout` around a real stub child and asserts `vi.getTimerCount()` is `0` once `chat()` resolves.
+- **The file's clean-up puts back only what was set.** `PATH` is restored where a stub was written and the idle override where one was set; a test that sets neither leaves both as the runner gave them.
 
 ## [0.47.0] — 2026-11-28
 
