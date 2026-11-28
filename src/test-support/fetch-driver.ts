@@ -6,12 +6,23 @@
  * request timeout included, runs on fake timers.
  *
  * There are two sets of rows. `pathRows` holds every failure the policy tells
- * apart, and runs once per SDK path: each SDK's client builds a status error
- * in one method (`makeStatusError`), whichever call shape the request came from. `siteRows`
- * holds the rows that catch what one client-building site or call shape can
- * get wrong on its own: the SDK's retries left on (the 503 row), the policy
- * left out (the 429 row), its own request timeout (the timeout row), and the
- * caller's signal left out (the two abort rows).
+ * apart, and runs on one site per SDK path, the site whose definition marks it
+ * as its path's full-row site: each SDK's client builds a status error in one
+ * method (`makeStatusError`), whichever call shape the request came from. A
+ * suite hands `pathRows` the failures only its path meets; the Anthropic suite
+ * hands it the stream failures, whose classification is per path because
+ * every Anthropic call shape consumes its stream through one function,
+ * `callStreamed` in `src/anthropic/adapter.ts`. `siteRows` holds the rows that
+ * catch what one client-building site or call shape can get wrong on its own:
+ * the SDK's retries left on (the 503 row), the policy left out (the 429 row),
+ * its own request timeout (the timeout row), and the caller's signal left out
+ * (the two abort rows); a suite adds the retried failures of its own that one
+ * site can fail alone, as the Anthropic suite adds a stream that fails
+ * part-way with a retried error, which is sent again.
+ *
+ * Every count the rows make holds only if the policy allows a retry: over a
+ * policy that allows none, each site gets one failing test naming that cause
+ * in place of its rows.
  *
  * The build leaves this directory out (`tsconfig.build.json`), so nothing here
  * is published.
@@ -35,7 +46,7 @@ export const json = (
   });
 
 /** `fetch` rejects, as it does when no connection can be made. */
-export function failToConnect(): void {
+function failToConnect(): void {
   fetchMock.mockImplementation(async () => {
     throw new TypeError('fetch failed');
   });
@@ -43,7 +54,7 @@ export function failToConnect(): void {
 
 /** `fetch` never answers. It rejects only when the SDK aborts the request,
  * which the SDK does when its own request timeout runs out. */
-export function neverAnswer(): void {
+function neverAnswer(): void {
   fetchMock.mockImplementation(
     (_url, init) =>
       new Promise<Response>((_resolve, reject) => {
@@ -100,12 +111,25 @@ export type Extra = {
 /** Make a call of one shape, and give back the text it answered with. */
 export type Call = (extra: Extra) => Promise<string>;
 
-export interface Outcome {
+interface Outcome {
   resolved: boolean;
   text?: string;
   error?: unknown;
   retries: ChatRetryInfo[];
 }
+
+/**
+ * The most rounds of the fake clock `run` gives a call before it fails. A
+ * round runs every timer pending, and a call takes another round only when it
+ * starts a wait or settles after the round's timers ran out. Every call the
+ * two suites make settles in one round; ten leaves room for a call that
+ * starts a wait from a callback after its round ended. It protects against a
+ * call that never settles and starts no timer, which would otherwise spin
+ * until the runner's timeout. A figure too low would fail a call that does
+ * settle after more rounds; a figure too high only delays the failure of one
+ * that never does.
+ */
+const MAX_CLOCK_ROUNDS = 10;
 
 /** Make the call, run every wait it starts on the fake clock, and say how it
  * ended and what `onRetry` was told. */
@@ -121,9 +145,14 @@ export async function run(call: Call, key: Extra): Promise<Outcome> {
     (text) => (outcome = { resolved: true, text, retries }),
     (error: unknown) => (outcome = { resolved: false, error, retries })
   );
-  do {
+  for (let round = 0; round < MAX_CLOCK_ROUNDS && !outcome; round++) {
     await vi.runAllTimersAsync();
-  } while (!outcome);
+  }
+  if (!outcome) {
+    throw new Error(
+      `the call neither settled nor scheduled a timer in ${MAX_CLOCK_ROUNDS} rounds of the fake clock`
+    );
+  }
   return outcome;
 }
 
@@ -131,7 +160,20 @@ export const statusOf = (error: unknown) => (error as { status?: number }).statu
 export const classOf = (error: unknown) => (error as Error).constructor.name;
 
 /** The retries the policy allows, from its own list of waits. */
-export const RETRIES = RETRY_BACKOFFS_MS.length;
+const RETRIES = RETRY_BACKOFFS_MS.length;
+
+/** Over a policy that allows no retry, every row's count would hold of a call
+ * that never retries: there, this registers one failing test naming that
+ * cause in place of the rows, and says the rows are not to be built. */
+function aRetryIsAllowed(): boolean {
+  if (RETRIES > 0) return true;
+  it('builds no rows over a policy that allows no retry', () => {
+    throw new Error(
+      'the retry policy allows no retry (RETRY_BACKOFFS_MS is empty), so every count these rows make would be vacuous'
+    );
+  });
+  return false;
+}
 
 export type Row = [name: string, arrange: () => void, thrown: (error: unknown) => void];
 
@@ -281,12 +323,13 @@ function itSendsNothingWhenAborted(site: Site): void {
   });
 }
 
-/** Every failure the policy tells apart, for the one site that stands for an
- * SDK path. `more` adds the failures only that path can meet. */
+/** Every failure the policy tells apart, for the full-row site of an SDK
+ * path. `more` adds the failures only that path can meet. */
 export function pathRows(
   site: Site,
   more: { retried?: Row[]; notRetried?: Row[]; recoversFrom?: number[] } = {}
 ): void {
+  if (!aRetryIsAllowed()) return;
   itRetries(site, [
     ...[408, 409, 429, 500, 502, 503, 504, 529].map((status) => refused(site, status)),
     CONNECTION_FAILURE,
@@ -318,9 +361,11 @@ export function pathRows(
   itSendsNothingWhenAborted(site);
 }
 
-/** The rows that catch what one site can get wrong on its own. */
-export function siteRows(site: Site): void {
-  itRetries(site, [refused(site, 503)]);
+/** The rows that catch what one site can get wrong on its own. `retried` adds
+ * the retried failures of the suite's own that one site can fail alone. */
+export function siteRows(site: Site, more: { retried?: Row[] } = {}): void {
+  if (!aRetryIsAllowed()) return;
+  itRetries(site, [refused(site, 503), ...(more.retried ?? [])]);
   itRecovers(site, [['a 429', () => site.refusal(429)]]);
   itTimesOut(site);
   itEndsOnAbort(site, [0]);
