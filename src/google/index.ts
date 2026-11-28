@@ -125,9 +125,9 @@ function getClient(apiKey: string | null): GoogleGenAI {
   return getDefaultClient();
 }
 
-/** The span's `gen_ai.provider.name` for a call on `client`. The SDK resolves
- * `vertexai` from `GOOGLE_GENAI_USE_VERTEXAI` / `GOOGLE_GENAI_USE_ENTERPRISE`
- * when the option is not given; a base address override does not change it. */
+/** The span's `gen_ai.provider.name` for a call on `client`: `gcp.vertex_ai`
+ * when its `vertexai` is true, as the SDK decides from its options and
+ * environment, else `gcp.gemini`. */
 function spanProviderOf(client: GoogleGenAI): string {
   return client.vertexai ? GEN_AI_PROVIDER_GCP_VERTEX_AI : GEN_AI_PROVIDER_GCP_GEMINI;
 }

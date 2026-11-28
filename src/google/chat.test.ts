@@ -11,8 +11,8 @@ import {
 // response shape.
 const mockGenerateContent = vi.fn();
 const mockClientCtor = vi.fn();
-// What the SDK's `vertexai` resolves to on the next client built: the option,
-// else `GOOGLE_GENAI_USE_VERTEXAI` / `GOOGLE_GENAI_USE_ENTERPRISE`.
+// The `vertexai` the fake client reports, as the SDK decides from its options
+// and environment.
 const sdk = vi.hoisted(() => ({ vertexai: false }));
 
 vi.mock('@google/genai', () => ({
@@ -372,12 +372,15 @@ describe('google — the span names the endpoint its client calls', () => {
 
       const returnedProvider = await run();
 
-      const spans = exporter.getFinishedSpans();
-      expect(spans.map((span) => span.attributes['gen_ai.provider.name'])).toEqual(
-        Array(calls).fill(spanProvider)
-      );
-      expect(returnedProvider).toBe('google');
-      expect(sunk.map((span) => span.provider)).toEqual(Array(calls).fill('google'));
+      expect({
+        span: exporter.getFinishedSpans().map((span) => span.attributes['gen_ai.provider.name']),
+        usage: returnedProvider,
+        sink: sunk.map((span) => span.provider),
+      }).toEqual({
+        span: Array(calls).fill(spanProvider),
+        usage: 'google',
+        sink: Array(calls).fill('google'),
+      });
     }
   );
 });

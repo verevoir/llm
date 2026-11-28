@@ -26,22 +26,7 @@
  * applies, which it says MUST then be used; otherwise a custom value. It is
  * the span's alone: the `provider` on `chat()`'s returned `TokenUsage`, which
  * pricing, routing and the model-span sink key on, is the library's own
- * adapter id and is not changed by it:
- *
- *   Adapter                 | Span's gen_ai.provider.name | Why
- *   ------------------------|-----------------------------|--------------------------------------
- *   /anthropic, /claude-cli | `anthropic`                 | Anthropic's API answers the call
- *   /vertex, /vertex-openai | `gcp.vertex_ai`             | The call is made to Vertex AI's
- *                           |                             |   endpoint, whichever model family
- *                           |                             |   answers
- *   /google                 | `gcp.vertex_ai` when its    | The endpoint its client calls: the
- *                           |   client calls Vertex AI,   |   SDK's `vertexai`, which
- *                           |   else `gcp.gemini`         |   GOOGLE_GENAI_USE_VERTEXAI can set
- *   /openai                 | `openai`                    | Well-known value
- *   /deepseek               | `deepseek`                  | Well-known value
- *   /mistral                | `mistral`                   | Well-known value
- *   /samba                  | `samba`                     | No well-known value applies: the
- *                           |                             |   library's own, a custom value
+ * adapter id. README.md's "Telemetry" has the adapter-to-value table.
  *
  * `gen_ai.usage.input_tokens` on the span is every input token of the call,
  * those read from and written to a provider cache included, as v0.1.0 says
@@ -125,22 +110,23 @@ export const ATTR_GEN_AI_USAGE_CACHE_WRITE_INPUT_TOKENS = 'gen_ai.usage.cache_wr
 export const ATTR_ERROR_TYPE = 'error.type';
 
 // ── `gen_ai.provider.name` values — the registry's well-known values at
-// semantic-conventions-genai v0.1.0 where one applies (see the header table).
+// semantic-conventions-genai v0.1.0 where one applies (README's "Telemetry").
 // Never the `provider` on a returned `TokenUsage`, which is the library's own.
 
 /** `/anthropic` and `/claude-cli`. */
 export const GEN_AI_PROVIDER_ANTHROPIC = 'anthropic';
-/** `/vertex`, `/vertex-openai`, and `/google` when its client calls Vertex AI:
+/** `/vertex`, `/vertex-openai`, and `/google` when its client's `vertexai` is true:
  * the endpoint called (`aiplatform.googleapis.com`), whatever model answers. */
 export const GEN_AI_PROVIDER_GCP_VERTEX_AI = 'gcp.vertex_ai';
-/** `/google` when its client calls AI Studio's endpoint
- * (`generativelanguage.googleapis.com`); `gcp.vertex_ai` when it calls Vertex AI. */
+/** `/google` when its client's `vertexai` is false, as the SDK decides from its
+ * options and environment; `gcp.vertex_ai` when it is true. */
 export const GEN_AI_PROVIDER_GCP_GEMINI = 'gcp.gemini';
 /** `/openai`. */
 export const GEN_AI_PROVIDER_OPENAI = 'openai';
 /** `/deepseek`. */
 export const GEN_AI_PROVIDER_DEEPSEEK = 'deepseek';
-/** `/mistral`. */
+/** `/mistral`: `mistral` at v0.1.0; the earlier `semantic-conventions`
+ * registry lists `mistral_ai`. */
 export const GEN_AI_PROVIDER_MISTRAL = 'mistral';
 /** `/samba`: no well-known value applies to SambaNova, so this is the
  * library's own, a custom value as the registry allows. */

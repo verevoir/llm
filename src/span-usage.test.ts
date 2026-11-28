@@ -328,6 +328,17 @@ const SITES: Site[] = [
         return a.chatWithTools({ ...base, tools: [TOOL] });
       },
     },
+    {
+      site: `${name}.chatWithToolLoop`,
+      shape: ANTHROPIC_SHAPE,
+      spanProvider,
+      usageProvider: name,
+      toleratesNoUsage: false,
+      run: (u) => {
+        stream.mockReturnValueOnce(anthropicReply(u));
+        return a.chatWithToolLoop({ ...base, tools: [TOOL], executor: async () => 'x' });
+      },
+    },
   ]),
   {
     site: 'claude-cli.chat (one-shot)',
@@ -414,6 +425,17 @@ const SITES: Site[] = [
       return google.chatWithTools({ ...KEYED, tools: [TOOL] });
     },
   },
+  {
+    site: 'google.chatWithToolLoop',
+    shape: GOOGLE_SHAPE,
+    spanProvider: 'gcp.gemini',
+    usageProvider: 'google',
+    toleratesNoUsage: true,
+    run: (u) => {
+      generateContent.mockResolvedValueOnce(googleReply(u));
+      return google.chatWithToolLoop({ ...KEYED, tools: [TOOL], executor: async () => 'x' });
+    },
+  },
   ...(
     [
       // `/vertex-openai` adds reasoning tokens that `total_tokens` shows
@@ -451,6 +473,18 @@ const SITES: Site[] = [
       run: (u) => {
         chatCompletionsCreate.mockResolvedValueOnce(completionReply(u));
         return a.chatWithTools({ ...base, tools: [TOOL] });
+      },
+    },
+    {
+      site: `${name}.chatWithToolLoop`,
+      shape: COMPAT_SHAPE,
+      spanProvider,
+      usageProvider: name,
+      toleratesNoUsage: true,
+      reasoningOnlyOutput,
+      run: (u) => {
+        chatCompletionsCreate.mockResolvedValueOnce(completionReply(u));
+        return a.chatWithToolLoop({ ...base, tools: [TOOL], executor: async () => 'x' });
       },
     },
   ]),
@@ -607,11 +641,15 @@ describe('every adapter — a usage count the provider gave no value for is unse
       try {
         const reply = await site.run(site.shape.wire(FULL));
 
-        expect(exporter.getFinishedSpans()[0].attributes[ATTR_GEN_AI_PROVIDER_NAME]).toBe(
-          site.spanProvider
-        );
-        expect(reply.usage.provider).toBe(site.usageProvider);
-        expect(sunk.map((span) => span.provider)).toEqual([site.usageProvider]);
+        expect({
+          span: exporter.getFinishedSpans().map((s) => s.attributes[ATTR_GEN_AI_PROVIDER_NAME]),
+          usage: reply.usage.provider,
+          sink: sunk.map((span) => span.provider),
+        }).toEqual({
+          span: [site.spanProvider],
+          usage: site.usageProvider,
+          sink: [site.usageProvider],
+        });
       } finally {
         setModelSpanSink(null);
       }
