@@ -44,6 +44,7 @@ describe('createOpenAICompatAdapter', () => {
   ];
   const a = createOpenAICompatAdapter({
     provider: 'testco',
+    spanProvider: 'testco',
     baseURL: 'https://x/v1',
     apiKeyEnv: 'TESTCO_KEY',
     catalog,
@@ -161,6 +162,7 @@ describe('createOpenAICompatAdapter', () => {
     expect(() =>
       createOpenAICompatAdapter({
         provider: 'p',
+        spanProvider: 'p',
         baseURL: 'u',
         apiKeyEnv: 'K',
         catalog: [{ provider: 'p', family: 'f', currentId: 'p-x', rates: [1, 1], label: 'X' }],
@@ -187,6 +189,7 @@ describe('cached-token usage — no double-count (STDIO-487)', () => {
   ];
   const adapter = createOpenAICompatAdapter({
     provider: 'cachetest',
+    spanProvider: 'cachetest',
     baseURL: 'https://x/v1',
     apiKeyEnv: 'CACHETEST_KEY',
     catalog: usageCatalog,

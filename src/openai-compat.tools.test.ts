@@ -29,6 +29,7 @@ const catalog: ModelCatalogEntry[] = [
 ];
 const a = createOpenAICompatAdapter({
   provider: 'tooltest',
+  spanProvider: 'tooltest',
   baseURL: 'https://x/v1',
   apiKeyEnv: 'TOOLTEST_KEY',
   catalog,

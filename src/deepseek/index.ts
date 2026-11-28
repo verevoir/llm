@@ -15,7 +15,7 @@
 
 import OpenAI from 'openai';
 import { fireUsageHook } from '../audit-hook.js';
-import { withGenAISpan } from '../otel.js';
+import { GEN_AI_PROVIDER_DEEPSEEK, withGenAISpan } from '../otel.js';
 import { callWithRetries, throwIfAborted } from '../retry-policy.js';
 import { finishReasonStopKind } from '../openai-compat.js';
 import {
@@ -155,7 +155,7 @@ async function callChatCompletionsCreate(
   systemPrompt: string,
   turns: ChatOptions['turns']
 ): Promise<RawResult> {
-  return withGenAISpan({ provider: PROVIDER, requestModel: modelId }, async () => {
+  return withGenAISpan({ provider: GEN_AI_PROVIDER_DEEPSEEK, requestModel: modelId }, async () => {
     // Chat Completions takes a single `messages` array with the system
     // prompt as the leading 'system' message. 'user' / 'assistant' roles
     // pass through unchanged.

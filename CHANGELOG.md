@@ -1,5 +1,23 @@
 # Changelog
 
+## [Unreleased]
+
+**The OpenTelemetry span's `gen_ai.provider.name` is now the conventions' well-known value wherever one applies.** The registry at `semantic-conventions-genai` v0.1.0 says that if one of its values applies, it MUST be used. Only the span changes: the `provider` on what `chat()`, `chatWithTools` and `chatWithToolLoop` return, which pricing and routing key on, is unchanged on every adapter, as is the `ModelSpan` given to `setModelSpanSink`.
+
+- **Action needed: three adapters' spans carry a new `gen_ai.provider.name`.** A dashboard, query or alert that filters on the old value must change to the new one:
+
+  | Adapter          | Was             | Now                                           |
+  | ---------------- | --------------- | --------------------------------------------- |
+  | `/vertex`        | `vertex`        | `gcp.vertex_ai`                               |
+  | `/vertex-openai` | `vertex-openai` | `gcp.vertex_ai`                               |
+  | `/google`        | `google`        | `gcp.gemini`, or `gcp.vertex_ai` on Vertex AI |
+
+  `/vertex` and `/vertex-openai` now share one value, the endpoint the call is made to (`aiplatform.googleapis.com`), whichever model family answers. To tell them apart, use `gen_ai.request.model`, or the returned usage's `provider`. The `/google` value depends on the endpoint its client calls: `gcp.gemini` for AI Studio, and `gcp.vertex_ai` when the SDK is set to call Vertex AI, as it is when `GOOGLE_GENAI_USE_VERTEXAI` (or `GOOGLE_GENAI_USE_ENTERPRISE`) is true. A base address override (`GEMINI_BASE_URL`) does not change it.
+
+- **Unchanged.** `/anthropic` and `/claude-cli` say `anthropic`, `/openai` `openai`, `/deepseek` `deepseek` and `/mistral` `mistral`. `/samba` keeps `samba`, the library's own value, because the registry has none for SambaNova.
+- **The values are constants in `src/otel.ts`** (`GEN_AI_PROVIDER_ANTHROPIC`, `GEN_AI_PROVIDER_GCP_VERTEX_AI`, `GEN_AI_PROVIDER_GCP_GEMINI`, `GEN_AI_PROVIDER_OPENAI`, `GEN_AI_PROVIDER_DEEPSEEK`, `GEN_AI_PROVIDER_MISTRAL`, `GEN_AI_PROVIDER_SAMBA`). The README's "Telemetry" section has the table of adapter, value and reason.
+- **Correction to 0.46.0's entry**: it listed `/anthropic` and `/vertex` among the adapters that leave a count off the span for a reply with no usage object. Those two adapters read the usage object unguarded. What is tested for them is a reply whose usage object carries no value for a count. The entry below now says so.
+
 ## [0.46.0] — 2026-11-27
 
 **The OpenTelemetry span now follows the GenAI semantic conventions at `open-telemetry/semantic-conventions-genai` v0.1.0 (status Development), which name the cache counts and count cached tokens as input.** The changes marked "Action needed" below change what the span carries: a dashboard, query or alert that reads it must change with them. What `chat()`, `chatWithTools` and `chatWithToolLoop` return (token counts and cost) is unchanged on every adapter, as is the `ModelSpan` given to `setModelSpanSink`.
@@ -17,7 +35,7 @@
 
   A query that adds the cache counts to `gen_ai.usage.input_tokens` to get the whole input must stop adding them on every adapter; one that subtracts them from `/samba`, `/mistral` or `/vertex-openai` spans to get the uncached input must now subtract them on `/anthropic`, `/vertex` and `/claude-cli` spans too. On `/claude-cli` a call whose prompt is mostly cached changes most: a reply with `input_tokens: 2`, `cache_read_input_tokens: 11842` and `cache_creation_input_tokens: 15647` was a span input of 2 and is now 27,491. With no input count from the provider, the span's input is never made from the cache counts alone.
 
-- **Action needed: a usage count the provider gave no value for is now left off the span, on every adapter.** When a reply had no usage object, or had one without that count, some adapters put `0` on the span: `/anthropic`, `/vertex` and `/claude-cli` for any of `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens` and the two cache counts; the others for the input and output counts. That attribute is now absent. A `0` the provider did send is on the span as `0`: `/deepseek`, `/openai`, `/google`, `/samba`, `/mistral` and `/vertex-openai` used to drop a cache-read count of `0`, and now carry it. A query that sums or averages these attributes now skips a call whose provider gave no count, where it used to count it as `0`. To find those calls, look for spans that lack the attribute.
+- **Action needed: a usage count the provider gave no value for is now left off the span, on every adapter.** When a reply's usage carried no value for a count, some adapters put `0` on the span: `/anthropic`, `/vertex` and `/claude-cli` for any of `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens` and the two cache counts; the others for the input and output counts. On every adapter but `/anthropic` and `/vertex`, a reply with no usage object at all is also tested, with the same result; those two read the usage object unguarded and are tested with an empty one. That attribute is now absent. A `0` the provider did send is on the span as `0`: `/deepseek`, `/openai`, `/google`, `/samba`, `/mistral` and `/vertex-openai` used to drop a cache-read count of `0`, and now carry it. A query that sums or averages these attributes now skips a call whose provider gave no count, where it used to count it as `0`. To find those calls, look for spans that lack the attribute.
 
 - **Unchanged.** What the conventions still have no attribute for keeps its `verevoir.llm.*` name: the 5-minute and 1-hour split of a cache write, the provider's request id, the session id, the reported cost and its invalid kind. The span's name (`chat {model}`) and kind (CLIENT) are as before.
 - **The README has a "Telemetry" section**: the span, the attributes and the adapter table above.

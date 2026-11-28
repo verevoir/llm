@@ -23,6 +23,7 @@
  */
 
 import * as adapter from '../anthropic/adapter.js';
+import { GEN_AI_PROVIDER_GCP_VERTEX_AI } from '../otel.js';
 import { resolveClient } from './client.js';
 import type {
   ChatOptions,
@@ -34,7 +35,7 @@ import type {
   ContentBlock,
 } from '../index.js';
 
-/** The provider id on a Vertex call's `TokenUsage` and model span. */
+/** The provider id on a Vertex call's `TokenUsage`. */
 export const PROVIDER = 'vertex';
 
 export type { ContentBlock };
@@ -42,7 +43,11 @@ export type { ContentBlock };
 // No `switchCredentialAfter`: this route has one credential mechanism, so a
 // failed call is never made again on another. No `systemPrefix`: nothing about
 // Google Cloud authentication adds a block to a request.
-const transport: adapter.AnthropicTransport = { provider: PROVIDER, resolveClient };
+const transport: adapter.AnthropicTransport = {
+  provider: PROVIDER,
+  spanProvider: GEN_AI_PROVIDER_GCP_VERTEX_AI,
+  resolveClient,
+};
 
 /**
  * Single-shot LLM call. Streams the response, supports retry with narration

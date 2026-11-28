@@ -23,6 +23,7 @@
  */
 
 import { createOpenAICompatCalls, type CompatUsage } from '../openai-compat.js';
+import { GEN_AI_PROVIDER_GCP_VERTEX_AI } from '../otel.js';
 import {
   VertexOpenAIConfigError,
   VertexOpenAITokenError,
@@ -39,7 +40,7 @@ import type {
   ChatWithToolsResult,
 } from '../index.js';
 
-/** The provider id on this route's `TokenUsage` and model span. */
+/** The provider id on this route's `TokenUsage`. */
 export const PROVIDER = 'vertex-openai';
 
 export { VertexOpenAIConfigError, VertexOpenAITokenError };
@@ -76,6 +77,7 @@ function outputTokensOf(usage: CompatUsage): number {
 
 const calls = createOpenAICompatCalls({
   provider: PROVIDER,
+  spanProvider: GEN_AI_PROVIDER_GCP_VERTEX_AI,
   route: 'google-cloud',
   getClient: resolveClient,
   modelFor,

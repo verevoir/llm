@@ -65,8 +65,11 @@ export interface ResolvedClient {
 
 /** How one route reaches the Messages API. */
 export interface AnthropicTransport {
-  /** Reported as {@link TokenUsage.provider} and on the model span. */
+  /** Reported as {@link TokenUsage.provider}. */
   provider: string;
+  /** The model span's `gen_ai.provider.name`: a `GEN_AI_PROVIDER_*` value
+   * from `../otel.js`. */
+  spanProvider: string;
   /** The client for a call. Throws a plain error when the route is not
    * configured — before any request is built or sent. */
   resolveClient(perCallApiKey: string | null): ResolvedClient;
@@ -117,12 +120,12 @@ async function streamedCall(
   onRetry?: (info: ChatRetryInfo) => Promise<void>,
   signal?: AbortSignal
 ): Promise<StreamedResult & { route: CredentialRoute }> {
-  const { provider } = transport;
+  const { spanProvider } = transport;
   const prefixFor = (resolved: ResolvedClient) => transport.systemPrefix?.(resolved) ?? [];
   const first = transport.resolveClient(perCallApiKey);
   try {
     const result = await callWithRetries(
-      () => callStreamed(provider, first.client, makeRequest(prefixFor(first)), onProgress),
+      () => callStreamed(spanProvider, first.client, makeRequest(prefixFor(first)), onProgress),
       RETRY_LABEL,
       onRetry,
       signal
@@ -132,7 +135,8 @@ async function streamedCall(
     if (!transport.switchCredentialAfter?.(first, perCallApiKey, err)) throw err;
     const fallback = transport.resolveClient(perCallApiKey);
     const result = await callWithRetries(
-      () => callStreamed(provider, fallback.client, makeRequest(prefixFor(fallback)), onProgress),
+      () =>
+        callStreamed(spanProvider, fallback.client, makeRequest(prefixFor(fallback)), onProgress),
       RETRY_LABEL,
       onRetry,
       signal
@@ -337,13 +341,13 @@ interface CacheCreationBreakdown {
 }
 
 async function callStreamed(
-  provider: string,
+  spanProvider: string,
   client: MessagesClient,
   request: Record<string, unknown>,
   onProgress?: (info: ProgressInfo) => Promise<void>
 ): Promise<StreamedResult> {
   const requestModel = typeof request.model === 'string' ? request.model : 'unknown';
-  return withGenAISpan({ provider, requestModel }, async () => {
+  return withGenAISpan({ provider: spanProvider, requestModel }, async () => {
     // The cast goes through `unknown` because the SDK's MessageStreamParams
     // is a structural shape we can't match without pinning to its full
     // generic. `buildRequest` is the source of truth for valid payloads.

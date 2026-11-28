@@ -21,6 +21,7 @@
  */
 
 import * as adapter from './adapter.js';
+import { GEN_AI_PROVIDER_ANTHROPIC } from '../otel.js';
 import { isAuthError, noteOAuthRejected, oauthSystemIdentity, resolveClient } from './client.js';
 import { PROVIDER, CATALOG, CONNECTION } from './catalog.js';
 import {
@@ -98,6 +99,7 @@ registerProviderConnection(CONNECTION);
  */
 const transport: adapter.AnthropicTransport = {
   provider: PROVIDER,
+  spanProvider: GEN_AI_PROVIDER_ANTHROPIC,
   resolveClient(perCallApiKey) {
     const { client, oauth } = resolveClient(perCallApiKey);
     return { client, route: oauth ? 'subscription-oauth' : 'api-key' };
