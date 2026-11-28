@@ -274,25 +274,6 @@ describe('deepseek.chat', () => {
     ).rejects.toThrow(/at least one turn/);
   });
 
-  it('retries on a 429 then succeeds', async () => {
-    mockCreate
-      .mockRejectedValueOnce(Object.assign(new Error('Rate Limited'), { status: 429 }))
-      .mockResolvedValueOnce(fakeResponse('finally', 'stop'));
-
-    vi.useFakeTimers();
-    const promise = chat({
-      systemPrompt: 'sys',
-      turns: [{ role: 'user', content: 'q' }],
-      apiKey: 'sk-test',
-    });
-    await vi.runAllTimersAsync();
-    const result = await promise;
-    vi.useRealTimers();
-
-    expect(result.content).toBe('finally');
-    expect(mockCreate).toHaveBeenCalledTimes(2);
-  });
-
   it('a user turn carrying an image block throws UnsupportedContentBlockError naming the provider and "image" — caller error, never a silent drop', async () => {
     const imageBlock: ContentBlock = {
       type: 'image',

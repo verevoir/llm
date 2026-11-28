@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased]
+
+**The single-retry suites run each retry fact at the layer that can break it, so one mistake fails a few tests rather than dozens.** Only the tests change: no behaviour of the library changed, and nothing it exports or publishes is different.
+
+- **One fetch driver.** `src/test-support/fetch-driver.ts` holds the fake `fetch`, the failures it produces (`refusal`, `failToConnect`, `neverAnswer`), `run`, and the two sets of rows both `anthropic-sdk-single-retry.test.ts` and `openai-sdk-single-retry.test.ts` run. Its directory is left out of the build (`tsconfig.build.json`), so nothing in it is published.
+- **Every status row once per SDK path.** The retried and not-retried statuses, `x-should-retry`, the stream failures, the request timeout and the abort during each wait run on one site of each of four paths: the direct Anthropic client, Vertex, the OpenAI-compatible factory over Chat Completions, and `/openai` over the Responses API. Each SDK builds every error it throws in one place, whichever client or call shape sent the request.
+- **Five rows on every other site.** Each client-building site and call shape runs "a 503 answered every time", "meets a 429 and then succeeds", the request timeout, the abort during wait 1, and the abort before the call: the faults one site can have on its own (its SDK's retries left on, the policy left out, a timeout of its own, the caller's signal left out).
+- **Removed:** "retries on a 429 then succeeds" from `deepseek/chat.test.ts` and `openai/chat.test.ts`. The single-retry suite's rows for those adapters fail on the same fault. Google's keeps its own, as `/google` has a retry loop of its own.
+
 ## [0.47.0] — 2026-11-28
 
 **The OpenTelemetry span's `gen_ai.provider.name` is now the conventions' well-known value wherever one applies.** The registry at `semantic-conventions-genai` v0.1.0 says that if one of its values applies, it MUST be used. Only the span changes: the `provider` on what `chat()`, `chatWithTools` and `chatWithToolLoop` return, which pricing and routing key on, is unchanged on every adapter, as is the `ModelSpan` given to `setModelSpanSink`.
