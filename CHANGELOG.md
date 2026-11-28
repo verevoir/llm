@@ -1,8 +1,8 @@
 # Changelog
 
-## [Unreleased]
+## [0.47.4] — 2026-11-28
 
-**Each provider SDK has one fake, which every test of it mocks the module with.** Only the tests change: no behaviour of the library changed, nothing it exports or publishes is different, and the suite runs the same 1,759 tests.
+**Each provider SDK has one fake, which every test of it mocks the module with.** Only tests and `src/test-support/` change: the package's code is the same as 0.47.3's; its version and changelog are not. No test is added, removed or renamed, and no assertion changes.
 
 - **One module per SDK shape, in `src/test-support/`.** `anthropic-sdk.ts` (the client, `messageStream`, `streamOf`, `failingStream`), `anthropic-vertex-sdk.ts`, `openai-sdk.ts` (one client for both APIs; `completion`, `textCompletion`, `toolCallCompletion` for Chat Completions and `response` for the Responses API), `google-genai.ts` (`geminiReply`) and `claude-child.ts` (`spawn`, `fakeClaudeChild`, `queueClaudeOutput`). A test mocks the SDK with its module, as in `vi.mock('openai', () => import('../test-support/openai-sdk.js'))`, and imports the same module to script it.
 - **What one file needs stays a parameter.** The `id` and `model` a span reads (`vertex/index`, `span-usage`, `stop-kind`), the zero-token defaults of `deepseek/chat`, `openai/chat` and `google/chat`, the output count of the tool loop's last reply (`openai-compat.tools`), and the `vertexai` the Google client reports (`google/chat`).
