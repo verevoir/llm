@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.47.2] — 2026-11-28
 
 **The `/claude-cli` reported-cost tests are one table.** It lives in `src/claude-cli/chat.session.test.ts`, beside the span-usage rows, and runs six kinds of `total_cost_usd` (finite, JSON `-0`, missing, malformed, negative and the `1e999` overflow) on each of the four call paths: one-shot `chat()`, `chat()` on a held session, and `chatWithToolLoop` with and without a held session. Each row compares, in one `toStrictEqual`, the returned `costUsdReported` and `costUsdReportedInvalidType`, the span's two cost attributes and the four returned counts, so a key set to `undefined` fails just as a wrong value does. No behaviour of the library changes.
 
