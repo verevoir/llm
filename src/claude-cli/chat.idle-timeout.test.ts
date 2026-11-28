@@ -25,6 +25,7 @@ describe('claudeCli idle timeout (real subprocess, no mocked spawn)', () => {
   let stubDir: string | undefined;
   let originalPath: string | undefined;
   let originalIdleOverride: string | undefined;
+  let idleOverrideSet = false;
   let pidFileToClean: string | undefined;
 
   function writeStubClaude(script: string): void {
@@ -38,28 +39,30 @@ describe('claudeCli idle timeout (real subprocess, no mocked spawn)', () => {
 
   function setIdleOverride(ms: string): void {
     originalIdleOverride = process.env.CLAUDE_CLI_IDLE_TIMEOUT_MS;
+    idleOverrideSet = true;
     process.env.CLAUDE_CLI_IDLE_TIMEOUT_MS = ms;
   }
 
-  afterEach(() => {
-    // PATH is put back only where a stub changed it: a test over the shared
-    // silent child writes none, and must not unset PATH for the tests after it.
+  /** Puts back what a test or a fixture set, and only that: `PATH` where a stub
+   * was written, the idle override where one was set, and a stub child's
+   * process and pid file where one was started. Safe to call twice. */
+  function restore(): void {
     if (stubDir !== undefined) {
       if (originalPath !== undefined) process.env.PATH = originalPath;
       else delete process.env.PATH;
       rmSync(stubDir, { recursive: true, force: true });
+      stubDir = undefined;
+      originalPath = undefined;
     }
-    stubDir = undefined;
-    originalPath = undefined;
-    if (originalIdleOverride === undefined) delete process.env.CLAUDE_CLI_IDLE_TIMEOUT_MS;
-    else process.env.CLAUDE_CLI_IDLE_TIMEOUT_MS = originalIdleOverride;
-    originalIdleOverride = undefined;
+    if (idleOverrideSet) {
+      if (originalIdleOverride === undefined) delete process.env.CLAUDE_CLI_IDLE_TIMEOUT_MS;
+      else process.env.CLAUDE_CLI_IDLE_TIMEOUT_MS = originalIdleOverride;
+      originalIdleOverride = undefined;
+      idleOverrideSet = false;
+    }
     if (pidFileToClean !== undefined) {
-      // If a test failed with the stub child still alive, do not leave it
-      // running on the runner. A child that is already gone makes kill()
-      // throw ESRCH, which is the normal case and is ignored. (A pid
-      // recycled to an unrelated process within the test's few seconds is
-      // theoretically possible and not guarded against.)
+      // A stub child left alive must not stay on the runner. One already gone
+      // makes kill() throw ESRCH, the normal case, which is ignored.
       try {
         process.kill(Number(readFileSync(pidFileToClean, 'utf8')), 'SIGKILL');
       } catch {
@@ -68,7 +71,9 @@ describe('claudeCli idle timeout (real subprocess, no mocked spawn)', () => {
       rmSync(pidFileToClean, { force: true });
       pidFileToClean = undefined;
     }
-  });
+  }
+
+  afterEach(restore);
 
   /** Runs chat() against a stub that records its pid and then stays silent
    * forever, and returns the idle-timeout rejection and the pid file. */
@@ -108,32 +113,48 @@ describe('claudeCli idle timeout (real subprocess, no mocked spawn)', () => {
   }
 
   describe('a silent child', () => {
+    /** How often the fixture looks for the child's process. It only sets how
+     * soon a kill is seen: a longer interval delays the fixture by up to one
+     * interval, a shorter one spends more turns of the loop. */
+    const POLL_MS = 25;
+    /** The longest the fixture waits for the process to be gone. The stub has
+     * no SIGTERM handler, so the idle timeout's SIGTERM ends it at once; this
+     * bounds only a real failure, a child that is never killed. Too short and
+     * a slow exit reads as "still alive"; too long only delays that failure. */
+    const GONE_WITHIN_MS = 5000;
+    /** The stub's 2000ms idle budget, the wait above, and 3000ms for the stub
+     * to start and the rejection to arrive. */
+    const FIXTURE_TIMEOUT_MS = 2000 + GONE_WITHIN_MS + 3000;
+
     let error: Error & { code?: string; timeoutMs?: number };
     let gone: boolean;
 
+    // Both facts are taken, and everything the fixture set is put back, before
+    // either test runs: `restore` kills a stub left alive, so it runs last.
     beforeAll(async () => {
-      const rejected = await rejectionFromSilentChild();
-      error = rejected.error;
-      // The pid file is read, not waited for: the idle timer starts at spawn,
-      // and the 2000ms budget is the stub's margin to write it. A slower
-      // startup throws ENOENT here and fails both tests rather than passing.
-      const pid = Number(readFileSync(rejected.pidFile, 'utf8'));
-      const isAlive = (): boolean => {
-        try {
-          process.kill(pid, 0);
-          return true;
-        } catch {
-          return false;
+      try {
+        const rejected = await rejectionFromSilentChild();
+        error = rejected.error;
+        // The pid file is read, not waited for: the 2000ms budget is the stub's
+        // margin to write it. A slower start throws ENOENT and fails the fixture.
+        const pid = Number(readFileSync(rejected.pidFile, 'utf8'));
+        const isAlive = (): boolean => {
+          try {
+            process.kill(pid, 0);
+            return true;
+          } catch {
+            return false;
+          }
+        };
+        const deadline = Date.now() + GONE_WITHIN_MS;
+        while (isAlive() && Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, POLL_MS));
         }
-      };
-      // Poll, not a fixed sleep: the loop ends the moment the process is gone,
-      // and the 5s cap only bounds a real failure, a child that is never killed.
-      const deadline = Date.now() + 5000;
-      while (isAlive() && Date.now() < deadline) {
-        await new Promise((resolve) => setTimeout(resolve, 25));
+        gone = !isAlive();
+      } finally {
+        restore();
       }
-      gone = !isAlive();
-    }, 10_000);
+    }, FIXTURE_TIMEOUT_MS);
 
     it('is rejected with the generic message, the named code and the budget', () => {
       // Generic, llm-level wording: a caller (e.g. @verevoir/review) maps
@@ -259,5 +280,5 @@ describe('claudeCli idle timeout (real subprocess, no mocked spawn)', () => {
     } finally {
       vi.useRealTimers();
     }
-  }, 10_000);
+  });
 });
