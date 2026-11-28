@@ -12,7 +12,9 @@
  * SDK. There is no API key: a per-call `apiKey` is refused, and
  * `ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN` are never read. The project
  * and region come from the environment variables the Vertex SDK itself reads,
- * `ANTHROPIC_VERTEX_PROJECT_ID` and `CLOUD_ML_REGION`.
+ * `ANTHROPIC_VERTEX_PROJECT_ID` and `CLOUD_ML_REGION`. `ANTHROPIC_VERTEX_BASE_URL`
+ * sends requests to another address, and `ANTHROPIC_VERTEX_ACCESS_TOKEN` gives a
+ * fixed bearer token in place of the Google Cloud credentials flow.
  *
  * The model name is sent as given: `ChatOptions.model` when set, otherwise the
  * Anthropic catalogue's id for the `modelClass`. Nothing maps a name to a

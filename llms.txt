@@ -30,7 +30,10 @@ SDK does not enter your bundle.
   `ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN` are never read). The project
   and region come from `ANTHROPIC_VERTEX_PROJECT_ID` and `CLOUD_ML_REGION`
   (`ChatOptions` has no field for them); a missing one is refused before any
-  call with a plain error naming the variable. The model name is sent exactly
+  call with a plain error naming the variable. `ANTHROPIC_VERTEX_BASE_URL`
+  sends requests to another address (version segment included), and
+  `ANTHROPIC_VERTEX_ACCESS_TOKEN` gives every request a fixed bearer token in
+  place of the Google Cloud credentials flow. The model name is sent exactly
   as given — `model` when set, else the Anthropic catalogue's id for the
   `modelClass` — with no mapping: where Vertex AI names a model differently,
   pass that name as `model`. `TokenUsage.provider` is `'vertex'` and `route` is

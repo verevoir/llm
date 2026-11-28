@@ -15,6 +15,13 @@
 - **What one file needs stays a parameter.** The `id` and `model` a span reads (`vertex/index`, `span-usage`, `stop-kind`), the zero-token defaults of `deepseek/chat`, `openai/chat` and `google/chat`, the output count of the tool loop's last reply (`openai-compat.tools`), and the `vertexai` the Google client reports (`google/chat`).
 - **Left as they are:** the wire bodies `vertex-openai/index` and the single-retry suites send through the real SDKs over `fetch`, which no module mock reaches, and the one `stdin` that emits `EPIPE` in `claude-cli/chat`.
 
+**`@verevoir/llm/vertex` can be pointed at another address and given a fixed access token, so that no Google Cloud credential is looked for.** For a caller who sets neither variable nothing changes: the client is built with the same options as in 0.47.0.
+
+- **`ANTHROPIC_VERTEX_BASE_URL`** is the address requests go to (a gateway, a proxy, a local stand-in), version segment included, as in `https://<region>-aiplatform.googleapis.com/v1`. It is the Vertex SDK's own name, which the library reads and passes as the client's `baseURL`. Like the library's other base-address overrides, its form is not checked.
+- **`ANTHROPIC_VERTEX_ACCESS_TOKEN`** is a fixed bearer token. When it is set, every request carries `Authorization: Bearer <token>` and no other auth header, and Google Cloud's credentials flow is not started. The token appears in no thrown error, log line or span.
+- **Project and region are required with either**, as both are in the path the SDK builds; a stand-in takes any plain value. The kept client is rebuilt when any of project, region, address or token changes. `route` is `'google-cloud'` either way.
+- **The span's `gen_ai.provider.name` is `gcp.vertex_ai` at any address**: it names the home of the wire format, not the address called.
+
 ## [0.47.0] — 2026-11-28
 
 **The OpenTelemetry span's `gen_ai.provider.name` is now the conventions' well-known value wherever one applies.** The registry at `semantic-conventions-genai` v0.1.0 says that if one of its values applies, it MUST be used. Only the span changes: the `provider` on what `chat()`, `chatWithTools` and `chatWithToolLoop` return, which pricing and routing key on, is unchanged on every adapter, as is the `ModelSpan` given to `setModelSpanSink`.
