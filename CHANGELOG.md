@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.47.0] — 2026-11-28
 
 **The OpenTelemetry span's `gen_ai.provider.name` is now the conventions' well-known value wherever one applies.** The registry at `semantic-conventions-genai` v0.1.0 says that if one of its values applies, it MUST be used. Only the span changes: the `provider` on what `chat()`, `chatWithTools` and `chatWithToolLoop` return, which pricing and routing key on, is unchanged on every adapter, as is the `ModelSpan` given to `setModelSpanSink`.
 
