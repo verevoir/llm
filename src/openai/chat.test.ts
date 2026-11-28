@@ -9,19 +9,13 @@ import {
 // Mock the OpenAI SDK before importing the adapter. Each test sets
 // up the fake `responses.create` to return a controlled Response
 // shape.
-const mockCreate = vi.fn();
-const mockClientCtor = vi.fn();
+vi.mock('openai', () => import('../test-support/openai-sdk.js'));
 
-vi.mock('openai', () => ({
-  default: class OpenAI {
-    responses = { create: mockCreate };
-    constructor(opts: unknown) {
-      mockClientCtor(opts);
-    }
-  },
-}));
-
-// Import AFTER vi.mock so the mocked constructor is the one captured.
+import {
+  responsesCreate as mockCreate,
+  openaiCtor as mockClientCtor,
+  response,
+} from '../test-support/openai-sdk.js';
 import { chat } from './index.js';
 import {
   classifyLlmError,
@@ -33,23 +27,12 @@ import {
   type TokenUsage,
 } from '../index.js';
 
-interface FakeUsage {
-  input_tokens: number;
-  output_tokens: number;
-  input_tokens_details?: { cached_tokens?: number };
-}
-
-function fakeResponse(
-  output_text: string,
-  status: string = 'completed',
-  usage: FakeUsage = { input_tokens: 0, output_tokens: 0 }
-) {
-  return {
-    output_text,
-    status,
-    usage,
-  };
-}
+/** A Responses API reply, `completed` with no tokens unless given. */
+const fakeResponse = (
+  outputText: string,
+  status = 'completed',
+  usage: Record<string, unknown> = { input_tokens: 0, output_tokens: 0 }
+) => response({ outputText, status, usage });
 
 describe('openai.chat — providerRequestId (#70 honesty fix)', () => {
   beforeEach(() => {

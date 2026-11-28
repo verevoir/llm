@@ -1,20 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-// Mock the Anthropic SDK before importing the adapter (same pattern as
-// chatWithToolLoop.test.ts). Each test scripts a sequence of streamed
-// responses so we can exercise chat()'s progress-continuation loop.
-const mockStream = vi.fn();
-const mockClientCtor = vi.fn();
+vi.mock('@anthropic-ai/sdk', () => import('../test-support/anthropic-sdk.js'));
 
-vi.mock('@anthropic-ai/sdk', () => ({
-  default: class Anthropic {
-    messages = { stream: mockStream };
-    constructor(opts: unknown) {
-      mockClientCtor(opts);
-    }
-  },
-}));
-
+import {
+  anthropicStream as mockStream,
+  anthropicCtor as mockClientCtor,
+  messageStream,
+} from '../test-support/anthropic-sdk.js';
 import { chat, chatWithTools } from './index.js';
 import {
   classifyLlmError,
@@ -22,37 +14,6 @@ import {
   setModelSpanSink,
   type ModelSpan,
 } from '../index.js';
-
-interface FakeUsage {
-  input_tokens: number;
-  output_tokens: number;
-  cache_creation_input_tokens: number;
-  cache_read_input_tokens: number;
-}
-
-interface FakeContentBlock {
-  type: string;
-  text?: string;
-  id?: string;
-  name?: string;
-  input?: Record<string, unknown>;
-}
-
-function fakeStream(
-  blocks: FakeContentBlock[],
-  stopReason: string,
-  usage: FakeUsage = {
-    input_tokens: 0,
-    output_tokens: 0,
-    cache_creation_input_tokens: 0,
-    cache_read_input_tokens: 0,
-  }
-) {
-  return {
-    on: () => {},
-    finalMessage: async () => ({ content: blocks, stop_reason: stopReason, usage }),
-  };
-}
 
 describe('chat — progress-only tool turn', () => {
   beforeEach(() => {
@@ -64,7 +25,7 @@ describe('chat — progress-only tool turn', () => {
     // First turn: the model calls report_progress and stops with no
     // text (what Haiku does). Second turn: the real answer.
     mockStream.mockReturnValueOnce(
-      fakeStream(
+      messageStream(
         [
           {
             type: 'tool_use',
@@ -76,7 +37,9 @@ describe('chat — progress-only tool turn', () => {
         'tool_use'
       )
     );
-    mockStream.mockReturnValueOnce(fakeStream([{ type: 'text', text: '# README\n' }], 'end_turn'));
+    mockStream.mockReturnValueOnce(
+      messageStream([{ type: 'text', text: '# README\n' }], 'end_turn')
+    );
 
     const reply = await chat({
       systemPrompt: 'Write the readme.',
@@ -93,7 +56,7 @@ describe('chat — progress-only tool turn', () => {
 
   it('sums usage across the continuation', async () => {
     mockStream.mockReturnValueOnce(
-      fakeStream(
+      messageStream(
         [
           {
             type: 'tool_use',
@@ -112,7 +75,7 @@ describe('chat — progress-only tool turn', () => {
       )
     );
     mockStream.mockReturnValueOnce(
-      fakeStream([{ type: 'text', text: 'done' }], 'end_turn', {
+      messageStream([{ type: 'text', text: 'done' }], 'end_turn', {
         input_tokens: 7,
         output_tokens: 3,
         cache_creation_input_tokens: 0,
@@ -133,14 +96,14 @@ describe('chat — progress-only tool turn', () => {
   });
 
   it('still throws when a turn has no text and no progress tool to continue on', async () => {
-    mockStream.mockReturnValue(fakeStream([], 'tool_use'));
+    mockStream.mockReturnValue(messageStream([], 'tool_use'));
     await expect(
       chat({ systemPrompt: 's', turns: [{ role: 'user', content: 'x' }], apiKey: 'sk-test' })
     ).rejects.toThrow(/no text content/);
   });
 
   it('that empty-response error keeps its message and name, and is recognisable without reading either', async () => {
-    mockStream.mockReturnValue(fakeStream([], 'tool_use'));
+    mockStream.mockReturnValue(messageStream([], 'tool_use'));
     const rejection = await chat({
       systemPrompt: 's',
       turns: [{ role: 'user', content: 'x' }],
@@ -155,7 +118,7 @@ describe('chat — progress-only tool turn', () => {
   });
 
   it('returns text-only responses unchanged (no continuation)', async () => {
-    mockStream.mockReturnValue(fakeStream([{ type: 'text', text: 'hi' }], 'end_turn'));
+    mockStream.mockReturnValue(messageStream([{ type: 'text', text: 'hi' }], 'end_turn'));
     const reply = await chat({
       systemPrompt: 's',
       turns: [{ role: 'user', content: 'x' }],
@@ -170,7 +133,7 @@ describe('chat — model pinning (ChatOptions.model)', () => {
   beforeEach(() => mockStream.mockReset());
 
   it('sends the exact model id when options.model is set, bypassing modelClass resolution entirely', async () => {
-    mockStream.mockReturnValue(fakeStream([{ type: 'text', text: 'ok' }], 'end_turn'));
+    mockStream.mockReturnValue(messageStream([{ type: 'text', text: 'ok' }], 'end_turn'));
 
     await chat({
       systemPrompt: 's',
@@ -185,7 +148,7 @@ describe('chat — model pinning (ChatOptions.model)', () => {
   });
 
   it('reports the pinned model id on TokenUsage.model, not the class-resolved one', async () => {
-    mockStream.mockReturnValue(fakeStream([{ type: 'text', text: 'ok' }], 'end_turn'));
+    mockStream.mockReturnValue(messageStream([{ type: 'text', text: 'ok' }], 'end_turn'));
 
     const reply = await chat({
       systemPrompt: 's',
@@ -199,7 +162,7 @@ describe('chat — model pinning (ChatOptions.model)', () => {
   });
 
   it('falls back to the catalog id resolved from modelClass when options.model is not set — unchanged default', async () => {
-    mockStream.mockReturnValue(fakeStream([{ type: 'text', text: 'ok' }], 'end_turn'));
+    mockStream.mockReturnValue(messageStream([{ type: 'text', text: 'ok' }], 'end_turn'));
 
     const reply = await chat({
       systemPrompt: 's',
@@ -215,7 +178,7 @@ describe('chat — model pinning (ChatOptions.model)', () => {
 
   it('chatWithTools also sends the pinned id, not the class-resolved one', async () => {
     mockStream.mockReturnValue(
-      fakeStream([{ type: 'tool_use', id: 'u1', name: 'noop', input: {} }], 'tool_use')
+      messageStream([{ type: 'tool_use', id: 'u1', name: 'noop', input: {} }], 'tool_use')
     );
 
     const result = await chatWithTools({
@@ -270,7 +233,7 @@ describe('chat — providerRequestId + 5m/1h cache-write split (#70 honesty fix)
   });
 
   it('leaves providerRequestId and the cache-write split undefined when the response has neither', async () => {
-    mockStream.mockReturnValue(fakeStream([{ type: 'text', text: 'ok' }], 'end_turn'));
+    mockStream.mockReturnValue(messageStream([{ type: 'text', text: 'ok' }], 'end_turn'));
 
     const reply = await chat({
       systemPrompt: 's',
@@ -288,7 +251,7 @@ describe('chat — maxTokens override (ChatOptions.maxTokens)', () => {
   beforeEach(() => mockStream.mockReset());
 
   it('sends the caller-supplied maxTokens instead of the adapter default', async () => {
-    mockStream.mockReturnValue(fakeStream([{ type: 'text', text: 'ok' }], 'end_turn'));
+    mockStream.mockReturnValue(messageStream([{ type: 'text', text: 'ok' }], 'end_turn'));
 
     await chat({
       systemPrompt: 's',
@@ -302,7 +265,7 @@ describe('chat — maxTokens override (ChatOptions.maxTokens)', () => {
   });
 
   it('defaults to 16384 when maxTokens is not supplied — unchanged default behaviour', async () => {
-    mockStream.mockReturnValue(fakeStream([{ type: 'text', text: 'ok' }], 'end_turn'));
+    mockStream.mockReturnValue(messageStream([{ type: 'text', text: 'ok' }], 'end_turn'));
 
     await chat({
       systemPrompt: 's',
@@ -321,7 +284,7 @@ describe('chat — model-span emission', () => {
 
   it('emits a model span to the registered sink with scope anthropic.chat', async () => {
     mockStream.mockReturnValue(
-      fakeStream([{ type: 'text', text: 'hi' }], 'end_turn', {
+      messageStream([{ type: 'text', text: 'hi' }], 'end_turn', {
         input_tokens: 12,
         output_tokens: 8,
         cache_creation_input_tokens: 0,
@@ -348,7 +311,7 @@ describe('chat — model-span emission', () => {
 
   it('chatWithTools emits a model span with scope anthropic.chatWithTools', async () => {
     mockStream.mockReturnValue(
-      fakeStream([{ type: 'tool_use', id: 'u1', name: 'noop', input: {} }], 'tool_use', {
+      messageStream([{ type: 'tool_use', id: 'u1', name: 'noop', input: {} }], 'tool_use', {
         input_tokens: 10,
         output_tokens: 5,
         cache_creation_input_tokens: 0,

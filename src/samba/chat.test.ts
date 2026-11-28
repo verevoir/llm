@@ -2,42 +2,15 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // Mock the OpenAI SDK before importing the adapter. SambaNova speaks the
 // Chat Completions API via the shared OpenAI-compatible factory.
-const mockCreate = vi.fn();
+vi.mock('openai', () => import('../test-support/openai-sdk.js'));
 
-vi.mock('openai', () => ({
-  default: class OpenAI {
-    chat = { completions: { create: mockCreate } };
-    constructor(_opts: unknown) {}
-  },
-}));
-
-// Import AFTER vi.mock so the mocked constructor is the one captured.
+import {
+  chatCompletionsCreate as mockCreate,
+  textCompletion,
+  toolCallCompletion,
+} from '../test-support/openai-sdk.js';
 import { chat, chatWithTools, chatWithToolLoop } from './index.js';
 import { setModelSpanSink, type ModelSpan } from '../index.js';
-
-function textReply(content: string, usage = { prompt_tokens: 12, completion_tokens: 8 }) {
-  return {
-    choices: [{ message: { content, tool_calls: [] }, finish_reason: 'stop' }],
-    usage,
-  };
-}
-
-function toolCallReply() {
-  return {
-    choices: [
-      {
-        message: {
-          content: '',
-          tool_calls: [
-            { id: 'c1', type: 'function', function: { name: 'record', arguments: '{"x":1}' } },
-          ],
-        },
-        finish_reason: 'tool_calls',
-      },
-    ],
-    usage: { prompt_tokens: 10, completion_tokens: 5 },
-  };
-}
 
 const TOOL = {
   name: 'record',
@@ -50,7 +23,7 @@ describe('samba — model-span emission', () => {
   afterEach(() => setModelSpanSink(null));
 
   it('chat emits a model span to the registered sink with scope samba.chat', async () => {
-    mockCreate.mockResolvedValue(textReply('hello'));
+    mockCreate.mockResolvedValue(textCompletion('hello'));
     const spans: ModelSpan[] = [];
     setModelSpanSink((s) => spans.push(s));
 
@@ -71,7 +44,7 @@ describe('samba — model-span emission', () => {
   });
 
   it('chatWithTools emits a model span with scope samba.chatWithTools', async () => {
-    mockCreate.mockResolvedValue(toolCallReply());
+    mockCreate.mockResolvedValue(toolCallCompletion());
     const spans: ModelSpan[] = [];
     setModelSpanSink((s) => spans.push(s));
 
@@ -93,7 +66,9 @@ describe('samba — model-span emission', () => {
   });
 
   it('chatWithToolLoop emits one span per iteration with scope samba.chatWithToolLoop', async () => {
-    mockCreate.mockResolvedValueOnce(toolCallReply()).mockResolvedValueOnce(textReply('done'));
+    mockCreate
+      .mockResolvedValueOnce(toolCallCompletion())
+      .mockResolvedValueOnce(textCompletion('done'));
     const spans: ModelSpan[] = [];
     setModelSpanSink((s) => spans.push(s));
 
@@ -112,7 +87,9 @@ describe('samba — model-span emission', () => {
   });
 
   it('a throwing sink is fail-soft — the tool loop completes with an unaffected result', async () => {
-    mockCreate.mockResolvedValueOnce(toolCallReply()).mockResolvedValueOnce(textReply('done'));
+    mockCreate
+      .mockResolvedValueOnce(toolCallCompletion())
+      .mockResolvedValueOnce(textCompletion('done'));
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     setModelSpanSink(() => {
       throw new Error('sink boom');

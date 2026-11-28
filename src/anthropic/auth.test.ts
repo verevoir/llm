@@ -1,38 +1,25 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-// Mock the Anthropic SDK so we can inspect BOTH the constructor options (how the
-// client authenticates) and the request payload (the system blocks). Same
-// pattern as chat.test.ts, but here the constructor capture is the point.
-const mockStream = vi.fn();
-const mockClientCtor = vi.fn();
+// The constructor options say how the client authenticates; the request
+// payload carries the system blocks. Both are read from the fake SDK.
+vi.mock('@anthropic-ai/sdk', () => import('../test-support/anthropic-sdk.js'));
 
-vi.mock('@anthropic-ai/sdk', () => ({
-  default: class Anthropic {
-    messages = { stream: mockStream };
-    constructor(opts: unknown) {
-      mockClientCtor(opts);
-    }
-  },
-}));
-
+import {
+  anthropicStream as mockStream,
+  anthropicCtor as mockClientCtor,
+  failingStream,
+  messageStream,
+} from '../test-support/anthropic-sdk.js';
 import { chat, chatWithTools, chatWithToolLoop } from './index.js';
 import { resetClientStateForTests } from './client.js';
 
-function fakeStream() {
-  return {
-    on: () => {},
-    finalMessage: async () => ({
-      content: [{ type: 'text', text: 'ok' }],
-      stop_reason: 'end_turn',
-      usage: {
-        input_tokens: 1,
-        output_tokens: 1,
-        cache_creation_input_tokens: 0,
-        cache_read_input_tokens: 0,
-      },
-    }),
-  };
-}
+const okStream = () =>
+  messageStream([{ type: 'text', text: 'ok' }], 'end_turn', {
+    input_tokens: 1,
+    output_tokens: 1,
+    cache_creation_input_tokens: 0,
+    cache_read_input_tokens: 0,
+  });
 
 const CLAUDE_CODE_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude.";
 
@@ -54,7 +41,7 @@ describe('anthropic client — subscription OAuth path', () => {
   beforeEach(() => {
     mockStream.mockReset();
     mockClientCtor.mockReset();
-    mockStream.mockReturnValue(fakeStream());
+    mockStream.mockReturnValue(okStream());
     for (const k of KEYS) {
       saved[k] = process.env[k];
       delete process.env[k];
@@ -179,14 +166,8 @@ describe('anthropic client — 401 OAuth→API-key fallback (loud, once)', () =>
   const saved: Record<string, string | undefined> = {};
   let errSpy: ReturnType<typeof vi.spyOn>;
 
-  function failStream(status: number) {
-    return {
-      on: () => {},
-      finalMessage: async () => {
-        throw Object.assign(new Error(`HTTP ${status}`), { status });
-      },
-    };
-  }
+  const failStream = (status: number) =>
+    failingStream(Object.assign(new Error(`HTTP ${status}`), { status }));
 
   beforeEach(() => {
     mockStream.mockReset();
@@ -212,7 +193,7 @@ describe('anthropic client — 401 OAuth→API-key fallback (loud, once)', () =>
     process.env.CLAUDE_CODE_OAUTH_TOKEN = 'oat-bad';
     process.env.ANTHROPIC_API_KEY = 'sk-fallback';
     mockStream.mockReturnValueOnce(failStream(401)); // OAuth attempt rejected
-    mockStream.mockReturnValueOnce(fakeStream()); // metered-key retry succeeds
+    mockStream.mockReturnValueOnce(okStream()); // metered-key retry succeeds
 
     const reply = await chat({ systemPrompt: 'REVIEW', turns: [{ role: 'user', content: 'x' }] });
     expect(reply.content).toBe('ok');
@@ -282,7 +263,7 @@ describe('anthropic client — 401 OAuth→API-key fallback (loud, once)', () =>
     process.env.CLAUDE_CODE_OAUTH_TOKEN = 'oat-bad';
     process.env.ANTHROPIC_API_KEY = 'sk-fallback';
     mockStream.mockReturnValueOnce(failStream(401));
-    mockStream.mockReturnValue(fakeStream()); // all subsequent calls succeed
+    mockStream.mockReturnValue(okStream()); // all subsequent calls succeed
 
     await chat({ systemPrompt: 'a', turns: [{ role: 'user', content: 'x' }] }); // triggers fallback
     const ctorsAfterFirst = mockClientCtor.mock.calls.length;
@@ -304,7 +285,7 @@ describe('anthropic client — 401 OAuth→API-key fallback (loud, once)', () =>
     process.env.CLAUDE_CODE_OAUTH_TOKEN = 'oat-bad';
     process.env.ANTHROPIC_API_KEY = 'sk-fallback';
     mockStream.mockReturnValueOnce(failStream(401)); // first OAuth attempt → latch
-    mockStream.mockReturnValue(fakeStream()); // fallback succeeds
+    mockStream.mockReturnValue(okStream()); // fallback succeeds
     await chat({ systemPrompt: 'a', turns: [{ role: 'user', content: 'x' }] }); // latched
     delete process.env.ANTHROPIC_API_KEY; // metered key removed after the latch
     await expect(
@@ -345,7 +326,7 @@ describe('anthropic client — 401 OAuth→API-key fallback (loud, once)', () =>
     mockStream.mockReturnValueOnce(failStream(401));
     // Iteration 2's fallback attempt: the metered key answers — this
     // iteration's streamedCall returns route: 'api-key'.
-    mockStream.mockReturnValueOnce(fakeStream());
+    mockStream.mockReturnValueOnce(okStream());
 
     const result = await chatWithToolLoop({
       systemPrompt: 'REVIEW',

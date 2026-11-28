@@ -8,24 +8,15 @@ import {
 
 // Mock the Google GenAI SDK before importing the adapter. Each test
 // sets up the fake `models.generateContent` to return a controlled
-// response shape.
-const mockGenerateContent = vi.fn();
-const mockClientCtor = vi.fn();
-// The `vertexai` the fake client reports, as the SDK decides from its options
-// and environment.
-const sdk = vi.hoisted(() => ({ vertexai: false }));
+// response shape; `sdk.vertexai` is the `vertexai` the fake client reports.
+vi.mock('@google/genai', () => import('../test-support/google-genai.js'));
 
-vi.mock('@google/genai', () => ({
-  GoogleGenAI: class GoogleGenAI {
-    models = { generateContent: mockGenerateContent };
-    readonly vertexai = sdk.vertexai;
-    constructor(opts: unknown) {
-      mockClientCtor(opts);
-    }
-  },
-}));
-
-// Import AFTER vi.mock so the mocked constructor is the one captured.
+import {
+  generateContent as mockGenerateContent,
+  genaiCtor as mockClientCtor,
+  genaiClient as sdk,
+  geminiReply,
+} from '../test-support/google-genai.js';
 import { chat, chatWithTools, chatWithToolLoop } from './index.js';
 import {
   classifyLlmError,
@@ -47,23 +38,12 @@ afterAll(async () => {
   await tracerProvider.shutdown();
 });
 
-interface FakeUsage {
-  promptTokenCount: number;
-  candidatesTokenCount: number;
-  cachedContentTokenCount?: number;
-}
-
-function fakeResponse(
+/** A reply with no content parts, finishing on `STOP` with no tokens unless given. */
+const fakeResponse = (
   text: string,
-  finishReason: string = 'STOP',
-  usage: FakeUsage = { promptTokenCount: 0, candidatesTokenCount: 0 }
-) {
-  return {
-    text,
-    candidates: [{ finishReason }],
-    usageMetadata: usage,
-  };
-}
+  finishReason = 'STOP',
+  usage: Record<string, unknown> = { promptTokenCount: 0, candidatesTokenCount: 0 }
+) => geminiReply({ text, finishReason, usage });
 
 describe('google.chat', () => {
   beforeEach(() => {

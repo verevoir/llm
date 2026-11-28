@@ -9,6 +9,12 @@
 - **Five rows on every other site.** Each client-building site and call shape runs "a 503 answered every time", "meets a 429 and then succeeds", the request timeout, the abort during wait 1, and the abort before the call: the faults one site can have on its own (its SDK's retries left on, the policy left out, a timeout of its own, the caller's signal left out).
 - **Removed:** "retries on a 429 then succeeds" from `deepseek/chat.test.ts` and `openai/chat.test.ts`. The single-retry suite's rows for those adapters fail on the same fault. Google's keeps its own, as `/google` has a retry loop of its own.
 
+**Each provider SDK has one fake, which every test of it mocks the module with.** Only the tests change: no behaviour of the library changed, nothing it exports or publishes is different, and the suite runs the same 1,759 tests.
+
+- **One module per SDK shape, in `src/test-support/`.** `anthropic-sdk.ts` (the client, `messageStream`, `streamOf`, `failingStream`), `anthropic-vertex-sdk.ts`, `openai-sdk.ts` (one client for both APIs; `completion`, `textCompletion`, `toolCallCompletion` for Chat Completions and `response` for the Responses API), `google-genai.ts` (`geminiReply`) and `claude-child.ts` (`spawn`, `fakeClaudeChild`, `queueClaudeOutput`). A test mocks the SDK with its module, as in `vi.mock('openai', () => import('../test-support/openai-sdk.js'))`, and imports the same module to script it.
+- **What one file needs stays a parameter.** The `id` and `model` a span reads (`vertex/index`, `span-usage`, `stop-kind`), the zero-token defaults of `deepseek/chat`, `openai/chat` and `google/chat`, the output count of the tool loop's last reply (`openai-compat.tools`), and the `vertexai` the Google client reports (`google/chat`).
+- **Left as they are:** the wire bodies `vertex-openai/index` and the single-retry suites send through the real SDKs over `fetch`, which no module mock reaches, and the one `stdin` that emits `EPIPE` in `claude-cli/chat`.
+
 ## [0.47.0] — 2026-11-28
 
 **The OpenTelemetry span's `gen_ai.provider.name` is now the conventions' well-known value wherever one applies.** The registry at `semantic-conventions-genai` v0.1.0 says that if one of its values applies, it MUST be used. Only the span changes: the `provider` on what `chat()`, `chatWithTools` and `chatWithToolLoop` return, which pricing and routing key on, is unchanged on every adapter, as is the `ModelSpan` given to `setModelSpanSink`.

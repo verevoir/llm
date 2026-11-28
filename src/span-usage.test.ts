@@ -1,5 +1,4 @@
 import { describe, it, expect, vi, beforeAll, beforeEach, afterAll, afterEach } from 'vitest';
-import { EventEmitter } from 'node:events';
 import { trace } from '@opentelemetry/api';
 import {
   BasicTracerProvider,
@@ -10,53 +9,30 @@ import {
 // Every provider SDK is mocked at its constructor, before any adapter is
 // imported, so one file reaches every span. The claude-cli transport is mocked
 // where its own tests mock it: the session module and `node:child_process`.
-const anthropicStream = vi.fn();
-const vertexStream = vi.fn();
-const chatCompletionsCreate = vi.fn();
-const responsesCreate = vi.fn();
-const generateContent = vi.fn();
 const mockRunSessionTurn = vi.fn();
-const mockSpawn = vi.fn();
 
-vi.mock('@anthropic-ai/sdk', () => ({
-  default: class Anthropic {
-    messages = { stream: anthropicStream };
-    constructor(_opts: unknown) {}
-  },
-}));
-
-vi.mock('@anthropic-ai/vertex-sdk', () => ({
-  AnthropicVertex: class AnthropicVertex {
-    messages = { stream: vertexStream };
-    constructor(_opts: unknown) {}
-  },
-}));
-
-vi.mock('openai', () => ({
-  default: class OpenAI {
-    chat = { completions: { create: chatCompletionsCreate } };
-    responses = { create: responsesCreate };
-    constructor(_opts: unknown) {}
-  },
-}));
-
-vi.mock('@google/genai', () => ({
-  GoogleGenAI: class GoogleGenAI {
-    models = { generateContent };
-    constructor(_opts: unknown) {}
-  },
-}));
-
+vi.mock('@anthropic-ai/sdk', () => import('./test-support/anthropic-sdk.js'));
+vi.mock('@anthropic-ai/vertex-sdk', () => import('./test-support/anthropic-vertex-sdk.js'));
+vi.mock('openai', () => import('./test-support/openai-sdk.js'));
+vi.mock('@google/genai', () => import('./test-support/google-genai.js'));
 vi.mock('./claude-cli/session.js', () => ({
   createSession: () => ({ id: 'fake-session-id' }),
   closeSession: async () => {},
   runSessionTurn: (...args: unknown[]) => mockRunSessionTurn(...args),
 }));
 
-vi.mock('node:child_process', () => ({
-  spawn: (...args: unknown[]) => mockSpawn(...args),
-}));
+vi.mock('node:child_process', () => import('./test-support/claude-child.js'));
 
+import { anthropicStream, streamOf } from './test-support/anthropic-sdk.js';
+import { vertexStream } from './test-support/anthropic-vertex-sdk.js';
+import {
+  chatCompletionsCreate,
+  completion,
+  response,
+  responsesCreate,
+} from './test-support/openai-sdk.js';
+import { generateContent, geminiReply } from './test-support/google-genai.js';
+import { spawn as mockSpawn, queueClaudeOutput } from './test-support/claude-child.js';
 // Import AFTER vi.mock so the mocked constructors are the ones captured.
 import * as anthropic from './anthropic/index.js';
 import * as vertex from './vertex/index.js';
@@ -204,57 +180,34 @@ const COMPAT_SHAPE = inclusiveShape(
 
 // ── The fakes each provider answers with ─────────────────────────────────
 
-function anthropicReply(usage: Record<string, unknown> | undefined) {
-  return {
-    on: () => {},
-    finalMessage: async () => ({
-      id: 'msg_1',
-      model: 'answered-model',
-      content: [{ type: 'text', text: 'ok' }],
-      stop_reason: 'end_turn',
-      usage,
-    }),
-  };
-}
+type Usage = Record<string, unknown> | undefined;
 
-function completionReply(usage: Record<string, unknown> | undefined) {
-  return defined({
+const anthropicReply = (usage: Usage) =>
+  streamOf({
+    id: 'msg_1',
+    model: 'answered-model',
+    content: [{ type: 'text', text: 'ok' }],
+    stop_reason: 'end_turn',
+    usage,
+  });
+
+const completionReply = (usage: Usage) =>
+  completion({
     id: 'chatcmpl-1',
     model: 'answered-model',
-    choices: [{ message: { content: 'ok', tool_calls: [] }, finish_reason: 'stop' }],
+    content: 'ok',
+    toolCalls: [],
+    finishReason: 'stop',
     usage,
   });
-}
 
-function responsesReply(usage: Record<string, unknown> | undefined) {
-  return defined({
-    id: 'resp_1',
-    model: 'answered-model',
-    output_text: 'ok',
-    status: 'completed',
-    usage,
-  });
-}
+const responsesReply = (usage: Usage) =>
+  response({ id: 'resp_1', model: 'answered-model', outputText: 'ok', status: 'completed', usage });
 
-function googleReply(usage: Record<string, unknown> | undefined) {
-  return defined({ text: 'ok', candidates: [{ finishReason: 'STOP' }], usageMetadata: usage });
-}
+const googleReply = (usage: Usage) => geminiReply({ text: 'ok', finishReason: 'STOP', usage });
 
 /** One `claude` process: its stdout, then a clean exit. */
-function queueSpawn(stdout: string) {
-  mockSpawn.mockImplementationOnce(() => {
-    const child = new EventEmitter() as EventEmitter & Record<string, unknown>;
-    child.stdout = new EventEmitter();
-    child.stderr = new EventEmitter();
-    child.kill = vi.fn();
-    child.stdin = { write: () => {}, end: () => {}, on: () => {} };
-    queueMicrotask(() => {
-      (child.stdout as EventEmitter).emit('data', Buffer.from(stdout + '\n'));
-      child.emit('close', 0, null);
-    });
-    return child;
-  });
-}
+const queueSpawn = (stdout: string) => queueClaudeOutput(stdout + '\n');
 
 function sessionTurn(usage: Record<string, unknown> | undefined) {
   return {

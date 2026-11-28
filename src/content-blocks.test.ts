@@ -1,45 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-// Mock the Anthropic SDK module before importing the adapter — same
-// pattern as anthropic/chatWithToolLoop.test.ts uses.
-const mockStream = vi.fn();
-const mockClientCtor = vi.fn();
+vi.mock('@anthropic-ai/sdk', () => import('./test-support/anthropic-sdk.js'));
 
-vi.mock('@anthropic-ai/sdk', () => ({
-  default: class Anthropic {
-    messages = { stream: mockStream };
-    constructor(opts: unknown) {
-      mockClientCtor(opts);
-    }
-  },
-}));
-
+import {
+  anthropicStream as mockStream,
+  anthropicCtor as mockClientCtor,
+  messageStream,
+} from './test-support/anthropic-sdk.js';
 import { chatWithToolLoop } from './anthropic/index.js';
 import { collapseContentToText, UnsupportedContentBlockError, type ContentBlock } from './index.js';
-
-interface FakeContentBlock {
-  type: string;
-  text?: string;
-  id?: string;
-  name?: string;
-  input?: Record<string, unknown>;
-}
-
-function fakeStream(blocks: FakeContentBlock[], stopReason: string) {
-  return {
-    on: () => {},
-    finalMessage: async () => ({
-      content: blocks,
-      stop_reason: stopReason,
-      usage: {
-        input_tokens: 0,
-        output_tokens: 0,
-        cache_creation_input_tokens: 0,
-        cache_read_input_tokens: 0,
-      },
-    }),
-  };
-}
 
 const PNG_BLOCK: ContentBlock = {
   type: 'image',
@@ -95,9 +64,9 @@ describe('Anthropic chatWithToolLoop — ContentBlock tool results and turn cont
   it('a STRING tool result behaves exactly as before this widening', async () => {
     mockStream
       .mockReturnValueOnce(
-        fakeStream([{ type: 'tool_use', id: 'u1', name: 'noop', input: {} }], 'tool_use')
+        messageStream([{ type: 'tool_use', id: 'u1', name: 'noop', input: {} }], 'tool_use')
       )
-      .mockReturnValueOnce(fakeStream([{ type: 'text', text: 'done' }], 'end_turn'));
+      .mockReturnValueOnce(messageStream([{ type: 'text', text: 'done' }], 'end_turn'));
 
     await chatWithToolLoop({
       systemPrompt: 's',
@@ -120,9 +89,9 @@ describe('Anthropic chatWithToolLoop — ContentBlock tool results and turn cont
   it('an executor returning an IMAGE ContentBlock[] reaches the request tool_result.content intact — never collapsed or stringified', async () => {
     mockStream
       .mockReturnValueOnce(
-        fakeStream([{ type: 'tool_use', id: 'u1', name: 'screenshot', input: {} }], 'tool_use')
+        messageStream([{ type: 'tool_use', id: 'u1', name: 'screenshot', input: {} }], 'tool_use')
       )
-      .mockReturnValueOnce(fakeStream([{ type: 'text', text: 'got it' }], 'end_turn'));
+      .mockReturnValueOnce(messageStream([{ type: 'text', text: 'got it' }], 'end_turn'));
 
     await chatWithToolLoop({
       systemPrompt: 's',
@@ -147,7 +116,7 @@ describe('Anthropic chatWithToolLoop — ContentBlock tool results and turn cont
   });
 
   it('a user turn carrying a PDF document block reaches the request messages array intact', async () => {
-    mockStream.mockReturnValueOnce(fakeStream([{ type: 'text', text: 'ok' }], 'end_turn'));
+    mockStream.mockReturnValueOnce(messageStream([{ type: 'text', text: 'ok' }], 'end_turn'));
 
     await chatWithToolLoop({
       systemPrompt: 's',

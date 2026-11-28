@@ -3,15 +3,13 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 // Mock the OpenAI SDK before importing the samba adapter (integration test).
 // SambaNova speaks the Chat Completions API via the shared OpenAI-compatible
 // factory.
-const mockCreate = vi.fn();
+vi.mock('openai', () => import('./test-support/openai-sdk.js'));
 
-vi.mock('openai', () => ({
-  default: class OpenAI {
-    chat = { completions: { create: mockCreate } };
-    constructor(_opts: unknown) {}
-  },
-}));
-
+import {
+  chatCompletionsCreate as mockCreate,
+  textCompletion,
+  toolCallCompletion,
+} from './test-support/openai-sdk.js';
 import { withAdvisor, type ConsultInfo } from './pair.js';
 import {
   setModelSpanSink,
@@ -313,34 +311,6 @@ describe('withAdvisor — onConsult hook', () => {
 
 // ── Integration: a real adapter tool loop consulting a real adapter advisor ──
 
-function textReply(content: string, usage = { prompt_tokens: 12, completion_tokens: 8 }) {
-  return {
-    choices: [{ message: { content, tool_calls: [] }, finish_reason: 'stop' }],
-    usage,
-  };
-}
-
-function consultCallReply() {
-  return {
-    choices: [
-      {
-        message: {
-          content: '',
-          tool_calls: [
-            {
-              id: 'c1',
-              type: 'function',
-              function: { name: 'consult_advisor', arguments: '{"question":"done enough?"}' },
-            },
-          ],
-        },
-        finish_reason: 'tool_calls',
-      },
-    ],
-    usage: { prompt_tokens: 10, completion_tokens: 5 },
-  };
-}
-
 describe('withAdvisor — through a real tool loop (samba, mocked SDK)', () => {
   beforeEach(() => mockCreate.mockReset());
   afterEach(() => setModelSpanSink(null));
@@ -349,9 +319,9 @@ describe('withAdvisor — through a real tool loop (samba, mocked SDK)', () => {
     // Call order on the shared mock: loop iteration 1 (consults) → advisor
     // chat (answers) → loop iteration 2 (finishes).
     mockCreate
-      .mockResolvedValueOnce(consultCallReply())
-      .mockResolvedValueOnce(textReply('yes — ship it'))
-      .mockResolvedValueOnce(textReply('done'));
+      .mockResolvedValueOnce(toolCallCompletion('consult_advisor', '{"question":"done enough?"}'))
+      .mockResolvedValueOnce(textCompletion('yes — ship it'))
+      .mockResolvedValueOnce(textCompletion('done'));
     const spans: ModelSpan[] = [];
     setModelSpanSink((s) => spans.push(s));
 

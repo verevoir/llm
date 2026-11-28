@@ -1,14 +1,11 @@
-import { EventEmitter, getEventListeners } from 'node:events';
+import { getEventListeners } from 'node:events';
 import { readFile } from 'node:fs/promises';
 import { createConnection } from 'node:net';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const mockSpawn = vi.fn();
+vi.mock('node:child_process', () => import('../test-support/claude-child.js'));
 
-vi.mock('node:child_process', () => ({
-  spawn: (...args: unknown[]) => mockSpawn(...args),
-}));
-
+import { spawn as mockSpawn, fakeClaudeChild as fakeChild } from '../test-support/claude-child.js';
 import {
   CLAUDE_CLI_SESSION_TURN_TIMEOUT_CODE,
   closeSession,
@@ -21,37 +18,6 @@ import {
   SESSION_TURN_TIMEOUT_MS,
 } from './session.js';
 import { classifyLlmError, type ToolDef } from '../index.js';
-
-/** A fake `claude` child for the session-holding transport: stdout is an
- * EventEmitter tests push stream-json lines onto directly (`emitLine`),
- * stdin.write is recorded per call, and `kill` is a spy so
- * eviction/teardown tests can assert the process was actually asked to
- * stop. This file never writes to stdin or waits on a `result` event
- * itself — that's wave 2b's `runSessionTurn` — but `getOrCreateSession`
- * still wires the child's stdout/close/error listeners (`wireSessionEvents`),
- * so a fake child needs the same shape as wave 2b's fixture. */
-function fakeChild() {
-  const child = new EventEmitter() as EventEmitter & {
-    stdout: EventEmitter;
-    stdin: { write: (s: string) => void; end: () => void };
-    kill: ReturnType<typeof vi.fn>;
-  };
-  child.stdout = new EventEmitter();
-  child.kill = vi.fn();
-  const written: string[] = [];
-  child.stdin = {
-    write: (s: string) => {
-      written.push(s);
-    },
-    end: () => {},
-  };
-  return {
-    child,
-    written,
-    emitLine: (obj: unknown) => child.stdout.emit('data', Buffer.from(JSON.stringify(obj) + '\n')),
-    emitRaw: (text: string) => child.stdout.emit('data', Buffer.from(text)),
-  };
-}
 
 /** Recovers the REAL (unmocked) bridge's port + shared token the same
  * way the actual generated shim does — by reading the `--mcp-config`

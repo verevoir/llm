@@ -8,16 +8,13 @@ import {
 
 // Mock the OpenAI SDK before importing the adapters. Every adapter here
 // speaks the Chat Completions API, so one fake serves them all.
-const mockCreate = vi.fn();
+vi.mock('openai', () => import('./test-support/openai-sdk.js'));
 
-vi.mock('openai', () => ({
-  default: class OpenAI {
-    chat = { completions: { create: mockCreate } };
-    constructor(_opts: unknown) {}
-  },
-}));
-
-// Import AFTER vi.mock so the mocked constructor is the one captured.
+import {
+  chatCompletionsCreate as mockCreate,
+  textCompletion,
+  toolCallCompletion,
+} from './test-support/openai-sdk.js';
 import { samba } from './samba/index.js';
 import { mistral } from './mistral/index.js';
 import * as deepseek from './deepseek/index.js';
@@ -39,30 +36,6 @@ const TOOL = {
   description: 'record a thing',
   input_schema: { type: 'object' as const, properties: { x: { type: 'number' } } },
 };
-
-function textReply(content: string) {
-  return {
-    choices: [{ message: { content, tool_calls: [] }, finish_reason: 'stop' }],
-    usage: { prompt_tokens: 12, completion_tokens: 8 },
-  };
-}
-
-function toolCallReply() {
-  return {
-    choices: [
-      {
-        message: {
-          content: '',
-          tool_calls: [
-            { id: 'c1', type: 'function', function: { name: 'record', arguments: '{"x":1}' } },
-          ],
-        },
-        finish_reason: 'tool_calls',
-      },
-    ],
-    usage: { prompt_tokens: 10, completion_tokens: 5 },
-  };
-}
 
 type ModelChoice = Pick<ChatOptions, 'model' | 'modelClass' | 'onUsage'>;
 
@@ -143,7 +116,7 @@ describe('OpenAI-compatible adapters — the model a caller names', () => {
   });
 
   it.each(CASES)('$name sends the named model, not the class’s', async ({ run }) => {
-    mockCreate.mockResolvedValue(textReply('ok'));
+    mockCreate.mockResolvedValue(textCompletion('ok'));
 
     await run({ model: NAMED, modelClass: 'extraction' });
 
@@ -151,7 +124,7 @@ describe('OpenAI-compatible adapters — the model a caller names', () => {
   });
 
   it.each(CASES)('$name sends the class’s model when none is named', async ({ run, models }) => {
-    mockCreate.mockResolvedValue(textReply('ok'));
+    mockCreate.mockResolvedValue(textCompletion('ok'));
 
     await run({ modelClass: 'extraction' });
 
@@ -159,7 +132,7 @@ describe('OpenAI-compatible adapters — the model a caller names', () => {
   });
 
   it.each(CASES)('$name reports the model sent on the usage and the span', async ({ run }) => {
-    mockCreate.mockResolvedValue(textReply('ok'));
+    mockCreate.mockResolvedValue(textCompletion('ok'));
     const hooked: TokenUsage[] = [];
     const spans: ModelSpan[] = [];
     setModelSpanSink((s) => spans.push(s));
@@ -183,7 +156,7 @@ describe('OpenAI-compatible adapters — the model a caller names', () => {
   it.each(CASES)(
     '$name keeps the class asked for as the usage direction when a model is named',
     async ({ run }) => {
-      mockCreate.mockResolvedValue(textReply('ok'));
+      mockCreate.mockResolvedValue(textCompletion('ok'));
 
       const withClass = await run({ model: NAMED, modelClass: 'extraction' });
       const withoutClass = await run({ model: NAMED });
@@ -267,9 +240,9 @@ describe('OpenAI-compatible adapters — the model a caller names', () => {
       // Two iterations that both call a tool reach the cap, so the loop makes
       // its final no-tools call: three requests in all.
       mockCreate
-        .mockResolvedValueOnce(toolCallReply())
-        .mockResolvedValueOnce(toolCallReply())
-        .mockResolvedValueOnce(textReply('done'));
+        .mockResolvedValueOnce(toolCallCompletion())
+        .mockResolvedValueOnce(toolCallCompletion())
+        .mockResolvedValueOnce(textCompletion('done'));
       const hooked: TokenUsage[] = [];
 
       const result = await a.chatWithToolLoop({
