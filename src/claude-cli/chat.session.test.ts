@@ -721,33 +721,44 @@ describe('claudeCli.chatWithToolLoop — GenAI spans', () => {
     }
   );
 
-  // Each kind of reported cost, as the CLI's JSON carries it. `cost.test`
-  // holds every classification; these rows hold the wiring on each path.
+  // Each kind of reported cost, as the CLI's JSON carries it. `readReportedCost`'s
+  // tests in `cost.test.ts` hold the classification of every type and value;
+  // these rows hold the wiring on each path, with the counts the cost must not move.
   const COST = ATTR_VEREVOIR_COST_USD_REPORTED;
   const INVALID = ATTR_VEREVOIR_COST_USD_REPORTED_INVALID_TYPE;
   const COST_ROWS: {
-    row: string;
+    says: string;
     costJson?: string;
     usage: Pick<TokenUsage, 'costUsdReported' | 'costUsdReportedInvalidType'>;
     span: Record<string, unknown>;
   }[] = [
-    { row: 'finite', costJson: '0.5', usage: { costUsdReported: 0.5 }, span: { [COST]: 0.5 } },
-    { row: 'JSON -0', costJson: '-0', usage: { costUsdReported: 0 }, span: { [COST]: 0 } },
-    { row: 'missing', usage: {}, span: {} },
     {
-      row: 'malformed',
+      says: 'a finite cost is relayed as reported',
+      costJson: '0.5',
+      usage: { costUsdReported: 0.5 },
+      span: { [COST]: 0.5 },
+    },
+    {
+      says: 'a cost of JSON -0 is relayed as 0',
+      costJson: '-0',
+      usage: { costUsdReported: 0 },
+      span: { [COST]: 0 },
+    },
+    { says: 'no reported cost gives no cost and no invalid type', usage: {}, span: {} },
+    {
+      says: 'a cost that is a string is not relayed, and its type is recorded',
       costJson: '"oops"',
       usage: { costUsdReportedInvalidType: 'string' },
       span: { [INVALID]: 'string' },
     },
     {
-      row: 'negative',
+      says: 'a negative cost is not relayed, and is recorded as negative',
       costJson: '-0.5',
       usage: { costUsdReportedInvalidType: 'negative' },
       span: { [INVALID]: 'negative' },
     },
     {
-      row: 'the 1e999 overflow',
+      says: 'a cost of 1e999 is not relayed, and is recorded as non-finite',
       costJson: '1e999',
       usage: { costUsdReportedInvalidType: 'non-finite' },
       span: { [INVALID]: 'non-finite' },
@@ -764,7 +775,7 @@ describe('claudeCli.chatWithToolLoop — GenAI spans', () => {
     Object.fromEntries(Object.entries(from).filter(([key]) => keys.includes(key)));
 
   it.each(SPAN_SITES.flatMap((site) => COST_ROWS.map((row) => ({ ...site, ...row }))))(
-    '$site, $row reported cost: the cost fields, the span cost attributes and the four counts',
+    '$site: $says',
     async ({ run, costJson, usage, span }) => {
       const reply = await run(COST_USAGE, costJson);
 
@@ -777,7 +788,7 @@ describe('claudeCli.chatWithToolLoop — GenAI spans', () => {
           'cacheReadInputTokens',
           'cacheCreationInputTokens',
         ]),
-        span: present(exporter.getFinishedSpans()[0].attributes, [COST, INVALID]),
+        span: present(exporter.getFinishedSpans().slice(-1)[0].attributes, [COST, INVALID]),
       }).toStrictEqual({
         usage: {
           ...usage,

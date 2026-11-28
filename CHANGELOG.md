@@ -4,8 +4,8 @@
 
 **The `/claude-cli` reported-cost tests are one table.** It lives in `src/claude-cli/chat.session.test.ts`, beside the span-usage rows, and runs six kinds of `total_cost_usd` (finite, JSON `-0`, missing, malformed, negative and the `1e999` overflow) on each of the four call paths: one-shot `chat()`, `chat()` on a held session, and `chatWithToolLoop` with and without a held session. Each row compares, in one `toStrictEqual`, the returned `costUsdReported` and `costUsdReportedInvalidType`, the span's two cost attributes and the four returned counts, so a key set to `undefined` fails just as a wrong value does. No behaviour of the library changes.
 
-- **Replaced**: the `costUsdReported` block in `chat.test.ts` (33 tests) and the cost tests in `chat.session.test.ts` (4 span tests and 46 in "costUsdReported on a held session"), 83 tests in all, by the table's 24 rows.
-- **Where each fault is caught**: classifying a value (every malformed type, `NaN`, `-Infinity`) stays in `cost.test.ts`. The table catches each call path's wiring, the span's cost attributes, keys left out rather than set to `undefined`, the `-0` normalisation and the overflow. The last two stay because only parsing JSON can produce them.
+- **Replaced**: the `costUsdReported` block in `chat.test.ts` (33 tests) and the cost tests in `chat.session.test.ts` (4 span tests and 46 in "costUsdReported on a held session"), 83 tests in all, by the table's 24 rows, each named for what it holds ("a negative cost is not relayed, and is recorded as negative").
+- **Where each fault is caught**: classifying a value (every malformed type, `NaN`, `-Infinity`) stays in `cost.test.ts`. The table catches each call path's wiring, the span's cost attributes, keys left out rather than set to `undefined`, the `-0` normalisation and the overflow. `-0` and the overflow are values only parsing JSON yields: the one-shot path parses the child's own output, and the held-session rows are given the value already parsed.
 
 ## [0.47.1] — 2026-11-28
 
