@@ -2,11 +2,9 @@ import { AnthropicVertex } from '@anthropic-ai/vertex-sdk';
 import type { AnthropicTransport } from '../anthropic/adapter.js';
 import { resolveBaseUrl } from '../index.js';
 
-// Internal client module for the Vertex route: where the project, region,
-// address and token come from, and the one kept client. It is NOT in the
-// package `exports` map, so nothing here — including the test-only reset —
-// ships on the public `@verevoir/llm/vertex` surface; the co-located tests
-// import it directly.
+// Internal client module for the Vertex route: where its four settings come
+// from, and the one kept client. It is NOT in the package `exports` map, so
+// nothing here, the test-only reset included, is on the public surface.
 
 /** The environment variable holding the Google Cloud project id. */
 const PROJECT_ENV = 'ANTHROPIC_VERTEX_PROJECT_ID';
