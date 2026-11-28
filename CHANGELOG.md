@@ -4,7 +4,7 @@
 
 **The `/claude-cli` idle-timeout tests take one silent child where they took four, and the clearing of the idle timer after a prompt completion is now under test.** Only `src/claude-cli/chat.idle-timeout.test.ts` changes; no behaviour of the library changes. That file runs in about 5 s, down from about 13 s, and with it the whole suite.
 
-- **One test for a silent child.** The three tests of the rejection's message, code and `timeoutMs`, and the test that the child is killed, are one test over one rejection: it compares `{ message, code, timeoutMs }` in one `toEqual`, whose diff names the field that broke, then checks that the child's process is gone.
+- **One silent child, started once.** The three tests of the rejection's message, code and `timeoutMs`, and the test that the child is killed, each started a child and waited out the idle timeout. One child is started for both of what remains: a test that compares `{ message, code, timeoutMs }` in one `toEqual`, whose diff names the field that broke, and a test that the child's process is gone.
 - **A prompt completion leaves no idle timer pending.** The test that waited 2.5 s after a clean close could not fail if `runClaudeCli` left the idle timer set. In its place, a test fakes `setTimeout` and `clearTimeout` around a real stub child and asserts `vi.getTimerCount()` is `0` once `chat()` resolves; leaving out the `clearTimeout` in `runClaudeCli`'s `finish` fails it.
 
 ## [0.47.0] — 2026-11-28
