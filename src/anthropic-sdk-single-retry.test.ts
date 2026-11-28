@@ -10,6 +10,15 @@
  * `messages.stream`, so there is no call shape that is not. No network; every
  * wait, the SDK's request timeout included, runs on fake timers.
  *
+ * Two SDK paths are here: the direct `Anthropic` client and `AnthropicVertex`.
+ * The full-row site of each, marked by `fullRows` on its route, runs every row
+ * of the shared driver, all the stream failures with them: every call shape
+ * consumes its stream through one function (`callStreamed` in
+ * `./anthropic/adapter.ts`), so a stream failure is classified per path. Every
+ * other credential route and call shape runs the rows a site can break on its
+ * own, with a stream that fails part-way with a retried error among them, and
+ * every site answers with the retry alone after a stream that failed part-way.
+ *
  * The Vertex client is the real one, built by `./vertex/client.ts` with the
  * options that module gives it. Only its credential is replaced: the module
  * builds the client with no credential option, which sends the SDK to Google
@@ -18,7 +27,7 @@
  * class is wrapped to add a fake `authClient`, and nothing else.
  */
 
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const vertexOptions = vi.hoisted(() => [] as Record<string, unknown>[]);
 
@@ -38,20 +47,27 @@ vi.mock('@anthropic-ai/vertex-sdk', async (importOriginal) => {
 });
 
 import Anthropic from '@anthropic-ai/sdk';
-import type { ChatRetryInfo, ToolDef } from './index.js';
+import type { ToolDef } from './index.js';
 import * as anthropic from './anthropic/index.js';
 import { resetClientStateForTests } from './anthropic/client.js';
 import * as vertex from './vertex/index.js';
 import { resetClientForTests } from './vertex/client.js';
-import { RETRY_BACKOFFS_MS, TIMEOUT_RETRIES } from './retry-policy.js';
-
-const fetchMock = vi.fn<(url: string | URL | Request, init?: RequestInit) => Promise<Response>>();
-
-const json = (body: unknown, status: number, headers: Record<string, string> = {}): Response =>
-  new Response(JSON.stringify(body), {
-    status,
-    headers: { 'content-type': 'application/json', ...headers },
-  });
+import { RETRY_BACKOFFS_MS } from './retry-policy.js';
+import {
+  classOf,
+  fetchMock,
+  isolateEnv,
+  json,
+  pathRows,
+  run,
+  siteRows,
+  statusOf,
+  useFakeFetch,
+  type Call,
+  type Extra,
+  type Row,
+  type Site,
+} from './test-support/fetch-driver.js';
 
 type StreamEvent = { type: string } & Record<string, unknown>;
 
@@ -146,88 +162,101 @@ const TOOL: ToolDef = {
   input_schema: { type: 'object', properties: {} },
 };
 
-type Extra = {
-  apiKey?: string;
-  onRetry?: (info: ChatRetryInfo) => Promise<void>;
-  abortSignal?: AbortSignal;
-};
-/** Make a call of one shape, and give back the text it answered with. */
-type Call = (extra: Extra) => Promise<string>;
+type Shape = 'chat' | 'chatWithTools' | 'chatWithToolLoop';
 
 /** The three call shapes of an adapter built on the shared implementation. */
-const shapes = (a: typeof anthropic | typeof vertex): [string, Call][] => [
-  ['chat', async (extra) => (await a.chat({ ...BASE, ...extra })).content],
-  [
-    'chatWithTools',
-    async (extra) => (await a.chatWithTools({ ...BASE, ...extra, tools: [TOOL] })).text,
-  ],
-  [
-    'chatWithToolLoop',
-    async (extra) =>
-      (
-        await a.chatWithToolLoop({
-          ...BASE,
-          ...extra,
-          tools: [TOOL],
-          executor: async () => 'looked up',
-        })
-      ).text,
-  ],
-];
+const shapes = (a: typeof anthropic | typeof vertex): Record<Shape, Call> => ({
+  chat: async (extra) => (await a.chat({ ...BASE, ...extra })).content,
+  chatWithTools: async (extra) =>
+    (await a.chatWithTools({ ...BASE, ...extra, tools: [TOOL] })).text,
+  chatWithToolLoop: async (extra) =>
+    (
+      await a.chatWithToolLoop({
+        ...BASE,
+        ...extra,
+        tools: [TOOL],
+        executor: async () => 'looked up',
+      })
+    ).text,
+});
+
+/** The SDK paths here: the direct `Anthropic` client, and `AnthropicVertex`. */
+const SDK_PATHS = ['Anthropic', 'AnthropicVertex'] as const;
 
 /** Every way a client is built. The direct route builds one per call for a
  * per-call key and keeps one for the environment's credential, which is an
- * API key or a subscription token; the Vertex route keeps one. */
+ * API key or a subscription token; the Vertex route keeps one. `fullRows`
+ * names the call shape that is its SDK path's full-row site. */
 const ROUTES: {
   name: string;
+  sdkPath: (typeof SDK_PATHS)[number];
   env: Record<string, string>;
   key: Extra;
   adapter: typeof anthropic | typeof vertex;
-  shapes: [string, Call][];
+  fullRows?: Shape;
 }[] = [
   {
     name: 'anthropic',
+    sdkPath: 'Anthropic',
     env: {},
     key: { apiKey: 'per-call-key' },
     adapter: anthropic,
-    shapes: shapes(anthropic),
   },
   {
     name: 'anthropic',
+    sdkPath: 'Anthropic',
     env: { ANTHROPIC_API_KEY: 'environment-key' },
     key: {},
     adapter: anthropic,
-    shapes: shapes(anthropic),
+    fullRows: 'chat',
   },
   {
     name: 'anthropic',
+    sdkPath: 'Anthropic',
     env: { CLAUDE_CODE_OAUTH_TOKEN: 'environment-token' },
     key: {},
     adapter: anthropic,
-    shapes: shapes(anthropic),
   },
   {
     name: 'vertex',
+    sdkPath: 'AnthropicVertex',
     env: { ANTHROPIC_VERTEX_PROJECT_ID: 'proj', CLOUD_ML_REGION: 'region' },
     key: {},
     adapter: vertex,
-    shapes: shapes(vertex),
+    fullRows: 'chat',
   },
 ];
 
 const credentialOf = (env: Record<string, string>, key: Extra): string =>
   key.apiKey ? 'a per-call key' : `${Object.keys(env).join(' and ')} set`;
 
-const CASES = ROUTES.flatMap(({ name, env, key, shapes: routeShapes }) =>
-  routeShapes.map(([shape, call]) => ({
-    title: `${name}.${shape} with ${credentialOf(env, key)}`,
-    env,
-    key,
-    call,
-  }))
+const typeOf = (error: unknown) => (error as { type?: unknown }).type;
+
+const refusal = (status: number, headers?: Record<string, string>): Response =>
+  json({ type: 'error', error: { type: 'refused_error', message: 'refused' } }, status, headers);
+
+const CASES = ROUTES.flatMap(({ name, sdkPath, env, key, adapter, fullRows }) =>
+  Object.entries(shapes(adapter)).map(([shape, call]) => {
+    const site: Site = {
+      call,
+      key,
+      refusal,
+      answer: () => answered(ANSWER),
+      text: ANSWER,
+      timeoutMs: Anthropic.DEFAULT_TIMEOUT,
+    };
+    return {
+      title: `${name}.${shape} with ${credentialOf(env, key)}`,
+      sdkPath,
+      env,
+      site,
+      fullRows: shape === fullRows,
+    };
+  })
 );
 
-const ENV = [
+useFakeFetch();
+isolateEnv([
   'ANTHROPIC_API_KEY',
   'ANTHROPIC_AUTH_TOKEN',
   'ANTHROPIC_BASE_URL',
@@ -235,143 +264,36 @@ const ENV = [
   'ANTHROPIC_VERTEX_PROJECT_ID',
   'ANTHROPIC_VERTEX_BASE_URL',
   'CLOUD_ML_REGION',
-];
-const saved: Record<string, string | undefined> = {};
+]);
 
-// A client takes the global `fetch` when it is built: the fake is in place
-// for the whole file, and each test starts with no kept client.
-beforeAll(() => {
-  vi.stubGlobal('fetch', fetchMock);
-});
-
-afterAll(() => {
-  vi.unstubAllGlobals();
-});
-
+// Each test starts with no kept client.
 beforeEach(() => {
-  fetchMock.mockReset();
   vertexOptions.length = 0;
   resetClientStateForTests();
   resetClientForTests();
-  for (const k of ENV) {
-    saved[k] = process.env[k];
-    delete process.env[k];
-  }
-  vi.useFakeTimers();
 });
 
-afterEach(() => {
-  vi.useRealTimers();
-  for (const k of ENV) {
-    if (saved[k] === undefined) delete process.env[k];
-    else process.env[k] = saved[k];
-  }
-});
+const failingPartWay = (type: string) => () =>
+  fetchMock.mockImplementation(async () => failedPartWay(PARTIAL, type));
 
-const refuse = (status: number, headers?: Record<string, string>) => () =>
-  fetchMock.mockImplementation(async () =>
-    json({ type: 'error', error: { type: 'refused_error', message: 'refused' } }, status, headers)
-  );
-
-/** `fetch` rejects, as it does when no connection can be made. */
-function failToConnect(): void {
-  fetchMock.mockImplementation(async () => {
-    throw new TypeError('fetch failed');
-  });
-}
-
-/** `fetch` never answers. It rejects only when the SDK aborts the request,
- * which the SDK does when its own request timeout runs out. */
-function neverAnswer(): void {
-  fetchMock.mockImplementation(
-    (_url, init) =>
-      new Promise<Response>((_resolve, reject) => {
-        init?.signal?.addEventListener('abort', () =>
-          reject(new DOMException('This operation was aborted', 'AbortError'))
-        );
-      })
-  );
-}
-
-interface Outcome {
-  resolved: boolean;
-  text?: string;
-  error?: unknown;
-  retries: ChatRetryInfo[];
-}
-
-/** Make the call, run every wait it starts on the fake clock, and say how it
- * ended and what `onRetry` was told. */
-async function run(call: Call, key: Extra): Promise<Outcome> {
-  const retries: ChatRetryInfo[] = [];
-  let outcome: Outcome | undefined;
-  void call({
-    ...key,
-    onRetry: async (info) => {
-      retries.push(info);
-    },
-  }).then(
-    (text) => (outcome = { resolved: true, text, retries }),
-    (error: unknown) => (outcome = { resolved: false, error, retries })
-  );
-  do {
-    await vi.runAllTimersAsync();
-  } while (!outcome);
-  return outcome;
-}
-
-const statusOf = (error: unknown) => (error as { status?: number }).status;
-const typeOf = (error: unknown) => (error as { type?: unknown }).type;
-const classOf = (error: unknown) => (error as Error).constructor.name;
-
-/** The retries the policy allows, from its own list of waits. */
-const RETRIES = RETRY_BACKOFFS_MS.length;
-
-type Row = [name: string, arrange: () => void, thrown: (error: unknown) => void];
-
-/** Every failure the policy retries on its list of waits: how to produce it,
- * and what is thrown once the retries are spent. */
-const RETRIED: Row[] = [
-  ...[408, 409, 429, 500, 502, 503, 504, 529].map((status): Row => [
-    `a ${status}`,
-    refuse(status),
-    (error) => expect(statusOf(error)).toBe(status),
-  ]),
-  [
-    'a connection failure (fetch rejects)',
-    failToConnect,
-    (error) => expect(classOf(error)).toBe('APIConnectionError'),
-  ],
-  [
-    'a 400 with x-should-retry: true',
-    refuse(400, { 'x-should-retry': 'true' }),
-    (error) => expect(statusOf(error)).toBe(400),
-  ],
-  ...['overloaded_error', 'rate_limit_error', 'api_error', 'timeout_error'].map((type): Row => [
-    `a stream that fails part-way with ${type}`,
-    () => fetchMock.mockImplementation(async () => failedPartWay(PARTIAL, type)),
-    (error) => {
-      expect(statusOf(error)).toBeUndefined();
-      expect(typeOf(error)).toBe(type);
-    },
-  ]),
-];
-
-/** Every failure sent once and thrown. */
-const NOT_RETRIED: Row[] = [
-  ...[400, 401, 403, 404, 422].map((status): Row => [
-    `a ${status}`,
-    refuse(status),
-    (error) => expect(statusOf(error)).toBe(status),
-  ]),
-  ...[429, 503].map((status): Row => [
-    `a ${status} with x-should-retry: false`,
-    refuse(status, { 'x-should-retry': 'false' }),
-    (error) => expect(statusOf(error)).toBe(status),
-  ]),
+/** The failures only a streamed answer meets: retried, and sent once. */
+const STREAM_RETRIED: Row[] = [
+  'overloaded_error',
+  'rate_limit_error',
+  'api_error',
+  'timeout_error',
+].map((type): Row => [
+  `a stream that fails part-way with ${type}`,
+  failingPartWay(type),
+  (error) => {
+    expect(statusOf(error)).toBeUndefined();
+    expect(typeOf(error)).toBe(type);
+  },
+]);
+const STREAM_NOT_RETRIED: Row[] = [
   [
     'a stream that fails part-way with invalid_request_error',
-    () => fetchMock.mockImplementation(async () => failedPartWay(PARTIAL, 'invalid_request_error')),
+    failingPartWay('invalid_request_error'),
     (error) => expect(typeOf(error)).toBe('invalid_request_error'),
   ],
   [
@@ -381,142 +303,45 @@ const NOT_RETRIED: Row[] = [
   ],
 ];
 
-it('the policy allows at least one retry, so no count below is vacuous', () => {
-  expect(RETRIES).toBeGreaterThan(0);
+it('the policy allows at least one retry, so no count the rows make is vacuous', () => {
+  expect(RETRY_BACKOFFS_MS.length).toBeGreaterThan(0);
 });
 
-describe.each(CASES)('$title: the library retry policy is the only one', ({ env, key, call }) => {
-  beforeEach(() => {
-    Object.assign(process.env, env);
-  });
+it.each(SDK_PATHS)('the %s SDK path has exactly one full-row site', (sdkPath) => {
+  expect(CASES.filter((c) => c.sdkPath === sdkPath && c.fullRows)).toHaveLength(1);
+});
 
-  it.each(RETRIED)(
-    'sends %s answered every time once, then once per retry the policy allows, telling onRetry of each',
-    async (_name, arrange, thrown) => {
-      arrange();
+describe.each(CASES)(
+  '$title: the library retry policy is the only one',
+  ({ env, site, fullRows }) => {
+    beforeEach(() => {
+      Object.assign(process.env, env);
+    });
 
-      const { resolved, error, retries } = await run(call, key);
-
-      expect(resolved).toBe(false);
-      thrown(error);
-      expect(fetchMock).toHaveBeenCalledTimes(1 + RETRIES);
-      expect(retries.map((r) => [r.attempt, r.maxAttempts, r.delayMs])).toEqual(
-        RETRY_BACKOFFS_MS.map((delayMs, i) => [i + 1, RETRIES, delayMs])
-      );
+    if (fullRows) {
+      pathRows(site, {
+        retried: STREAM_RETRIED,
+        notRetried: STREAM_NOT_RETRIED,
+        recoversFrom: [529],
+      });
+    } else {
+      siteRows(site, { retried: [STREAM_RETRIED[0]] });
     }
-  );
 
-  it.each(NOT_RETRIED)(
-    'sends %s once, and onRetry is not called',
-    async (_name, arrange, thrown) => {
-      arrange();
-
-      const { resolved, error, retries } = await run(call, key);
-
-      expect(resolved).toBe(false);
-      thrown(error);
-      expect(fetchMock).toHaveBeenCalledTimes(1);
-      expect(retries).toEqual([]);
-    }
-  );
-
-  it.each([
-    ['a 429', () => json({ type: 'error', error: { type: 'e', message: 'slow down' } }, 429)],
-    ['a 529', () => json({ type: 'error', error: { type: 'e', message: 'overloaded' } }, 529)],
-    [
-      'a connection failure',
-      (): Response => {
-        throw new TypeError('fetch failed');
-      },
-    ],
-  ])(
-    'sends a request that meets %s and then succeeds twice, and delivers one answer',
-    async (_name, firstAnswer) => {
+    it('answers with the retry alone when the first stream delivered part of an answer and then failed', async () => {
       fetchMock.mockImplementation(async () => answered(ANSWER));
-      fetchMock.mockImplementationOnce(async () => firstAnswer());
+      fetchMock.mockImplementationOnce(async () => failedPartWay(PARTIAL, 'overloaded_error'));
 
-      const { resolved, text, retries } = await run(call, key);
+      const { resolved, text, retries } = await run(site.call, site.key);
 
       expect(resolved).toBe(true);
       expect(text).toBe(ANSWER);
+      expect(text).not.toContain(PARTIAL);
       expect(fetchMock).toHaveBeenCalledTimes(2);
-      expect(retries.map((r) => r.attempt)).toEqual([1]);
-    }
-  );
-
-  it('answers with the retry alone when the first stream delivered part of an answer and then failed', async () => {
-    fetchMock.mockImplementation(async () => answered(ANSWER));
-    fetchMock.mockImplementationOnce(async () => failedPartWay(PARTIAL, 'overloaded_error'));
-
-    const { resolved, text, retries } = await run(call, key);
-
-    expect(resolved).toBe(true);
-    expect(text).toBe(ANSWER);
-    expect(text).not.toContain(PARTIAL);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(retries.map((r) => [r.attempt, r.delayMs])).toEqual([[1, RETRY_BACKOFFS_MS[0]]]);
-  });
-
-  it("sends a request never answered once, then TIMEOUT_RETRIES times more with no wait: the SDK's request timeout each time, and nothing between", async () => {
-    neverAnswer();
-    const began = Date.now();
-
-    const { resolved, error, retries } = await run(call, key);
-
-    expect(resolved).toBe(false);
-    expect(classOf(error)).toBe('APIConnectionTimeoutError');
-    expect(fetchMock).toHaveBeenCalledTimes(1 + TIMEOUT_RETRIES);
-    expect(retries.map((r) => [r.attempt, r.maxAttempts, r.delayMs])).toEqual(
-      Array.from({ length: TIMEOUT_RETRIES }, (_, i) => [i + 1, RETRIES, 0])
-    );
-    expect(Date.now() - began).toBe((1 + TIMEOUT_RETRIES) * Anthropic.DEFAULT_TIMEOUT);
-  });
-
-  it.each(RETRY_BACKOFFS_MS.map((ms, i) => [i + 1, ms / 1000, i] as const))(
-    "an abort of the caller's signal during wait %i (%i s) ends the call at once with the signal's reason, and no further request is sent",
-    async (_n, _seconds, i) => {
-      refuse(503)();
-      const controller = new AbortController();
-      const reason = new Error('the caller gave up');
-      let ended: { error: unknown } | undefined;
-      void call({ ...key, abortSignal: controller.signal }).then(
-        () => (ended = { error: undefined }),
-        (error: unknown) => (ended = { error })
-      );
-
-      // To the middle of this wait: every wait before it has run out.
-      const waited = RETRY_BACKOFFS_MS.slice(0, i).reduce((a, b) => a + b, 0);
-      await vi.advanceTimersByTimeAsync(waited + RETRY_BACKOFFS_MS[i] / 2);
-      expect(fetchMock).toHaveBeenCalledTimes(i + 1);
-      expect(ended).toBeUndefined();
-
-      controller.abort(reason);
-      await vi.advanceTimersByTimeAsync(0);
-
-      expect(ended).toEqual({ error: reason });
-      expect(ended?.error).toBe(reason);
-      await vi.runAllTimersAsync();
-      expect(fetchMock).toHaveBeenCalledTimes(i + 1);
-    }
-  );
-
-  it("sends nothing when the caller's signal is aborted before the call", async () => {
-    fetchMock.mockImplementation(async () => answered(ANSWER));
-    const controller = new AbortController();
-    const reason = new Error('the caller gave up');
-    controller.abort(reason);
-
-    const { resolved, error, retries } = await run(call, {
-      ...key,
-      abortSignal: controller.signal,
+      expect(retries.map((r) => [r.attempt, r.delayMs])).toEqual([[1, RETRY_BACKOFFS_MS[0]]]);
     });
-
-    expect(resolved).toBe(false);
-    expect(error).toBe(reason);
-    expect(fetchMock).not.toHaveBeenCalled();
-    expect(retries).toEqual([]);
-  });
-});
+  }
+);
 
 /** The body of the request `fetch` was given on its `n`th call, from 1. */
 const bodyOf = (n: number): Record<string, unknown> =>
@@ -584,7 +409,7 @@ describe('the real clients these counts are taken through', () => {
     Object.assign(process.env, { ANTHROPIC_VERTEX_PROJECT_ID: 'proj', CLOUD_ML_REGION: 'region' });
     fetchMock.mockImplementation(async () => answered(ANSWER));
 
-    await run(shapes(vertex)[0][1], {});
+    await run(shapes(vertex).chat, {});
 
     expect(vertexOptions).toEqual([{ projectId: 'proj', region: 'region', maxRetries: 0 }]);
     const [url, init] = fetchMock.mock.calls[0];
@@ -598,7 +423,7 @@ describe('the real clients these counts are taken through', () => {
     process.env.ANTHROPIC_API_KEY = 'environment-key';
     fetchMock.mockImplementation(async () => answered(ANSWER));
 
-    await run(shapes(anthropic)[0][1], {});
+    await run(shapes(anthropic).chat, {});
 
     expect(String(fetchMock.mock.calls[0][0])).toBe('https://api.anthropic.com/v1/messages');
   });
@@ -672,7 +497,7 @@ describe('the real clients these counts are taken through', () => {
       json({ type: 'error', error: { type: 'authentication_error', message: 'no' } }, 401)
     );
 
-    const { resolved, text, retries } = await run(shapes(anthropic)[0][1], {});
+    const { resolved, text, retries } = await run(shapes(anthropic).chat, {});
     stderr.mockRestore();
 
     expect(resolved).toBe(true);
@@ -681,13 +506,13 @@ describe('the real clients these counts are taken through', () => {
     expect(retries).toEqual([]);
   });
 
-  it.each(shapes(anthropic))(
+  it.each(Object.entries(shapes(anthropic)))(
     "%s: an abort of the caller's signal during a wait of the call made on the metered key, after a subscription token is rejected with a 401, ends the call at once with the signal's reason, and no further request is sent",
     async (_shape, call) => {
       process.env.CLAUDE_CODE_OAUTH_TOKEN = 'environment-token';
       process.env.ANTHROPIC_API_KEY = 'environment-key';
       const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
-      refuse(503)();
+      fetchMock.mockImplementation(async () => refusal(503));
       fetchMock.mockImplementationOnce(async () =>
         json({ type: 'error', error: { type: 'authentication_error', message: 'no' } }, 401)
       );
