@@ -414,7 +414,7 @@ for each `cache` value (`'none' | 'default' | 'prefix'`), the same tool loop and
 retries, `image` / `document` content blocks included. What differs:
 
 - **Credentials.** Authentication is Google Cloud's standard credentials flow,
-  run by the Vertex SDK. There is no API key: a per-call `apiKey` is refused
+  run by the Vertex SDK, or a fixed token (below). There is no API key: a per-call `apiKey` is refused
   with a plain error, and `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` are
   never read, so the direct adapter's subscription-token identity and its
   fallback to the metered key do not exist on this route.
@@ -424,7 +424,20 @@ retries, `image` / `document` content blocks included. What differs:
   either is unset or blank the call is refused before anything is sent, with a
   plain error that names the variable and no value
   (`No Vertex AI region: set CLOUD_ML_REGION.`, and the same for the project).
-  One client is kept and reused for as long as both stay the same.
+  One client is kept and reused for as long as both stay the same, and the
+  two settings below.
+- **Another address, and a fixed token.** Two more environment variables, also
+  read on each call:
+
+  | Variable                        | What it does                                                                                                                                                                                                                                                                                                                                                 |
+  | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+  | `ANTHROPIC_VERTEX_BASE_URL`     | The address requests go to — a gateway, a proxy, a local stand-in — version segment included, as in the default `https://<region>-aiplatform.googleapis.com/v1`. The Vertex SDK adds `/projects/<project>/locations/<region>/publishers/anthropic/models/<model>:streamRawPredict` after it. Like the other base-address overrides, its form is not checked. |
+  | `ANTHROPIC_VERTEX_ACCESS_TOKEN` | A fixed access token. Every request carries `Authorization: Bearer <token>`, and no Google Cloud credential is looked for. The token appears in no error the library throws and no span.                                                                                                                                                                     |
+
+  Project and region are required with either, as both are in the path; a
+  stand-in takes any plain value. `route` is `'google-cloud'`. With neither
+  set the client is built exactly as above.
+
 - **Model names.** The name is sent exactly as given: `model` when set,
   otherwise the Anthropic catalogue's id for the `modelClass`. There is no
   mapping to Vertex AI's names. Where Vertex AI names a model differently, pass
@@ -661,6 +674,10 @@ MUST be used, and otherwise a custom value MAY be. Each value is a
 | `/deepseek`                 | `deepseek`             | The registry's value                                                                                                                                                                  |
 | `/mistral`                  | `mistral`              | The registry's value at v0.1.0, which renamed it from `mistral_ai`; its CHANGELOG: "Rename the `gen_ai.provider.name` value `mistral_ai` to `mistral` to match Mistral's brand name." |
 | `/samba`                    | `samba`                | No well-known value applies: the library's own, a custom value                                                                                                                        |
+
+On `/vertex` with `ANTHROPIC_VERTEX_BASE_URL` set, the value is `gcp.vertex_ai`
+all the same: it names the home of the wire format the request is in, Vertex
+AI's, and not the address called.
 
 The library's own, under `verevoir.llm.*` because v0.1.0 has no attribute
 for them:

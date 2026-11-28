@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.48.0] — 2026-11-28
+
+**`@verevoir/llm/vertex` can be pointed at another address and given a fixed access token, so that no Google Cloud credential is looked for.** For a caller who sets neither variable nothing changes: the client is built with the options it was built with before this version.
+
+- **`ANTHROPIC_VERTEX_BASE_URL`** is the address requests go to (a gateway, a proxy, a local stand-in), version segment included, as in `https://<region>-aiplatform.googleapis.com/v1`. It is the Vertex SDK's own name, which the library reads and passes as the client's `baseURL`. Like the library's other base-address overrides, its form is not checked.
+- **`ANTHROPIC_VERTEX_ACCESS_TOKEN`** is a fixed bearer token. When it is set, every request carries `Authorization: Bearer <token>` and no other auth header, and Google Cloud's credentials flow is not started. The token appears in no thrown error, log line or span.
+- **Project and region are required with either**, as both are in the path the SDK builds; a stand-in takes any plain value. The kept client is rebuilt when any of project, region, address or token changes. `route` is `'google-cloud'` either way.
+- **The span's `gen_ai.provider.name` is `gcp.vertex_ai` at any address**: it names the home of the wire format, not the address called.
+
 ## [0.47.4] — 2026-11-28
 
 **Each provider SDK has one fake, which every test of it mocks the module with.** Only tests and `src/test-support/` change: the package's code is the same as 0.47.3's; its version and changelog are not. No test is added, removed or renamed, and no assertion changes.

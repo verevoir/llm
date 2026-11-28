@@ -62,6 +62,8 @@ const ENV = [
   'CLAUDE_CODE_OAUTH_TOKEN',
   'ANTHROPIC_API_KEY',
   'ANTHROPIC_BASE_URL',
+  'ANTHROPIC_VERTEX_BASE_URL',
+  'ANTHROPIC_VERTEX_ACCESS_TOKEN',
 ];
 const saved: Record<string, string | undefined> = {};
 
@@ -103,7 +105,7 @@ describe('@verevoir/llm/vertex — credentials and addressing', () => {
     const reply = await chat(BASE);
 
     expect(reply.content).toBe('ok');
-    expect(vertexCtor.mock.calls).toEqual([
+    expect(vertexCtor.mock.calls).toStrictEqual([
       [{ projectId: 'proj-a', region: 'region-a', maxRetries: 0 }],
     ]);
     expect(directCtor).not.toHaveBeenCalled();
@@ -210,6 +212,58 @@ describe('@verevoir/llm/vertex — credentials and addressing', () => {
       maxRetries: 0,
     });
     expect(vertexCtor).toHaveBeenCalledTimes(3);
+  });
+
+  it('passes ANTHROPIC_VERTEX_BASE_URL to the client as its base address, trimmed', async () => {
+    process.env.ANTHROPIC_VERTEX_BASE_URL = ' https://gateway.example/v1 ';
+    vertexStream.mockReturnValue(text());
+
+    await chat(BASE);
+
+    expect(vertexCtor.mock.calls).toStrictEqual([
+      [
+        {
+          projectId: 'proj-a',
+          region: 'region-a',
+          maxRetries: 0,
+          baseURL: 'https://gateway.example/v1',
+        },
+      ],
+    ]);
+  });
+
+  it('with ANTHROPIC_VERTEX_ACCESS_TOKEN set, gives the client an authClient whose headers are exactly the bearer header, and no googleAuth', async () => {
+    process.env.ANTHROPIC_VERTEX_ACCESS_TOKEN = ' fixed-token ';
+    vertexStream.mockReturnValue(text());
+
+    const reply = await chat(BASE);
+
+    expect(reply.usage.route).toBe('google-cloud');
+    const [[options]] = vertexCtor.mock.calls;
+    expect(Object.keys(options).sort()).toEqual(
+      ['authClient', 'maxRetries', 'projectId', 'region'].sort()
+    );
+    expect(options).not.toHaveProperty('googleAuth');
+    const headers: Headers = await options.authClient.getRequestHeaders();
+    expect([...headers.entries()]).toEqual([['authorization', 'Bearer fixed-token']]);
+  });
+
+  it.each([
+    ['ANTHROPIC_VERTEX_BASE_URL', 'https://a.example/v1', 'https://b.example/v1'],
+    ['ANTHROPIC_VERTEX_ACCESS_TOKEN', 'token-a', 'token-b'],
+  ])('builds another client when %s changes, and keeps it while it stands', async (name, a, b) => {
+    vertexStream.mockReturnValue(text());
+
+    await chat(BASE);
+    process.env[name] = a;
+    await chat(BASE);
+    await chat(BASE);
+    process.env[name] = b;
+    await chat(BASE);
+    delete process.env[name];
+    await chat(BASE);
+
+    expect(vertexCtor).toHaveBeenCalledTimes(4);
   });
 });
 
