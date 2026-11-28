@@ -6,8 +6,8 @@
  * request timeout included, runs on fake timers.
  *
  * There are two sets of rows. `pathRows` holds every failure the policy tells
- * apart, and runs once per SDK path: each SDK builds every error it throws in
- * one place, whichever client or call shape the request came from. `siteRows`
+ * apart, and runs once per SDK path: each SDK's client builds a status error
+ * in one method (`makeStatusError`), whichever call shape the request came from. `siteRows`
  * holds the rows that catch what one client-building site or call shape can
  * get wrong on its own: the SDK's retries left on (the 503 row), the policy
  * left out (the 429 row), its own request timeout (the timeout row), and the
