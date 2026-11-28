@@ -68,6 +68,9 @@ export function finishReasonStopKind(finishReason: string): StopKind {
 export interface OpenAICompatConfig {
   /** Provider id reported on every {@link TokenUsage}, e.g. `mistral`. */
   provider: string;
+  /** The model span's `gen_ai.provider.name`: a `GEN_AI_PROVIDER_*` value
+   * from `./otel.js`. */
+  spanProvider: string;
   /** The provider's OpenAI-compatible base URL. */
   baseURL: string;
   /** Env var that overrides `baseURL` at runtime (a gateway/proxy/regional/
@@ -110,6 +113,9 @@ export type OpenAICompatCalls = Pick<
 export interface OpenAICompatCallsConfig {
   /** Provider id reported on every {@link TokenUsage}. */
   provider: string;
+  /** The model span's `gen_ai.provider.name`: a `GEN_AI_PROVIDER_*` value
+   * from `./otel.js`. */
+  spanProvider: string;
   /** The credential mechanism reported on every {@link TokenUsage}. */
   route: CredentialRoute;
   /** The client for one call, given its per-call `apiKey` (or null). May throw
@@ -173,7 +179,8 @@ export interface CompatUsage {
  * available) as an import side-effect, the same way the bespoke adapters
  * register their labels. */
 export function createOpenAICompatAdapter(config: OpenAICompatConfig): OpenAICompatAdapter {
-  const { provider, baseURL, baseUrlEnv, keylessCapable, apiKeyEnv, catalog } = config;
+  const { provider, spanProvider, baseURL, baseUrlEnv, keylessCapable, apiKeyEnv, catalog } =
+    config;
 
   // Derive (and validate) before the register side-effect, so a malformed
   // catalogue throws rather than half-registering.
@@ -211,6 +218,7 @@ export function createOpenAICompatAdapter(config: OpenAICompatConfig): OpenAICom
 
   const calls = createOpenAICompatCalls({
     provider,
+    spanProvider,
     // This factory has exactly one credential mechanism (apiKeyEnv, or a
     // per-call key) — there is no second route to distinguish, so this is
     // a constant rather than a computed value. See CredentialRoute.
@@ -234,7 +242,7 @@ export function createOpenAICompatAdapter(config: OpenAICompatConfig): OpenAICom
  * over the Chat Completions API. Registers nothing and reads no environment
  * variable: the client and the model id come from `config`. */
 export function createOpenAICompatCalls(config: OpenAICompatCallsConfig): OpenAICompatCalls {
-  const { provider, route, getClient, modelFor } = config;
+  const { provider, spanProvider, route, getClient, modelFor } = config;
   const outputTokensOf = config.outputTokensOf ?? ((u: CompatUsage) => u.completion_tokens ?? 0);
 
   /** The span's usage counts, from the provider's own fields — not the
@@ -265,7 +273,7 @@ export function createOpenAICompatCalls(config: OpenAICompatCallsConfig): OpenAI
     systemPrompt: string,
     turns: ChatOptions['turns']
   ): Promise<RawResult> {
-    return withGenAISpan({ provider, requestModel: modelId }, async () => {
+    return withGenAISpan({ provider: spanProvider, requestModel: modelId }, async () => {
       const messages = [
         { role: 'system' as const, content: systemPrompt },
         ...turns.map((t) => ({
@@ -413,7 +421,7 @@ export function createOpenAICompatCalls(config: OpenAICompatCallsConfig): OpenAI
     raw: RawResult['rawUsage'];
     finishReason: string;
   }> {
-    return withGenAISpan({ provider, requestModel: modelId }, async () => {
+    return withGenAISpan({ provider: spanProvider, requestModel: modelId }, async () => {
       const response = await client.chat.completions.create({
         model: modelId,
         messages: messages as never,

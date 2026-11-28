@@ -628,9 +628,11 @@ tag `v0.1.0` (status: Development). Its attribute names are held in
 The standard attributes:
 
 - `gen_ai.operation.name` — always `chat`.
-- `gen_ai.provider.name` — the adapter's provider: `anthropic`, `vertex`,
-  `openai`, `google`, `deepseek`, `samba`, `mistral`, `vertex-openai`;
-  `/claude-cli` reports `anthropic`.
+- `gen_ai.provider.name` — the conventions' well-known value where one
+  applies (see the table below). This is the span's alone: the `provider`
+  on the returned `TokenUsage`, which pricing, routing and the model-span
+  sink use, is the library's own adapter id (`vertex`, `google`,
+  `claude-cli`, ...).
 - `gen_ai.request.model` — the model id requested.
 - `gen_ai.response.model` — the model id the provider answered with (not
   set by `/google`).
@@ -644,6 +646,21 @@ The standard attributes:
 - `gen_ai.usage.cache_write.input_tokens` — input tokens written to the
   provider's cache.
 - `error.type` — on a failed call, the thrown error's `name`.
+
+The registry at v0.1.0 says a well-known `gen_ai.provider.name` that applies
+MUST be used, and otherwise a custom value MAY be. Each value is a
+`GEN_AI_PROVIDER_*` constant in `src/otel.ts`:
+
+| Adapter                     | `gen_ai.provider.name` | Why                                                                                                                                                                                   |
+| --------------------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/anthropic`, `/claude-cli` | `anthropic`            | Anthropic's API answers the call                                                                                                                                                      |
+| `/vertex`, `/vertex-openai` | `gcp.vertex_ai`        | The call is made to Vertex AI's endpoint (`aiplatform.googleapis.com`), whichever model family answers                                                                                |
+| `/google`                   | `gcp.gemini`           | Its client's `vertexai` is false                                                                                                                                                      |
+| `/google` on Vertex AI      | `gcp.vertex_ai`        | Its client's `vertexai` is true, as the SDK decides from its options and environment                                                                                                  |
+| `/openai`                   | `openai`               | The registry's value                                                                                                                                                                  |
+| `/deepseek`                 | `deepseek`             | The registry's value                                                                                                                                                                  |
+| `/mistral`                  | `mistral`              | The registry's value at v0.1.0, which renamed it from `mistral_ai`; its CHANGELOG: "Rename the `gen_ai.provider.name` value `mistral_ai` to `mistral` to match Mistral's brand name." |
+| `/samba`                    | `samba`                | No well-known value applies: the library's own, a custom value                                                                                                                        |
 
 The library's own, under `verevoir.llm.*` because v0.1.0 has no attribute
 for them:

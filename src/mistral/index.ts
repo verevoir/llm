@@ -9,12 +9,14 @@
  */
 
 import { createOpenAICompatAdapter } from '../openai-compat.js';
+import { GEN_AI_PROVIDER_MISTRAL } from '../otel.js';
 import { PROVIDER, CATALOG, BASE_URL } from './catalog.js';
 
 export { PROVIDER, BASE_URL };
 
 const adapter = createOpenAICompatAdapter({
   provider: PROVIDER,
+  spanProvider: GEN_AI_PROVIDER_MISTRAL,
   baseURL: BASE_URL,
   baseUrlEnv: 'MISTRAL_BASE_URL',
   apiKeyEnv: 'MISTRAL_API_KEY',

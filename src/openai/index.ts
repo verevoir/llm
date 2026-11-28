@@ -13,7 +13,7 @@
 
 import OpenAI from 'openai';
 import { fireUsageHook } from '../audit-hook.js';
-import { withGenAISpan } from '../otel.js';
+import { GEN_AI_PROVIDER_OPENAI, withGenAISpan } from '../otel.js';
 import { callWithRetries, throwIfAborted } from '../retry-policy.js';
 import {
   type ChatOptions,
@@ -143,7 +143,7 @@ async function callResponsesCreate(
   systemPrompt: string,
   turns: ChatOptions['turns']
 ): Promise<RawResult> {
-  return withGenAISpan({ provider: PROVIDER, requestModel: modelId }, async () => {
+  return withGenAISpan({ provider: GEN_AI_PROVIDER_OPENAI, requestModel: modelId }, async () => {
     // The Responses API takes `instructions` (system) + `input` (the
     // conversation). 'assistant' / 'user' roles pass through unchanged.
     const input = turns.map((t) => ({

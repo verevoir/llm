@@ -67,7 +67,9 @@ import * as google from './google/index.js';
 import * as samba from './samba/index.js';
 import * as mistral from './mistral/index.js';
 import * as vertexOpenAI from './vertex-openai/index.js';
+import { setModelSpanSink, type ModelSpan } from './audit-hook.js';
 import {
+  ATTR_GEN_AI_PROVIDER_NAME,
   ATTR_GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS,
   ATTR_GEN_AI_USAGE_CACHE_WRITE_INPUT_TOKENS,
   ATTR_GEN_AI_USAGE_INPUT_TOKENS,
@@ -281,6 +283,10 @@ const KEYED = { ...BASE, apiKey: 'k' };
 interface Site {
   site: string;
   shape: Shape;
+  /** The span's `gen_ai.provider.name`. */
+  spanProvider: string;
+  /** The `provider` on the returned usage and on the model-span sink's span. */
+  usageProvider: string;
   /** Whether the call survives a reply with no usage object at all. The
    * Anthropic SDK declares `usage` on every message, and the adapter reads
    * it unguarded, so those sites are given an empty usage object instead. */
@@ -296,13 +302,15 @@ interface Site {
 const SITES: Site[] = [
   ...(
     [
-      ['anthropic', anthropicStream, anthropic, { ...BASE, apiKey: 'sk-test' }],
-      ['vertex', vertexStream, vertex, BASE],
+      ['anthropic', anthropicStream, anthropic, { ...BASE, apiKey: 'sk-test' }, 'anthropic'],
+      ['vertex', vertexStream, vertex, BASE, 'gcp.vertex_ai'],
     ] as const
-  ).flatMap(([name, stream, a, base]): Site[] => [
+  ).flatMap(([name, stream, a, base, spanProvider]): Site[] => [
     {
       site: `${name}.chat`,
       shape: ANTHROPIC_SHAPE,
+      spanProvider,
+      usageProvider: name,
       toleratesNoUsage: false,
       run: (u) => {
         stream.mockReturnValueOnce(anthropicReply(u));
@@ -312,16 +320,31 @@ const SITES: Site[] = [
     {
       site: `${name}.chatWithTools`,
       shape: ANTHROPIC_SHAPE,
+      spanProvider,
+      usageProvider: name,
       toleratesNoUsage: false,
       run: (u) => {
         stream.mockReturnValueOnce(anthropicReply(u));
         return a.chatWithTools({ ...base, tools: [TOOL] });
       },
     },
+    {
+      site: `${name}.chatWithToolLoop`,
+      shape: ANTHROPIC_SHAPE,
+      spanProvider,
+      usageProvider: name,
+      toleratesNoUsage: false,
+      run: (u) => {
+        stream.mockReturnValueOnce(anthropicReply(u));
+        return a.chatWithToolLoop({ ...base, tools: [TOOL], executor: async () => 'x' });
+      },
+    },
   ]),
   {
     site: 'claude-cli.chat (one-shot)',
     shape: ANTHROPIC_SHAPE,
+    spanProvider: 'anthropic',
+    usageProvider: 'claude-cli',
     toleratesNoUsage: true,
     run: (u) => {
       // The `claude -p` spawn, then the `claude --version` one.
@@ -337,6 +360,8 @@ const SITES: Site[] = [
   {
     site: 'claude-cli.chat (held session)',
     shape: ANTHROPIC_SHAPE,
+    spanProvider: 'anthropic',
+    usageProvider: 'claude-cli',
     toleratesNoUsage: true,
     run: (u) => {
       queueSpawn('2.1.243 (Claude Code)');
@@ -347,6 +372,8 @@ const SITES: Site[] = [
   {
     site: 'claude-cli.chatWithToolLoop',
     shape: ANTHROPIC_SHAPE,
+    spanProvider: 'anthropic',
+    usageProvider: 'claude-cli',
     toleratesNoUsage: true,
     run: (u) => {
       queueSpawn('2.1.243 (Claude Code)');
@@ -357,6 +384,8 @@ const SITES: Site[] = [
   {
     site: 'deepseek.chat',
     shape: DEEPSEEK_SHAPE,
+    spanProvider: 'deepseek',
+    usageProvider: 'deepseek',
     toleratesNoUsage: true,
     run: (u) => {
       chatCompletionsCreate.mockResolvedValueOnce(completionReply(u));
@@ -366,6 +395,8 @@ const SITES: Site[] = [
   {
     site: 'openai.chat',
     shape: OPENAI_SHAPE,
+    spanProvider: 'openai',
+    usageProvider: 'openai',
     toleratesNoUsage: true,
     run: (u) => {
       responsesCreate.mockResolvedValueOnce(responsesReply(u));
@@ -375,6 +406,8 @@ const SITES: Site[] = [
   {
     site: 'google.chat',
     shape: GOOGLE_SHAPE,
+    spanProvider: 'gcp.gemini',
+    usageProvider: 'google',
     toleratesNoUsage: true,
     run: (u) => {
       generateContent.mockResolvedValueOnce(googleReply(u));
@@ -384,24 +417,45 @@ const SITES: Site[] = [
   {
     site: 'google.chatWithTools',
     shape: GOOGLE_SHAPE,
+    spanProvider: 'gcp.gemini',
+    usageProvider: 'google',
     toleratesNoUsage: true,
     run: (u) => {
       generateContent.mockResolvedValueOnce(googleReply(u));
       return google.chatWithTools({ ...KEYED, tools: [TOOL] });
     },
   },
+  {
+    site: 'google.chatWithToolLoop',
+    shape: GOOGLE_SHAPE,
+    spanProvider: 'gcp.gemini',
+    usageProvider: 'google',
+    toleratesNoUsage: true,
+    run: (u) => {
+      generateContent.mockResolvedValueOnce(googleReply(u));
+      return google.chatWithToolLoop({ ...KEYED, tools: [TOOL], executor: async () => 'x' });
+    },
+  },
   ...(
     [
       // `/vertex-openai` adds reasoning tokens that `total_tokens` shows
       // outside `completion_tokens`; the others count `completion_tokens` alone.
-      ['samba', samba, KEYED, null],
-      ['mistral', mistral, KEYED, null],
-      ['vertex-openai', vertexOpenAI, { ...BASE, model: 'google/gemini-3.5-flash' }, 9],
+      ['samba', samba, KEYED, null, 'samba'],
+      ['mistral', mistral, KEYED, null, 'mistral'],
+      [
+        'vertex-openai',
+        vertexOpenAI,
+        { ...BASE, model: 'google/gemini-3.5-flash' },
+        9,
+        'gcp.vertex_ai',
+      ],
     ] as const
-  ).flatMap(([name, a, base, reasoningOnlyOutput]): Site[] => [
+  ).flatMap(([name, a, base, reasoningOnlyOutput, spanProvider]): Site[] => [
     {
       site: `${name}.chat`,
       shape: COMPAT_SHAPE,
+      spanProvider,
+      usageProvider: name,
       toleratesNoUsage: true,
       reasoningOnlyOutput,
       run: (u) => {
@@ -412,11 +466,25 @@ const SITES: Site[] = [
     {
       site: `${name}.chatWithTools`,
       shape: COMPAT_SHAPE,
+      spanProvider,
+      usageProvider: name,
       toleratesNoUsage: true,
       reasoningOnlyOutput,
       run: (u) => {
         chatCompletionsCreate.mockResolvedValueOnce(completionReply(u));
         return a.chatWithTools({ ...base, tools: [TOOL] });
+      },
+    },
+    {
+      site: `${name}.chatWithToolLoop`,
+      shape: COMPAT_SHAPE,
+      spanProvider,
+      usageProvider: name,
+      toleratesNoUsage: true,
+      reasoningOnlyOutput,
+      run: (u) => {
+        chatCompletionsCreate.mockResolvedValueOnce(completionReply(u));
+        return a.chatWithToolLoop({ ...base, tools: [TOOL], executor: async () => 'x' });
       },
     },
   ]),
@@ -560,6 +628,31 @@ describe('every adapter — a usage count the provider gave no value for is unse
       const reply = await c.site.run(wireOf(c));
 
       expect(reply.usage).toMatchObject(c.site.shape.returned(c.counts ?? {}));
+    }
+  );
+
+  it.each(SITES)(
+    '$site: the span says $spanProvider; the returned usage and the sink say $usageProvider',
+    async (site) => {
+      const sunk: ModelSpan[] = [];
+      setModelSpanSink((span) => {
+        sunk.push(span);
+      });
+      try {
+        const reply = await site.run(site.shape.wire(FULL));
+
+        expect({
+          span: exporter.getFinishedSpans().map((s) => s.attributes[ATTR_GEN_AI_PROVIDER_NAME]),
+          usage: reply.usage.provider,
+          sink: sunk.map((span) => span.provider),
+        }).toEqual({
+          span: [site.spanProvider],
+          usage: site.usageProvider,
+          sink: [site.usageProvider],
+        });
+      } finally {
+        setModelSpanSink(null);
+      }
     }
   );
 

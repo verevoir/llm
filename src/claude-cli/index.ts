@@ -704,7 +704,12 @@ export function resetClaudeCliVersionCacheForTests(): void {
   cachedCliVersionPromise = null;
 }
 
-import { spanInputTokensWithCache, withGenAISpan, type GenAISpanOutcome } from '../otel.js';
+import {
+  GEN_AI_PROVIDER_ANTHROPIC,
+  spanInputTokensWithCache,
+  withGenAISpan,
+  type GenAISpanOutcome,
+} from '../otel.js';
 
 /** The span's four usage counts for one `claude` turn, which `shapeUsage()`
  * makes from the CLI's own `usage` fields beside the {@link TokenUsage} it
@@ -1271,7 +1276,7 @@ async function chatOnSession(
  */
 export async function chat(options: ClaudeCliChatOptions): Promise<ChatReply> {
   const requestModel = options.model ?? 'default';
-  return withGenAISpan({ provider: 'anthropic', requestModel }, async () => {
+  return withGenAISpan({ provider: GEN_AI_PROVIDER_ANTHROPIC, requestModel }, async () => {
     const { reply, spanUsage } = await chatImpl(options);
     return { result: reply, outcome: genAIOutcomeFromUsage(reply.usage, spanUsage) };
   });
@@ -1453,7 +1458,7 @@ export async function chatWithToolLoop(
   options: ClaudeCliChatWithToolLoopOptions
 ): Promise<ClaudeCliChatWithToolLoopResult> {
   const requestModel = options.model ?? 'default';
-  return withGenAISpan({ provider: 'anthropic', requestModel }, async () => {
+  return withGenAISpan({ provider: GEN_AI_PROVIDER_ANTHROPIC, requestModel }, async () => {
     const { result, spanUsage } = await chatWithToolLoopImpl(options);
     return { result, outcome: genAIOutcomeFromUsage(result.usage, spanUsage) };
   });

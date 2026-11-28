@@ -11,10 +11,14 @@ import {
 // response shape.
 const mockGenerateContent = vi.fn();
 const mockClientCtor = vi.fn();
+// The `vertexai` the fake client reports, as the SDK decides from its options
+// and environment.
+const sdk = vi.hoisted(() => ({ vertexai: false }));
 
 vi.mock('@google/genai', () => ({
   GoogleGenAI: class GoogleGenAI {
     models = { generateContent: mockGenerateContent };
+    readonly vertexai = sdk.vertexai;
     constructor(opts: unknown) {
       mockClientCtor(opts);
     }
@@ -22,7 +26,7 @@ vi.mock('@google/genai', () => ({
 }));
 
 // Import AFTER vi.mock so the mocked constructor is the one captured.
-import { chat, chatWithTools } from './index.js';
+import { chat, chatWithTools, chatWithToolLoop } from './index.js';
 import {
   classifyLlmError,
   EmptyResponseError,
@@ -30,6 +34,18 @@ import {
   type ModelSpan,
   type TokenUsage,
 } from '../index.js';
+
+// One tracer for the file: OpenTelemetry takes a global provider only once.
+const exporter = new InMemorySpanExporter();
+const tracerProvider = new BasicTracerProvider({
+  spanProcessors: [new SimpleSpanProcessor(exporter)],
+});
+beforeAll(() => {
+  trace.setGlobalTracerProvider(tracerProvider);
+});
+afterAll(async () => {
+  await tracerProvider.shutdown();
+});
 
 interface FakeUsage {
   promptTokenCount: number;
@@ -247,19 +263,6 @@ describe('google.chat', () => {
 // `promptTokenCount` includes the cached content (src/otel.ts's header). Both of
 // this adapter's spans: chat()'s, and the one chatWithTools and chatWithToolLoop share.
 describe('google — the span input with cached content', () => {
-  let exporter: InMemorySpanExporter;
-  let provider: BasicTracerProvider;
-
-  beforeAll(() => {
-    exporter = new InMemorySpanExporter();
-    provider = new BasicTracerProvider({ spanProcessors: [new SimpleSpanProcessor(exporter)] });
-    trace.setGlobalTracerProvider(provider);
-  });
-
-  afterAll(async () => {
-    await provider.shutdown();
-  });
-
   beforeEach(() => {
     mockGenerateContent.mockReset();
     exporter.reset();
@@ -292,6 +295,92 @@ describe('google — the span input with cached content', () => {
       expect(spans).toHaveLength(1);
       expect(spans[0].attributes['gen_ai.usage.input_tokens']).toBe(1000);
       expect(spans[0].attributes['gen_ai.usage.cache_read.input_tokens']).toBe(800);
+    }
+  );
+});
+
+// The span names the endpoint the client calls; the returned usage and the
+// sink keep the adapter's own id. Every span site: chat()'s, chatWithTools',
+// and chatWithToolLoop's per-iteration and final no-tools calls.
+describe('google — the span names the endpoint its client calls', () => {
+  beforeEach(() => {
+    mockGenerateContent.mockReset();
+    exporter.reset();
+  });
+
+  afterEach(() => {
+    sdk.vertexai = false;
+    setModelSpanSink(null);
+  });
+
+  const BASE = { systemPrompt: 's', turns: [{ role: 'user' as const, content: 'q' }], apiKey: 'k' };
+  const TOOL = {
+    name: 'record',
+    description: 'record a thing',
+    input_schema: { type: 'object' as const, properties: {} },
+  };
+  const toolCall = {
+    functionCalls: [{ id: 'c1', name: 'record', args: {} }],
+    candidates: [
+      {
+        content: { role: 'model', parts: [{ functionCall: { name: 'record', args: {} } }] },
+        finishReason: 'STOP',
+      },
+    ],
+    usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1 },
+    text: '',
+  };
+
+  const SITES = [
+    {
+      site: 'chat',
+      calls: 1,
+      run: async () => (await chat(BASE)).usage.provider,
+    },
+    {
+      site: 'chatWithTools',
+      calls: 1,
+      run: async () => (await chatWithTools({ ...BASE, tools: [TOOL] })).usage.provider,
+    },
+    {
+      site: 'chatWithToolLoop (an iteration, then the final no-tools call)',
+      calls: 2,
+      run: async () => {
+        mockGenerateContent.mockResolvedValueOnce(toolCall);
+        const result = await chatWithToolLoop({
+          ...BASE,
+          tools: [TOOL],
+          executor: async () => 'ok',
+          maxIterations: 1,
+        });
+        return result.usage.provider;
+      },
+    },
+  ];
+  const ENDPOINTS = [
+    { endpoint: 'Vertex AI', vertexai: true, spanProvider: 'gcp.vertex_ai' },
+    { endpoint: 'AI Studio', vertexai: false, spanProvider: 'gcp.gemini' },
+  ];
+
+  it.each(SITES.flatMap((s) => ENDPOINTS.map((e) => ({ ...s, ...e }))))(
+    '$site on $endpoint: the span says $spanProvider; the usage and the sink say google',
+    async ({ run, calls, vertexai, spanProvider }) => {
+      sdk.vertexai = vertexai;
+      mockGenerateContent.mockResolvedValue(fakeResponse('ok'));
+      const sunk: ModelSpan[] = [];
+      setModelSpanSink((span) => sunk.push(span));
+
+      const returnedProvider = await run();
+
+      expect({
+        span: exporter.getFinishedSpans().map((span) => span.attributes['gen_ai.provider.name']),
+        usage: returnedProvider,
+        sink: sunk.map((span) => span.provider),
+      }).toEqual({
+        span: Array(calls).fill(spanProvider),
+        usage: 'google',
+        sink: Array(calls).fill('google'),
+      });
     }
   );
 });

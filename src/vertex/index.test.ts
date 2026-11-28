@@ -377,7 +377,7 @@ describe('@verevoir/llm/vertex — OpenTelemetry span', () => {
     await direct.chat({ ...BASE, apiKey: 'sk-test' });
 
     expect(exporter.getFinishedSpans().map((s) => s.attributes[ATTR_GEN_AI_PROVIDER_NAME])).toEqual(
-      ['vertex', 'anthropic']
+      ['gcp.vertex_ai', 'anthropic']
     );
   });
 

@@ -13,7 +13,12 @@
 
 import { GoogleGenAI } from '@google/genai';
 import { fireUsageHook } from '../audit-hook.js';
-import { withGenAISpan, type GenAISpanOutcome } from '../otel.js';
+import {
+  GEN_AI_PROVIDER_GCP_GEMINI,
+  GEN_AI_PROVIDER_GCP_VERTEX_AI,
+  withGenAISpan,
+  type GenAISpanOutcome,
+} from '../otel.js';
 import { collapseContentToText, EmptyResponseError } from '../index.js';
 import {
   type ChatOptions,
@@ -120,6 +125,13 @@ function getClient(apiKey: string | null): GoogleGenAI {
   return getDefaultClient();
 }
 
+/** The span's `gen_ai.provider.name` for a call on `client`: `gcp.vertex_ai`
+ * when its `vertexai` is true, as the SDK decides from its options and
+ * environment, else `gcp.gemini`. */
+function spanProviderOf(client: GoogleGenAI): string {
+  return client.vertexai ? GEN_AI_PROVIDER_GCP_VERTEX_AI : GEN_AI_PROVIDER_GCP_GEMINI;
+}
+
 interface RawResult {
   text: string;
   rawUsage: {
@@ -166,7 +178,7 @@ async function callGenerateContent(
   systemPrompt: string,
   turns: ChatOptions['turns']
 ): Promise<RawResult> {
-  return withGenAISpan({ provider: PROVIDER, requestModel: modelId }, async () => {
+  return withGenAISpan({ provider: spanProviderOf(client), requestModel: modelId }, async () => {
     // Gemini doesn't use a separate `messages` channel; we feed turns
     // as a `contents` array of {role, parts}. User and model alternate;
     // 'assistant' in our surface maps to 'model' in Gemini.
@@ -460,7 +472,7 @@ async function callGenerateWithTools(
   contents: GeminiContent[],
   tools: ReturnType<typeof toGeminiTools>
 ): Promise<GeminiToolResult> {
-  return withGenAISpan({ provider: PROVIDER, requestModel: modelId }, async () => {
+  return withGenAISpan({ provider: spanProviderOf(client), requestModel: modelId }, async () => {
     const response = await client.models.generateContent({
       model: modelId,
       contents: contents as never,

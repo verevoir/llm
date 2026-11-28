@@ -1,4 +1,10 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
+import { trace } from '@opentelemetry/api';
+import {
+  BasicTracerProvider,
+  InMemorySpanExporter,
+  SimpleSpanProcessor,
+} from '@opentelemetry/sdk-trace-base';
 
 // Mock the openai SDK so the tool loop runs with canned completions (no network).
 const { createMock } = vi.hoisted(() => ({ createMock: vi.fn() }));
@@ -16,6 +22,19 @@ import {
   type ModelCatalogEntry,
   type ModelSpan,
 } from './index.js';
+import { ATTR_GEN_AI_PROVIDER_NAME } from './otel.js';
+
+// One tracer for the file: OpenTelemetry takes a global provider only once.
+const exporter = new InMemorySpanExporter();
+const tracerProvider = new BasicTracerProvider({
+  spanProcessors: [new SimpleSpanProcessor(exporter)],
+});
+beforeAll(() => {
+  trace.setGlobalTracerProvider(tracerProvider);
+});
+afterAll(async () => {
+  await tracerProvider.shutdown();
+});
 
 const catalog: ModelCatalogEntry[] = [
   {
@@ -29,6 +48,7 @@ const catalog: ModelCatalogEntry[] = [
 ];
 const a = createOpenAICompatAdapter({
   provider: 'tooltest',
+  spanProvider: 'tooltest-span',
   baseURL: 'https://x/v1',
   apiKeyEnv: 'TOOLTEST_KEY',
   catalog,
@@ -63,7 +83,10 @@ function textReply(text: string) {
   };
 }
 
-beforeEach(() => createMock.mockReset());
+beforeEach(() => {
+  createMock.mockReset();
+  exporter.reset();
+});
 afterEach(() => setModelSpanSink(null));
 
 describe('openai-compat tool calling', () => {
@@ -171,6 +194,34 @@ describe('openai-compat tool calling', () => {
     ]);
     expect(spans.every((s) => s.provider === 'tooltest')).toBe(true);
     expect(spans.map((s) => s.inputTokens)).toEqual([10, 12]); // per-iteration, not aggregate
+  });
+
+  it('chatWithTools and chatWithToolLoop: the span says the config spanProvider; the usage and the sink say its provider', async () => {
+    createMock
+      .mockResolvedValueOnce(toolCallReply('{"x":1}'))
+      .mockResolvedValueOnce(toolCallReply('{"x":1}'))
+      .mockResolvedValueOnce(textReply('all done'));
+    const sunk: ModelSpan[] = [];
+    setModelSpanSink((s) => sunk.push(s));
+    const base = { systemPrompt: 's', turns: [{ role: 'user' as const, content: 'go' }] };
+
+    const single = await a.chatWithTools({ ...base, tools: [TOOL], apiKey: 'k' });
+    const loop = await a.chatWithToolLoop({
+      ...base,
+      tools: [TOOL],
+      executor: async () => 'recorded',
+      apiKey: 'k',
+    });
+
+    expect({
+      span: exporter.getFinishedSpans().map((s) => s.attributes[ATTR_GEN_AI_PROVIDER_NAME]),
+      usage: [single.usage.provider, loop.usage.provider],
+      sink: sunk.map((s) => s.provider),
+    }).toEqual({
+      span: ['tooltest-span', 'tooltest-span', 'tooltest-span'],
+      usage: ['tooltest', 'tooltest'],
+      sink: ['tooltest', 'tooltest', 'tooltest'],
+    });
   });
 
   it('on cap-hit, makes a final no-tools call and returns its synthesised answer (not empty)', async () => {

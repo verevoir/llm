@@ -14,12 +14,14 @@
  */
 
 import { createOpenAICompatAdapter } from '../openai-compat.js';
+import { GEN_AI_PROVIDER_SAMBA } from '../otel.js';
 import { PROVIDER, CATALOG, BASE_URL } from './catalog.js';
 
 export { PROVIDER, BASE_URL };
 
 const adapter = createOpenAICompatAdapter({
   provider: PROVIDER,
+  spanProvider: GEN_AI_PROVIDER_SAMBA,
   baseURL: BASE_URL,
   baseUrlEnv: 'SAMBA_NOVA_BASE_URL',
   apiKeyEnv: 'SAMBA_NOVA_API_KEY',

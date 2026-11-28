@@ -1,4 +1,10 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
+import { trace } from '@opentelemetry/api';
+import {
+  BasicTracerProvider,
+  InMemorySpanExporter,
+  SimpleSpanProcessor,
+} from '@opentelemetry/sdk-trace-base';
 
 // Mock the openai SDK so usage tests run with canned responses (no network).
 const { chatCreateMock } = vi.hoisted(() => ({ chatCreateMock: vi.fn() }));
@@ -20,6 +26,19 @@ import {
   type ModelCatalogEntry,
   type ModelSpan,
 } from './index.js';
+import { ATTR_GEN_AI_PROVIDER_NAME } from './otel.js';
+
+// One tracer for the file: OpenTelemetry takes a global provider only once.
+const exporter = new InMemorySpanExporter();
+const tracerProvider = new BasicTracerProvider({
+  spanProcessors: [new SimpleSpanProcessor(exporter)],
+});
+beforeAll(() => {
+  trace.setGlobalTracerProvider(tracerProvider);
+});
+afterAll(async () => {
+  await tracerProvider.shutdown();
+});
 
 describe('createOpenAICompatAdapter', () => {
   const catalog: ModelCatalogEntry[] = [
@@ -44,6 +63,7 @@ describe('createOpenAICompatAdapter', () => {
   ];
   const a = createOpenAICompatAdapter({
     provider: 'testco',
+    spanProvider: 'testco-span',
     baseURL: 'https://x/v1',
     apiKeyEnv: 'TESTCO_KEY',
     catalog,
@@ -94,6 +114,30 @@ describe('createOpenAICompatAdapter', () => {
     }
     expect(spans).toHaveLength(1);
     expect(spans[0]).toMatchObject({ scope: 'testco.chat', provider: 'testco' });
+  });
+
+  it('chat: the span says the config spanProvider; the usage and the sink say its provider', async () => {
+    chatCreateMock.mockResolvedValueOnce({
+      choices: [{ message: { content: 'hi' }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 10, completion_tokens: 5 },
+    });
+    exporter.reset();
+    const sunk: ModelSpan[] = [];
+    setModelSpanSink((s) => sunk.push(s));
+    try {
+      const reply = await a.chat({
+        systemPrompt: 's',
+        turns: [{ role: 'user', content: 'go' }],
+        apiKey: 'k',
+      });
+      expect({
+        span: exporter.getFinishedSpans().map((s) => s.attributes[ATTR_GEN_AI_PROVIDER_NAME]),
+        usage: reply.usage.provider,
+        sink: sunk.map((s) => s.provider),
+      }).toEqual({ span: ['testco-span'], usage: 'testco', sink: ['testco'] });
+    } finally {
+      setModelSpanSink(null);
+    }
   });
 
   // route was hardcoded as a constant in shapeUsage() when this factory
@@ -161,6 +205,7 @@ describe('createOpenAICompatAdapter', () => {
     expect(() =>
       createOpenAICompatAdapter({
         provider: 'p',
+        spanProvider: 'p-span',
         baseURL: 'u',
         apiKeyEnv: 'K',
         catalog: [{ provider: 'p', family: 'f', currentId: 'p-x', rates: [1, 1], label: 'X' }],
@@ -187,6 +232,7 @@ describe('cached-token usage — no double-count (STDIO-487)', () => {
   ];
   const adapter = createOpenAICompatAdapter({
     provider: 'cachetest',
+    spanProvider: 'cachetest-span',
     baseURL: 'https://x/v1',
     apiKeyEnv: 'CACHETEST_KEY',
     catalog: usageCatalog,
