@@ -1,47 +1,19 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-// Mock the Anthropic SDK before importing the adapter, so the request
-// payloads handed to `messages.stream` can be inspected whole.
-const mockStream = vi.fn();
-const mockClientCtor = vi.fn();
+vi.mock('@anthropic-ai/sdk', () => import('../test-support/anthropic-sdk.js'));
 
-vi.mock('@anthropic-ai/sdk', () => ({
-  default: class Anthropic {
-    messages = { stream: mockStream };
-    constructor(opts: unknown) {
-      mockClientCtor(opts);
-    }
-  },
-}));
-
+import {
+  anthropicStream as mockStream,
+  anthropicCtor as mockClientCtor,
+  messageStream,
+  type AnthropicBlock as FakeBlock,
+} from '../test-support/anthropic-sdk.js';
 import { chat, chatWithToolLoop, chatWithTools, models } from './index.js';
 import type { ChatOptions, TokenUsage, ToolDef } from '../index.js';
 
 type CacheOption = ChatOptions['cache'];
 type CacheControl = { type: 'ephemeral' };
 type Request = Record<string, unknown>;
-
-interface FakeBlock {
-  type: string;
-  text?: string;
-  id?: string;
-  name?: string;
-  input?: Record<string, unknown>;
-}
-
-const ZERO_USAGE = {
-  input_tokens: 0,
-  output_tokens: 0,
-  cache_creation_input_tokens: 0,
-  cache_read_input_tokens: 0,
-};
-
-function fakeStream(blocks: FakeBlock[], stopReason: string, usage: object = ZERO_USAGE) {
-  return {
-    on: () => {},
-    finalMessage: async () => ({ content: blocks, stop_reason: stopReason, usage }),
-  };
-}
 
 const SYSTEM = 'You are helpful.';
 const NOOP: ToolDef = {
@@ -78,13 +50,13 @@ async function sendEveryRequest(cache: CacheOption): Promise<Request[]> {
   mockStream.mockReset();
   mockStream
     .mockReturnValueOnce(
-      fakeStream([toolUse('p1', 'report_progress', { percent: 10, message: 'm' })], 'tool_use')
+      messageStream([toolUse('p1', 'report_progress', { percent: 10, message: 'm' })], 'tool_use')
     )
-    .mockReturnValueOnce(fakeStream([text('answer')], 'end_turn'))
-    .mockReturnValueOnce(fakeStream([text('answer')], 'end_turn'))
-    .mockReturnValueOnce(fakeStream([toolUse('u1')], 'tool_use'))
-    .mockReturnValueOnce(fakeStream([toolUse('u2')], 'tool_use'))
-    .mockReturnValueOnce(fakeStream([text('done')], 'end_turn'));
+    .mockReturnValueOnce(messageStream([text('answer')], 'end_turn'))
+    .mockReturnValueOnce(messageStream([text('answer')], 'end_turn'))
+    .mockReturnValueOnce(messageStream([toolUse('u1')], 'tool_use'))
+    .mockReturnValueOnce(messageStream([toolUse('u2')], 'tool_use'))
+    .mockReturnValueOnce(messageStream([text('done')], 'end_turn'));
 
   const common = { systemPrompt: SYSTEM, apiKey: 'sk-test', ...withCache(cache) };
   await chat({ ...common, turns: [{ role: 'user', content: 'hi' }], onProgress: async () => {} });
@@ -341,7 +313,7 @@ describe('anthropic ChatOptions.cache — usage accounting', () => {
       'chat',
       1,
       async (usage) => {
-        mockStream.mockReturnValueOnce(fakeStream([text('answer')], 'end_turn', usage));
+        mockStream.mockReturnValueOnce(messageStream([text('answer')], 'end_turn', usage));
         const reply = await chat({
           systemPrompt: SYSTEM,
           apiKey: 'sk-test',
@@ -354,7 +326,7 @@ describe('anthropic ChatOptions.cache — usage accounting', () => {
       'chatWithTools',
       1,
       async (usage) => {
-        mockStream.mockReturnValueOnce(fakeStream([text('answer')], 'end_turn', usage));
+        mockStream.mockReturnValueOnce(messageStream([text('answer')], 'end_turn', usage));
         const reply = await chatWithTools({
           systemPrompt: SYSTEM,
           apiKey: 'sk-test',
@@ -369,8 +341,8 @@ describe('anthropic ChatOptions.cache — usage accounting', () => {
       2,
       async (usage) => {
         mockStream
-          .mockReturnValueOnce(fakeStream([toolUse('u1')], 'tool_use', usage))
-          .mockReturnValueOnce(fakeStream([text('done')], 'end_turn', usage));
+          .mockReturnValueOnce(messageStream([toolUse('u1')], 'tool_use', usage))
+          .mockReturnValueOnce(messageStream([text('done')], 'end_turn', usage));
         const reply = await chatWithToolLoop({
           systemPrompt: SYSTEM,
           apiKey: 'sk-test',
@@ -386,8 +358,8 @@ describe('anthropic ChatOptions.cache — usage accounting', () => {
       2,
       async (usage) => {
         mockStream
-          .mockReturnValueOnce(fakeStream([toolUse('u1')], 'tool_use', usage))
-          .mockReturnValueOnce(fakeStream([text('done')], 'end_turn', usage));
+          .mockReturnValueOnce(messageStream([toolUse('u1')], 'tool_use', usage))
+          .mockReturnValueOnce(messageStream([text('done')], 'end_turn', usage));
         const reply = await chatWithToolLoop({
           systemPrompt: SYSTEM,
           apiKey: 'sk-test',

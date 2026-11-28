@@ -1,14 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // Mock @google/genai so the tool loop runs with canned responses (no network).
-const { generateMock } = vi.hoisted(() => ({ generateMock: vi.fn() }));
-vi.mock('@google/genai', () => ({
-  GoogleGenAI: class {
-    models = { generateContent: generateMock };
-    constructor(_opts: unknown) {}
-  },
-}));
+vi.mock('@google/genai', () => import('../test-support/google-genai.js'));
 
+import { generateContent as generateMock, geminiReply } from '../test-support/google-genai.js';
 import { chatWithTools, chatWithToolLoop } from './index.js';
 import { setModelSpanSink, type ContentBlock, type ModelSpan } from '../index.js';
 
@@ -22,46 +17,35 @@ const TOOL = {
   },
 };
 
-function fnCallReply(args: Record<string, unknown>) {
-  return {
-    functionCalls: [{ id: 'c1', name: 'record_step', args }],
-    candidates: [
-      {
-        content: { role: 'model', parts: [{ functionCall: { name: 'record_step', args } }] },
-        finishReason: 'STOP',
-      },
-    ],
-    usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 5 },
-    text: '',
-  };
-}
-function textReply(text: string) {
-  return {
-    functionCalls: [],
-    candidates: [{ content: { role: 'model', parts: [{ text }] }, finishReason: 'STOP' }],
-    usageMetadata: { promptTokenCount: 12, candidatesTokenCount: 3 },
-    text,
-  };
-}
+const CALL_USAGE = { promptTokenCount: 10, candidatesTokenCount: 5 };
 
-// Two parallel calls to the SAME tool name, neither carrying an id — the
-// shape that collided under the old `f.id ?? f.name` fallback.
-function parallelSameNameFnCallReply(argsList: Record<string, unknown>[]) {
-  return {
-    functionCalls: argsList.map((args) => ({ name: 'record_step', args })), // no `id` field
-    candidates: [
-      {
-        content: {
-          role: 'model',
-          parts: argsList.map((args) => ({ functionCall: { name: 'record_step', args } })),
-        },
-        finishReason: 'STOP',
-      },
-    ],
-    usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 5 },
+const fnCallReply = (args: Record<string, unknown>) =>
+  geminiReply({
+    functionCalls: [{ id: 'c1', name: 'record_step', args }],
+    parts: [{ functionCall: { name: 'record_step', args } }],
+    finishReason: 'STOP',
+    usage: CALL_USAGE,
     text: '',
-  };
-}
+  });
+const textReply = (text: string) =>
+  geminiReply({
+    functionCalls: [],
+    parts: [{ text }],
+    finishReason: 'STOP',
+    usage: { promptTokenCount: 12, candidatesTokenCount: 3 },
+    text,
+  });
+
+// Two parallel calls to the SAME tool name, neither carrying an id: the
+// shape on which keying calls by `f.id ?? f.name` collides.
+const parallelSameNameFnCallReply = (argsList: Record<string, unknown>[]) =>
+  geminiReply({
+    functionCalls: argsList.map((args) => ({ name: 'record_step', args })), // no `id` field
+    parts: argsList.map((args) => ({ functionCall: { name: 'record_step', args } })),
+    finishReason: 'STOP',
+    usage: CALL_USAGE,
+    text: '',
+  });
 
 beforeEach(() => generateMock.mockReset());
 afterEach(() => setModelSpanSink(null));

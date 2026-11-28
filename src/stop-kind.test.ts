@@ -1,37 +1,24 @@
-import { EventEmitter } from 'node:events';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // Every provider SDK is faked at its constructor, as each adapter's own tests
 // fake it, so one table can drive every adapter through its exported calls.
-const anthropicStream = vi.fn();
-const compatCreate = vi.fn();
-const responsesCreate = vi.fn();
-const generateContent = vi.fn();
-const spawn = vi.fn();
+vi.mock('@anthropic-ai/sdk', () => import('./test-support/anthropic-sdk.js'));
+vi.mock('@anthropic-ai/vertex-sdk', () => import('./test-support/anthropic-vertex-sdk.js'));
+vi.mock('openai', () => import('./test-support/openai-sdk.js'));
+vi.mock('@google/genai', () => import('./test-support/google-genai.js'));
+vi.mock('node:child_process', () => import('./test-support/claude-child.js'));
 
-vi.mock('@anthropic-ai/sdk', () => ({
-  default: class {
-    messages = { stream: anthropicStream };
-  },
-}));
-vi.mock('@anthropic-ai/vertex-sdk', () => ({
-  AnthropicVertex: class {
-    messages = { stream: anthropicStream };
-  },
-}));
-vi.mock('openai', () => ({
-  default: class {
-    chat = { completions: { create: compatCreate } };
-    responses = { create: responsesCreate };
-  },
-}));
-vi.mock('@google/genai', () => ({
-  GoogleGenAI: class {
-    models = { generateContent };
-  },
-}));
-vi.mock('node:child_process', () => ({ spawn: (...a: unknown[]) => spawn(...a) }));
-
+import { anthropicStream, messageStream } from './test-support/anthropic-sdk.js';
+import { vertexStream } from './test-support/anthropic-vertex-sdk.js';
+import {
+  chatCompletionsCreate as compatCreate,
+  completion,
+  response,
+  responsesCreate,
+  toolCall,
+} from './test-support/openai-sdk.js';
+import { generateContent, geminiReply } from './test-support/google-genai.js';
+import { fakeClaudeChild, spawn } from './test-support/claude-child.js';
 import * as anthropic from './anthropic/index.js';
 import * as vertex from './vertex/index.js';
 import * as claudeCli from './claude-cli/index.js';
@@ -59,57 +46,59 @@ const TOOL: ToolDef = {
 };
 const USAGE = { input_tokens: 1, output_tokens: 1 };
 
+/** `/anthropic` and `/vertex` answer with the same message. */
 function anthropicReply(r: Reply) {
   const content = [
     ...(r.text === false ? [] : [{ type: 'text', text: 'ok' }]),
     ...(r.calls ? [{ type: 'tool_use', id: 't1', name: 'lookup', input: {} }] : []),
   ];
-  const message = { id: 'msg', model: 'm', content, stop_reason: r.word, usage: USAGE };
-  anthropicStream.mockReturnValue({ on: () => {}, finalMessage: async () => message });
+  const meta = { id: 'msg', model: 'm' };
+  for (const stream of [anthropicStream, vertexStream]) {
+    stream.mockReturnValue(messageStream(content, r.word, USAGE, meta));
+  }
 }
 
 function compatReply(r: Reply) {
-  const tool_calls = r.calls
-    ? [{ id: 't1', type: 'function', function: { name: 'lookup', arguments: '{}' } }]
-    : undefined;
-  compatCreate.mockResolvedValue({
-    id: 'c',
-    model: 'm',
-    choices: [
-      { message: { content: r.text === false ? '' : 'ok', tool_calls }, finish_reason: r.word },
-    ],
-    usage: { prompt_tokens: 1, completion_tokens: 1 },
-  });
+  compatCreate.mockResolvedValue(
+    completion({
+      id: 'c',
+      model: 'm',
+      content: r.text === false ? '' : 'ok',
+      toolCalls: r.calls ? [toolCall('lookup', '{}', 't1')] : undefined,
+      finishReason: r.word,
+      usage: { prompt_tokens: 1, completion_tokens: 1 },
+    })
+  );
 }
 
 function responsesReply(r: Reply) {
-  responsesCreate.mockResolvedValue({
-    id: 'resp',
-    model: 'm',
-    output_text: r.text === false ? '' : 'ok',
-    status: r.word,
-    incomplete_details: r.reason === undefined ? null : { reason: r.reason },
-    usage: { input_tokens: 1, output_tokens: 1 },
-  });
+  responsesCreate.mockResolvedValue(
+    response({
+      id: 'resp',
+      model: 'm',
+      outputText: r.text === false ? '' : 'ok',
+      status: r.word,
+      incompleteDetails: r.reason === undefined ? null : { reason: r.reason },
+      usage: { input_tokens: 1, output_tokens: 1 },
+    })
+  );
 }
 
 function googleReply(r: Reply) {
-  generateContent.mockResolvedValue({
-    text: r.text === false ? '' : 'ok',
-    candidates: [{ finishReason: r.word, content: { role: 'model', parts: [] } }],
-    functionCalls: r.calls ? [{ name: 'lookup', args: {} }] : undefined,
-    usageMetadata: {},
-  });
+  generateContent.mockResolvedValue(
+    geminiReply({
+      text: r.text === false ? '' : 'ok',
+      finishReason: r.word,
+      parts: [],
+      functionCalls: r.calls ? [{ name: 'lookup', args: {} }] : undefined,
+      usage: {},
+    })
+  );
 }
 
 function cliReply(r: Reply) {
   spawn.mockImplementation((_cmd: string, args: string[]) => {
-    const child = Object.assign(new EventEmitter(), {
-      stdout: new EventEmitter(),
-      stderr: new EventEmitter(),
-      stdin: { write: () => {}, end: () => {}, on: () => {} },
-      kill: () => {},
-    });
+    const { child } = fakeClaudeChild();
     const out = args.includes('--version')
       ? '2.1.0 (Claude Code)'
       : [

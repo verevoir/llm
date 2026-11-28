@@ -1,45 +1,13 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-// Mock the Anthropic SDK before importing the adapter, so we can
-// inspect the request payloads passed to `messages.stream` and assert
-// where cache_control breakpoints land.
-const mockStream = vi.fn();
-const mockClientCtor = vi.fn();
+vi.mock('@anthropic-ai/sdk', () => import('../test-support/anthropic-sdk.js'));
 
-vi.mock('@anthropic-ai/sdk', () => ({
-  default: class Anthropic {
-    messages = { stream: mockStream };
-    constructor(opts: unknown) {
-      mockClientCtor(opts);
-    }
-  },
-}));
-
+import {
+  anthropicStream as mockStream,
+  anthropicCtor as mockClientCtor,
+  messageStream,
+} from '../test-support/anthropic-sdk.js';
 import { chat, chatWithToolLoop } from './index.js';
-
-interface FakeBlock {
-  type: string;
-  text?: string;
-  id?: string;
-  name?: string;
-  input?: Record<string, unknown>;
-}
-
-function fakeStream(blocks: FakeBlock[], stopReason: string) {
-  return {
-    on: () => {},
-    finalMessage: async () => ({
-      content: blocks,
-      stop_reason: stopReason,
-      usage: {
-        input_tokens: 0,
-        output_tokens: 0,
-        cache_creation_input_tokens: 0,
-        cache_read_input_tokens: 0,
-      },
-    }),
-  };
-}
 
 const EPHEMERAL = { type: 'ephemeral' };
 
@@ -64,7 +32,7 @@ describe('anthropic prompt caching — breakpoint placement', () => {
   });
 
   it('chat() caches the system/tools prefix but not the (varying) final user message', async () => {
-    mockStream.mockReturnValue(fakeStream([{ type: 'text', text: 'hi back' }], 'end_turn'));
+    mockStream.mockReturnValue(messageStream([{ type: 'text', text: 'hi back' }], 'end_turn'));
 
     await chat({
       systemPrompt: 'You are helpful.',
@@ -83,9 +51,9 @@ describe('anthropic prompt caching — breakpoint placement', () => {
   it('chatWithToolLoop() breakpoints the system prefix and the last message on every iteration', async () => {
     mockStream
       .mockReturnValueOnce(
-        fakeStream([{ type: 'tool_use', id: 'u1', name: 'noop', input: {} }], 'tool_use')
+        messageStream([{ type: 'tool_use', id: 'u1', name: 'noop', input: {} }], 'tool_use')
       )
-      .mockReturnValueOnce(fakeStream([{ type: 'text', text: 'done' }], 'end_turn'));
+      .mockReturnValueOnce(messageStream([{ type: 'text', text: 'done' }], 'end_turn'));
 
     await chatWithToolLoop({
       systemPrompt: 'You are helpful.',

@@ -7,14 +7,9 @@ import {
 } from '@opentelemetry/sdk-trace-base';
 
 // Mock the openai SDK so usage tests run with canned responses (no network).
-const { chatCreateMock } = vi.hoisted(() => ({ chatCreateMock: vi.fn() }));
-vi.mock('openai', () => ({
-  default: class {
-    chat = { completions: { create: chatCreateMock } };
-    constructor(_opts: unknown) {}
-  },
-}));
+vi.mock('openai', () => import('./test-support/openai-sdk.js'));
 
+import { chatCompletionsCreate as chatCreateMock } from './test-support/openai-sdk.js';
 import { createOpenAICompatAdapter } from './openai-compat.js';
 import {
   classifyLlmError,

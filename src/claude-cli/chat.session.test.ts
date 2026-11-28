@@ -1,5 +1,4 @@
 import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from 'vitest';
-import { EventEmitter } from 'node:events';
 
 // This file tests wave 3's WIRING — chatOnSession, chat()'s session
 // branch, chatWithTools's refusal, and chatWithToolLoop — not
@@ -28,11 +27,9 @@ vi.mock('./session.js', () => ({
 // fallback — chatOnSession/chatWithToolLoop both call it, exactly as
 // the single-shot chat() path does. runSessionTurn itself is mocked
 // above, so session.ts's own spawn logic never runs.
-const mockSpawn = vi.fn();
-vi.mock('node:child_process', () => ({
-  spawn: (...args: unknown[]) => mockSpawn(...args),
-}));
+vi.mock('node:child_process', () => import('../test-support/claude-child.js'));
 
+import { spawn as mockSpawn, queueClaudeOutput } from '../test-support/claude-child.js';
 import {
   chat,
   chatWithTools,
@@ -55,44 +52,12 @@ import {
   ATTR_VEREVOIR_SESSION_ID,
 } from '../otel.js';
 
-function fakeVersionChild() {
-  const child = new EventEmitter() as EventEmitter & {
-    stdout: EventEmitter;
-    stderr: EventEmitter;
-    stdin: {
-      write: (s: string) => void;
-      end: () => void;
-      on: (event: string, listener: (...args: unknown[]) => void) => void;
-    };
-    kill: () => void;
-  };
-  child.stdout = new EventEmitter();
-  child.stderr = new EventEmitter();
-  child.kill = vi.fn();
-  // #289: the real adapter now registers an 'error' listener on
-  // `child.stdin` (EPIPE handling) — this fake must have an `.on` or the
-  // version spawn this file drives through resolveCliVersion() throws
-  // synchronously inside runClaudeCli's Promise executor, which the
-  // Promise constructor turns into a silent rejection, caught by
-  // resolveCliVersion()'s own try/catch and reported as `undefined` —
-  // exactly the failure this comment would otherwise leave unexplained.
-  child.stdin = { write: () => {}, end: () => {}, on: () => {} };
-  return child;
-}
-
 /** Queues one `claude --version` spawn response — needed every test,
  * since resolveCliVersion() is memoized process-wide and this file
  * resets that cache in beforeEach so each test's own assertions about
  * mockSpawn stay independent. */
 function queueVersionSpawn(version = '2.1.243 (Claude Code)') {
-  mockSpawn.mockImplementationOnce(() => {
-    const child = fakeVersionChild();
-    queueMicrotask(() => {
-      child.stdout.emit('data', Buffer.from(version + '\n'));
-      child.emit('close', 0, null);
-    });
-    return child;
-  });
+  queueClaudeOutput(version + '\n');
 }
 
 const ECHO_TOOL: ToolDef = {

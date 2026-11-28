@@ -20,13 +20,9 @@ import { tmpdir } from 'node:os';
 
 // Mock node:child_process's spawn before importing the adapter. Each test
 // configures the fake child process's stdout/stderr/exit behaviour.
-const mockSpawn = vi.fn();
+vi.mock('node:child_process', () => import('../test-support/claude-child.js'));
 
-vi.mock('node:child_process', () => ({
-  spawn: (...args: unknown[]) => mockSpawn(...args),
-}));
-
-// Import AFTER vi.mock so the mocked spawn is the one captured.
+import { spawn as mockSpawn, fakeClaudeChild as fakeChild } from '../test-support/claude-child.js';
 import {
   ALLOWED_ENV_VARS,
   allowedEnv,
@@ -36,44 +32,6 @@ import {
   resetClaudeCliVersionCacheForTests,
 } from './index.js';
 import { setModelSpanSink, type ModelSpan, type TokenUsage } from '../index.js';
-
-/** A fake child process: stdout/stderr are EventEmitters (matching the
- * real Readable stream .on('data', ...) shape this adapter reads), stdin
- * is a stub write()/end(), `kill` is a stub so abort tests can assert the
- * subprocess was actually asked to terminate, and the child itself is an
- * EventEmitter for 'error'/'close'. */
-function fakeChild() {
-  const child = new EventEmitter() as EventEmitter & {
-    stdout: EventEmitter;
-    stderr: EventEmitter;
-    stdin: {
-      write: (s: string) => void;
-      end: () => void;
-      on: (event: string, listener: (...args: unknown[]) => void) => void;
-    };
-    kill: () => void;
-  };
-  child.stdout = new EventEmitter();
-  child.stderr = new EventEmitter();
-  child.kill = vi.fn();
-  const written: string[] = [];
-  child.stdin = {
-    write: (s: string) => {
-      written.push(s);
-    },
-    end: () => {
-      // Emit close on the next tick, after stdout/stderr data + this test's
-      // own close() call have had a chance to be scheduled synchronously.
-    },
-    // #289: real `child.stdin` is its own stream/EventEmitter — the real
-    // adapter now registers an 'error' listener on it (EPIPE handling).
-    // A no-op here matches the real shape closely enough for every test
-    // in this file, none of which drives a stdin-level error directly
-    // (that is chat.epipe.test.ts's job, against a REAL subprocess).
-    on: () => {},
-  };
-  return { child, written };
-}
 
 // ── stream-json fixture helpers ──────────────────────────────────────────
 // The real CLI's stdout, in --output-format stream-json, is one JSON

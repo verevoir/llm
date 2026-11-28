@@ -8,19 +8,13 @@ import {
 
 // Mock the OpenAI SDK before importing the adapter. DeepSeek speaks the
 // Chat Completions API, so the fake exposes `chat.completions.create`.
-const mockCreate = vi.fn();
-const mockClientCtor = vi.fn();
+vi.mock('openai', () => import('../test-support/openai-sdk.js'));
 
-vi.mock('openai', () => ({
-  default: class OpenAI {
-    chat = { completions: { create: mockCreate } };
-    constructor(opts: unknown) {
-      mockClientCtor(opts);
-    }
-  },
-}));
-
-// Import AFTER vi.mock so the mocked constructor is the one captured.
+import {
+  chatCompletionsCreate as mockCreate,
+  openaiCtor as mockClientCtor,
+  completion,
+} from '../test-support/openai-sdk.js';
 import { chat } from './index.js';
 import {
   classifyLlmError,
@@ -32,22 +26,12 @@ import {
   type TokenUsage,
 } from '../index.js';
 
-interface FakeUsage {
-  prompt_tokens: number;
-  completion_tokens: number;
-  prompt_cache_hit_tokens?: number;
-}
-
-function fakeResponse(
+/** A text reply: no `tool_calls`, finishing on `stop` with no tokens unless given. */
+const fakeResponse = (
   content: string,
-  finish_reason: string = 'stop',
-  usage: FakeUsage = { prompt_tokens: 0, completion_tokens: 0 }
-) {
-  return {
-    choices: [{ message: { content }, finish_reason }],
-    usage,
-  };
-}
+  finishReason = 'stop',
+  usage: Record<string, unknown> = { prompt_tokens: 0, completion_tokens: 0 }
+) => completion({ content, finishReason, usage });
 
 describe('deepseek.chat — providerRequestId (#70 honesty fix)', () => {
   beforeEach(() => {

@@ -7,14 +7,13 @@ import {
 } from '@opentelemetry/sdk-trace-base';
 
 // Mock the openai SDK so the tool loop runs with canned completions (no network).
-const { createMock } = vi.hoisted(() => ({ createMock: vi.fn() }));
-vi.mock('openai', () => ({
-  default: class {
-    chat = { completions: { create: createMock } };
-    constructor(_opts: unknown) {}
-  },
-}));
+vi.mock('openai', () => import('./test-support/openai-sdk.js'));
 
+import {
+  chatCompletionsCreate as createMock,
+  textCompletion,
+  toolCallCompletion,
+} from './test-support/openai-sdk.js';
 import { createOpenAICompatAdapter } from './openai-compat.js';
 import {
   setModelSpanSink,
@@ -60,28 +59,8 @@ const TOOL = {
   input_schema: { type: 'object' as const, properties: { x: { type: 'number' } } },
 };
 
-function toolCallReply(args: string) {
-  return {
-    choices: [
-      {
-        message: {
-          content: '',
-          tool_calls: [
-            { id: 'c1', type: 'function', function: { name: 'record', arguments: args } },
-          ],
-        },
-        finish_reason: 'tool_calls',
-      },
-    ],
-    usage: { prompt_tokens: 10, completion_tokens: 5 },
-  };
-}
-function textReply(text: string) {
-  return {
-    choices: [{ message: { content: text, tool_calls: [] }, finish_reason: 'stop' }],
-    usage: { prompt_tokens: 12, completion_tokens: 3 },
-  };
-}
+/** The loop's final text reply reports 3 output tokens. */
+const TEXT_USAGE = { prompt_tokens: 12, completion_tokens: 3 };
 
 beforeEach(() => {
   createMock.mockReset();
@@ -91,7 +70,7 @@ afterEach(() => setModelSpanSink(null));
 
 describe('openai-compat tool calling', () => {
   it('chatWithTools surfaces the model tool calls (single-shot, parsed args)', async () => {
-    createMock.mockResolvedValueOnce(toolCallReply('{"x":1}'));
+    createMock.mockResolvedValueOnce(toolCallCompletion('record', '{"x":1}'));
     const r = await a.chatWithTools({
       systemPrompt: 's',
       turns: [{ role: 'user', content: 'go' }],
@@ -106,8 +85,8 @@ describe('openai-compat tool calling', () => {
 
   it('chatWithToolLoop executes tools, feeds results back, and returns the tool-free reply', async () => {
     createMock
-      .mockResolvedValueOnce(toolCallReply('{"x":1}'))
-      .mockResolvedValueOnce(textReply('all done'));
+      .mockResolvedValueOnce(toolCallCompletion('record', '{"x":1}'))
+      .mockResolvedValueOnce(textCompletion('all done', TEXT_USAGE));
     const executor = vi.fn(async () => 'recorded');
     const r = await a.chatWithToolLoop({
       systemPrompt: 's',
@@ -136,7 +115,9 @@ describe('openai-compat tool calling', () => {
   });
 
   it('surfaces an executor failure as an error tool result and lets the model recover', async () => {
-    createMock.mockResolvedValueOnce(toolCallReply('{}')).mockResolvedValueOnce(textReply('ok'));
+    createMock
+      .mockResolvedValueOnce(toolCallCompletion('record', '{}'))
+      .mockResolvedValueOnce(textCompletion('ok', TEXT_USAGE));
     const executor = vi.fn(async () => {
       throw new Error('boom');
     });
@@ -152,7 +133,7 @@ describe('openai-compat tool calling', () => {
   });
 
   it('chatWithTools emits a model span scoped with the factory config provider name', async () => {
-    createMock.mockResolvedValueOnce(toolCallReply('{"x":1}'));
+    createMock.mockResolvedValueOnce(toolCallCompletion('record', '{"x":1}'));
     const spans: ModelSpan[] = [];
     setModelSpanSink((s) => spans.push(s));
 
@@ -174,8 +155,8 @@ describe('openai-compat tool calling', () => {
 
   it('chatWithToolLoop emits one span per iteration, scoped with the factory config provider name', async () => {
     createMock
-      .mockResolvedValueOnce(toolCallReply('{"x":1}'))
-      .mockResolvedValueOnce(textReply('all done'));
+      .mockResolvedValueOnce(toolCallCompletion('record', '{"x":1}'))
+      .mockResolvedValueOnce(textCompletion('all done', TEXT_USAGE));
     const spans: ModelSpan[] = [];
     setModelSpanSink((s) => spans.push(s));
 
@@ -198,9 +179,9 @@ describe('openai-compat tool calling', () => {
 
   it('chatWithTools and chatWithToolLoop: the span says the config spanProvider; the usage and the sink say its provider', async () => {
     createMock
-      .mockResolvedValueOnce(toolCallReply('{"x":1}'))
-      .mockResolvedValueOnce(toolCallReply('{"x":1}'))
-      .mockResolvedValueOnce(textReply('all done'));
+      .mockResolvedValueOnce(toolCallCompletion('record', '{"x":1}'))
+      .mockResolvedValueOnce(toolCallCompletion('record', '{"x":1}'))
+      .mockResolvedValueOnce(textCompletion('all done', TEXT_USAGE));
     const sunk: ModelSpan[] = [];
     setModelSpanSink((s) => sunk.push(s));
     const base = { systemPrompt: 's', turns: [{ role: 'user' as const, content: 'go' }] };
@@ -228,9 +209,9 @@ describe('openai-compat tool calling', () => {
     // 2 tool-calling iterations exhaust the cap; the 3rd create() is the
     // forced no-tools finalise.
     createMock
-      .mockResolvedValueOnce(toolCallReply('{}'))
-      .mockResolvedValueOnce(toolCallReply('{}'))
-      .mockResolvedValueOnce(textReply('finished work'));
+      .mockResolvedValueOnce(toolCallCompletion('record', '{}'))
+      .mockResolvedValueOnce(toolCallCompletion('record', '{}'))
+      .mockResolvedValueOnce(textCompletion('finished work', TEXT_USAGE));
     const executor = vi.fn(async () => 'r');
     const r = await a.chatWithToolLoop({
       systemPrompt: 's',
@@ -253,8 +234,8 @@ describe('openai-compat tool calling', () => {
 
   it('degrades to empty text (never throws) when the finalise call fails', async () => {
     createMock
-      .mockResolvedValueOnce(toolCallReply('{}'))
-      .mockResolvedValueOnce(toolCallReply('{}'))
+      .mockResolvedValueOnce(toolCallCompletion('record', '{}'))
+      .mockResolvedValueOnce(toolCallCompletion('record', '{}'))
       .mockRejectedValueOnce(new Error('finalise boom'));
     const r = await a.chatWithToolLoop({
       systemPrompt: 's',
@@ -271,8 +252,8 @@ describe('openai-compat tool calling', () => {
 
   it('an executor returning an unsupported image block becomes a named is_error tool result, not a crash', async () => {
     createMock
-      .mockResolvedValueOnce(toolCallReply('{"x":1}'))
-      .mockResolvedValueOnce(textReply('ok'));
+      .mockResolvedValueOnce(toolCallCompletion('record', '{"x":1}'))
+      .mockResolvedValueOnce(textCompletion('ok', TEXT_USAGE));
     const executor = vi.fn(async (): Promise<ContentBlock[]> => [
       { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'abc' } },
     ]);

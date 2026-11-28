@@ -11,29 +11,18 @@ import {
 // the client this route builds; the direct SDK's mock is here to hold that this
 // route never builds one, and to compare the two routes' requests. No test in
 // this file reaches a network or needs a Google credential.
-const vertexStream = vi.fn();
-const vertexCtor = vi.fn();
-const directStream = vi.fn();
-const directCtor = vi.fn();
+vi.mock('@anthropic-ai/vertex-sdk', () => import('../test-support/anthropic-vertex-sdk.js'));
+vi.mock('@anthropic-ai/sdk', () => import('../test-support/anthropic-sdk.js'));
 
-vi.mock('@anthropic-ai/vertex-sdk', () => ({
-  AnthropicVertex: class AnthropicVertex {
-    messages = { stream: vertexStream };
-    constructor(opts: unknown) {
-      vertexCtor(opts);
-    }
-  },
-}));
-
-vi.mock('@anthropic-ai/sdk', () => ({
-  default: class Anthropic {
-    messages = { stream: directStream };
-    constructor(opts: unknown) {
-      directCtor(opts);
-    }
-  },
-}));
-
+import { vertexStream, vertexCtor } from '../test-support/anthropic-vertex-sdk.js';
+import {
+  ANTHROPIC_ZERO_USAGE as ZERO_USAGE,
+  anthropicCtor as directCtor,
+  anthropicStream as directStream,
+  failingStream,
+  messageStream,
+  type AnthropicBlock,
+} from '../test-support/anthropic-sdk.js';
 import { PROVIDER, chat, chatWithTools, chatWithToolLoop, vertex } from './index.js';
 import { resetClientForTests } from './client.js';
 import * as direct from '../anthropic/index.js';
@@ -50,33 +39,14 @@ import {
 import { createPriceBook } from '../pricing.js';
 import { ATTR_GEN_AI_PROVIDER_NAME } from '../otel.js';
 
-type FakeBlock = Record<string, unknown>;
-
-const ZERO_USAGE = {
-  input_tokens: 0,
-  output_tokens: 0,
-  cache_creation_input_tokens: 0,
-  cache_read_input_tokens: 0,
-};
-
-function fakeStream(
-  blocks: FakeBlock[],
+/** A stream whose message carries an `id` and a `model`, as the span reads both. */
+const answeredStream = (
+  blocks: AnthropicBlock[],
   stopReason: string,
   usage: Record<string, unknown> = ZERO_USAGE
-) {
-  return {
-    on: () => {},
-    finalMessage: async () => ({
-      id: 'msg_1',
-      model: 'answered-model',
-      content: blocks,
-      stop_reason: stopReason,
-      usage,
-    }),
-  };
-}
+) => messageStream(blocks, stopReason, usage, { id: 'msg_1', model: 'answered-model' });
 
-const text = (t = 'ok') => fakeStream([{ type: 'text', text: t }], 'end_turn');
+const text = (t = 'ok') => answeredStream([{ type: 'text', text: t }], 'end_turn');
 
 const TOOL: ToolDef = {
   name: 'lookup',
@@ -248,9 +218,12 @@ describe('@verevoir/llm/vertex — sends what the direct adapter sends', () => {
   // each scripted with the same replies. Every request must match exactly:
   // there is one request builder and one tool loop.
   const toolTurn = () =>
-    fakeStream([{ type: 'tool_use', id: 'tu_1', name: 'lookup', input: { q: 'x' } }], 'tool_use');
+    answeredStream(
+      [{ type: 'tool_use', id: 'tu_1', name: 'lookup', input: { q: 'x' } }],
+      'tool_use'
+    );
   const progressTurn = () =>
-    fakeStream(
+    answeredStream(
       [{ type: 'tool_use', id: 'tu_p', name: 'report_progress', input: { percent: 50 } }],
       'tool_use'
     );
@@ -403,7 +376,9 @@ describe('@verevoir/llm/vertex — OpenTelemetry span', () => {
   it.each(ROUTES)(
     '$route: the span input is input + cache read + cache write, the cache counts under the conventions’ names, the verevoir.llm.* attributes kept and no verevoir.llm.* name for the cache counts',
     async ({ stream, call }) => {
-      stream.mockReturnValue(fakeStream([{ type: 'text', text: 'ok' }], 'end_turn', SPAN_USAGE));
+      stream.mockReturnValue(
+        answeredStream([{ type: 'text', text: 'ok' }], 'end_turn', SPAN_USAGE)
+      );
 
       await call(BASE);
 
@@ -425,7 +400,7 @@ describe('@verevoir/llm/vertex — OpenTelemetry span', () => {
     '$route: with no input_tokens the span input is left unset, not made from the cache counts',
     async ({ stream, call }) => {
       const { input_tokens: _omitted, ...noInput } = SPAN_USAGE;
-      stream.mockReturnValue(fakeStream([{ type: 'text', text: 'ok' }], 'end_turn', noInput));
+      stream.mockReturnValue(answeredStream([{ type: 'text', text: 'ok' }], 'end_turn', noInput));
 
       await call(BASE);
 
@@ -436,7 +411,9 @@ describe('@verevoir/llm/vertex — OpenTelemetry span', () => {
   it.each(ROUTES)(
     "$route: chat()'s returned counts and cost are the provider's own, whatever the span's input",
     async ({ stream, call }) => {
-      stream.mockReturnValue(fakeStream([{ type: 'text', text: 'ok' }], 'end_turn', SPAN_USAGE));
+      stream.mockReturnValue(
+        answeredStream([{ type: 'text', text: 'ok' }], 'end_turn', SPAN_USAGE)
+      );
       const book = createPriceBook({
         snapshot: {
           [models.reasoning]: {
@@ -490,7 +467,7 @@ describe('@verevoir/llm/vertex — usage', () => {
 
   it('reports tokens, cache writes and reads and the 5m/1h split, as provider vertex', async () => {
     vertexStream.mockReturnValue(
-      fakeStream([{ type: 'text', text: 'ok' }], 'end_turn', CACHE_USAGE)
+      answeredStream([{ type: 'text', text: 'ok' }], 'end_turn', CACHE_USAGE)
     );
     const hooked: TokenUsage[] = [];
     const spans: ModelSpan[] = [];
@@ -519,14 +496,14 @@ describe('@verevoir/llm/vertex — usage', () => {
 
   it('sums the tool loop, cache split included', async () => {
     vertexStream.mockReturnValueOnce(
-      fakeStream(
+      answeredStream(
         [{ type: 'tool_use', id: 'tu_1', name: 'lookup', input: {} }],
         'tool_use',
         CACHE_USAGE
       )
     );
     vertexStream.mockReturnValueOnce(
-      fakeStream([{ type: 'text', text: 'done' }], 'end_turn', CACHE_USAGE)
+      answeredStream([{ type: 'text', text: 'done' }], 'end_turn', CACHE_USAGE)
     );
 
     const result = await chatWithToolLoop({ ...BASE, tools: [TOOL], executor: async () => 'r' });
@@ -553,7 +530,7 @@ describe('@verevoir/llm/vertex — usage', () => {
       },
     });
     vertexStream.mockReturnValue(
-      fakeStream([{ type: 'text', text: 'ok' }], 'end_turn', { ...ZERO_USAGE, input_tokens: 5 })
+      answeredStream([{ type: 'text', text: 'ok' }], 'end_turn', { ...ZERO_USAGE, input_tokens: 5 })
     );
 
     const listed = await chat({ ...BASE, model: 'listed-model' });
@@ -576,7 +553,7 @@ describe('@verevoir/llm/vertex — failures', () => {
     [404, 'invalid-request'],
   ])('rejects with the SDK error itself on a %i, classified %s', async (status, kind) => {
     const thrown = withStatus(status);
-    vertexStream.mockReturnValue({ on: () => {}, finalMessage: () => Promise.reject(thrown) });
+    vertexStream.mockReturnValue(failingStream(thrown));
 
     const err = await chat(BASE).then(
       () => null,
@@ -592,7 +569,7 @@ describe('@verevoir/llm/vertex — failures', () => {
     process.env.ANTHROPIC_API_KEY = 'api-key-value';
     const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     const thrown = withStatus(401);
-    vertexStream.mockReturnValue({ on: () => {}, finalMessage: () => Promise.reject(thrown) });
+    vertexStream.mockReturnValue(failingStream(thrown));
 
     await expect(chat(BASE)).rejects.toBe(thrown);
 
@@ -611,7 +588,7 @@ describe('@verevoir/llm/vertex — failures', () => {
     vi.useFakeTimers();
     const thrown = withStatus(status);
     expect(classifyLlmError(thrown)).toEqual({ kind, retryable: true });
-    vertexStream.mockReturnValueOnce({ on: () => {}, finalMessage: () => Promise.reject(thrown) });
+    vertexStream.mockReturnValueOnce(failingStream(thrown));
     vertexStream.mockReturnValueOnce(text('after retry'));
     const onRetry = vi.fn(async () => {});
 
@@ -628,7 +605,7 @@ describe('@verevoir/llm/vertex — failures', () => {
     await expect(chat({ ...BASE, turns: [] })).rejects.toThrow(
       'vertex.chat() requires at least one turn'
     );
-    vertexStream.mockReturnValue(fakeStream([], 'end_turn'));
+    vertexStream.mockReturnValue(answeredStream([], 'end_turn'));
     const err = await chat(BASE).then(
       () => null,
       (e: unknown) => e

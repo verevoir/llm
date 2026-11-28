@@ -1,59 +1,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-// Mock the Anthropic SDK module before importing the adapter. Each
-// test sets up the fake `messages.stream` to return a controlled
-// sequence of stop reasons + content blocks, simulating the model's
-// tool-call decisions across loop iterations.
-const mockStream = vi.fn();
-const mockClientCtor = vi.fn();
+vi.mock('@anthropic-ai/sdk', () => import('../test-support/anthropic-sdk.js'));
 
-vi.mock('@anthropic-ai/sdk', () => ({
-  default: class Anthropic {
-    messages = { stream: mockStream };
-    constructor(opts: unknown) {
-      mockClientCtor(opts);
-    }
-  },
-}));
-
-// Import AFTER vi.mock so the mocked constructor is the one captured.
+import {
+  anthropicStream as mockStream,
+  anthropicCtor as mockClientCtor,
+  messageStream,
+} from '../test-support/anthropic-sdk.js';
 import { chatWithToolLoop } from './index.js';
 import { setModelSpanSink, type ModelSpan } from '../index.js';
-
-interface FakeUsage {
-  input_tokens: number;
-  output_tokens: number;
-  cache_creation_input_tokens: number;
-  cache_read_input_tokens: number;
-}
-
-interface FakeContentBlock {
-  type: string;
-  text?: string;
-  id?: string;
-  name?: string;
-  input?: Record<string, unknown>;
-}
-
-function fakeStream(
-  blocks: FakeContentBlock[],
-  stopReason: string,
-  usage: FakeUsage = {
-    input_tokens: 0,
-    output_tokens: 0,
-    cache_creation_input_tokens: 0,
-    cache_read_input_tokens: 0,
-  }
-) {
-  return {
-    on: () => {},
-    finalMessage: async () => ({
-      content: blocks,
-      stop_reason: stopReason,
-      usage,
-    }),
-  };
-}
 
 describe('chatWithToolLoop', () => {
   beforeEach(() => {
@@ -65,7 +20,7 @@ describe('chatWithToolLoop', () => {
 
   it('returns immediately when the first response is text-only', async () => {
     mockStream.mockReturnValue(
-      fakeStream([{ type: 'text', text: 'Hello' }], 'end_turn', {
+      messageStream([{ type: 'text', text: 'Hello' }], 'end_turn', {
         input_tokens: 10,
         output_tokens: 5,
         cache_creation_input_tokens: 0,
@@ -100,7 +55,7 @@ describe('chatWithToolLoop', () => {
   it('runs a tool then a follow-up call, summing usage across iterations', async () => {
     mockStream
       .mockReturnValueOnce(
-        fakeStream(
+        messageStream(
           [
             { type: 'text', text: 'Let me check' },
             {
@@ -120,7 +75,7 @@ describe('chatWithToolLoop', () => {
         )
       )
       .mockReturnValueOnce(
-        fakeStream([{ type: 'text', text: 'Found 3 issues' }], 'end_turn', {
+        messageStream([{ type: 'text', text: 'Found 3 issues' }], 'end_turn', {
           input_tokens: 20,
           output_tokens: 10,
           cache_creation_input_tokens: 0,
@@ -159,7 +114,7 @@ describe('chatWithToolLoop', () => {
   });
 
   const toolUseNoop = (id: string) =>
-    fakeStream([{ type: 'tool_use', id, name: 'noop', input: {} }], 'tool_use', {
+    messageStream([{ type: 'tool_use', id, name: 'noop', input: {} }], 'tool_use', {
       input_tokens: 1,
       output_tokens: 1,
       cache_creation_input_tokens: 0,
@@ -174,7 +129,7 @@ describe('chatWithToolLoop', () => {
       .mockReturnValueOnce(toolUseNoop('u2'))
       .mockReturnValueOnce(toolUseNoop('u3'))
       .mockReturnValueOnce(
-        fakeStream([{ type: 'text', text: 'Here is the finished work.' }], 'end_turn', {
+        messageStream([{ type: 'text', text: 'Here is the finished work.' }], 'end_turn', {
           input_tokens: 5,
           output_tokens: 7,
           cache_creation_input_tokens: 0,
@@ -232,10 +187,10 @@ describe('chatWithToolLoop', () => {
   it('surfaces executor errors back to the model as is_error tool_results', async () => {
     mockStream
       .mockReturnValueOnce(
-        fakeStream([{ type: 'tool_use', id: 'u1', name: 'flaky', input: {} }], 'tool_use')
+        messageStream([{ type: 'tool_use', id: 'u1', name: 'flaky', input: {} }], 'tool_use')
       )
       .mockReturnValueOnce(
-        fakeStream([{ type: 'text', text: 'Sorry, the tool failed.' }], 'end_turn')
+        messageStream([{ type: 'text', text: 'Sorry, the tool failed.' }], 'end_turn')
       );
 
     const result = await chatWithToolLoop({
@@ -263,9 +218,9 @@ describe('chatWithToolLoop', () => {
   it('fires onIteration once per loop iteration', async () => {
     mockStream
       .mockReturnValueOnce(
-        fakeStream([{ type: 'tool_use', id: 'u1', name: 'noop', input: {} }], 'tool_use')
+        messageStream([{ type: 'tool_use', id: 'u1', name: 'noop', input: {} }], 'tool_use')
       )
-      .mockReturnValueOnce(fakeStream([{ type: 'text', text: 'done' }], 'end_turn'));
+      .mockReturnValueOnce(messageStream([{ type: 'text', text: 'done' }], 'end_turn'));
 
     const onIteration = vi.fn<(info: { iteration: number; stopReason: string }) => Promise<void>>(
       async () => {}
@@ -300,7 +255,7 @@ describe('chatWithToolLoop', () => {
   it('emits one model span per iteration with scope anthropic.chatWithToolLoop', async () => {
     mockStream
       .mockReturnValueOnce(
-        fakeStream([{ type: 'tool_use', id: 'u1', name: 'noop', input: {} }], 'tool_use', {
+        messageStream([{ type: 'tool_use', id: 'u1', name: 'noop', input: {} }], 'tool_use', {
           input_tokens: 10,
           output_tokens: 5,
           cache_creation_input_tokens: 0,
@@ -308,7 +263,7 @@ describe('chatWithToolLoop', () => {
         })
       )
       .mockReturnValueOnce(
-        fakeStream([{ type: 'text', text: 'done' }], 'end_turn', {
+        messageStream([{ type: 'text', text: 'done' }], 'end_turn', {
           input_tokens: 20,
           output_tokens: 10,
           cache_creation_input_tokens: 0,
@@ -343,12 +298,12 @@ describe('chatWithToolLoop', () => {
 
   it('sends the pinned model id on every iteration, including the no-tools finalise call', async () => {
     const toolUseNoop2 = (id: string) =>
-      fakeStream([{ type: 'tool_use', id, name: 'noop', input: {} }], 'tool_use');
+      messageStream([{ type: 'tool_use', id, name: 'noop', input: {} }], 'tool_use');
     mockStream
       .mockReturnValueOnce(toolUseNoop2('u1'))
       .mockReturnValueOnce(toolUseNoop2('u2'))
       .mockReturnValueOnce(toolUseNoop2('u3'))
-      .mockReturnValueOnce(fakeStream([{ type: 'text', text: 'done' }], 'end_turn'));
+      .mockReturnValueOnce(messageStream([{ type: 'text', text: 'done' }], 'end_turn'));
 
     const result = await chatWithToolLoop({
       systemPrompt: 's',
@@ -430,14 +385,14 @@ describe('chatWithToolLoop', () => {
     // consumed, because onUsage aborts after the first iteration.
     mockStream
       .mockReturnValueOnce(
-        fakeStream([{ type: 'tool_use', id: 'u1', name: 'noop', input: {} }], 'tool_use', {
+        messageStream([{ type: 'tool_use', id: 'u1', name: 'noop', input: {} }], 'tool_use', {
           input_tokens: 1000,
           output_tokens: 1,
           cache_creation_input_tokens: 0,
           cache_read_input_tokens: 0,
         })
       )
-      .mockReturnValueOnce(fakeStream([{ type: 'text', text: 'never' }], 'end_turn'));
+      .mockReturnValueOnce(messageStream([{ type: 'text', text: 'never' }], 'end_turn'));
 
     const controller = new AbortController();
     const reason = new Error('mid-loop budget exceeded');
