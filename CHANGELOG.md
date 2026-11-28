@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.47.1] — 2026-11-28
 
 **The `/claude-cli` idle-timeout tests take one silent child where they took four, and the clearing of the idle timer after a prompt completion is now under test.** Only `src/claude-cli/chat.idle-timeout.test.ts` changes; no behaviour of the library changes. That file runs in about 5 s, down from about 13 s, and with it the whole suite.
 
